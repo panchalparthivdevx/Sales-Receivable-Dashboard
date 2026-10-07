@@ -1,0 +1,46 @@
+.env
+node_modules/
+dist/
+build/
+
+# Compliance Dashboard — confidential documents, runtime data and automatic backups
+compliance_storage/
+server/compliance/data/
+server/compliance/backups/
+
+# Secrets — login accounts and the live Zoho access token
+server/users.json
+server/.token_cache.json
+
+# Runtime caches — rebuilt automatically from Zoho on every sync
+server/sync_data/
+server/pocm_disk_cache/
+server/pl_fy_cache/
+
+# Uploaded documents (confidential)
+server/vendor-uploads/
+server/portal-uploads/
+
+# Company documents and data — stay on this PC, never in git (deployed data lives in Neon)
+Client Agreements/
+TDS Dashboard/
+Compliance & Payroll/
+Loan Module/
+GST/
+MSME/
+/*.xlsx
+/*.pdf
+Self Client Generated Code*.txt
+server/*.json
+server/fpa/*.json
+server/branch_bills_cache/
+server/pocm_snapshots/
+
+# Old build copy (the app serves client/build), OCR language cache, logs
+server/public/
+*.traineddata
+*.log
+server_log.txt
+
+# Personal Claude Code settings
+.claude/settings.local.json

@@ -1,0 +1,1012 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>CRM Expense Submission</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"/>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:        #0d1117;
+    --surface:   #161b22;
+    --surface2:  #1c2330;
+    --border:    #30363d;
+    --border2:   #21262d;
+    --text:      #e6edf3;
+    --muted:     #7d8590;
+    --accent:    #2ea043;
+    --accent2:   #238636;
+    --accent-dim:#0d3a1a;
+    --accent-text:#56d364;
+    --warn:      #f0883e;
+    --warn-dim:  #3d1f00;
+    --info:      #388bfd;
+    --info-dim:  #0c2042;
+    --red:       #f85149;
+    --red-dim:   #3d0c0a;
+    --input-bg:  #0d1117;
+    --badge-bg:  #1f2937;
+  }
+
+  body {
+    font-family: 'Inter', system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 24px 16px 60px;
+  }
+
+  /* ── Header ── */
+  header {
+    width: 100%;
+    max-width: 740px;
+    padding: 28px 0 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .logo-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 8px;
+  }
+  .logo-icon {
+    width: 34px; height: 34px;
+    background: linear-gradient(135deg, var(--accent) 0%, #1a7f37 100%);
+    border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 17px;
+  }
+  .logo-text { font-size: 13px; font-weight: 600; color: var(--muted); letter-spacing: 0.08em; text-transform: uppercase; }
+  header h1 { font-size: 22px; font-weight: 700; color: var(--text); letter-spacing: -0.02em; }
+  header p  { font-size: 13px; color: var(--muted); line-height: 1.6; }
+
+  /* ── Card ── */
+  .card {
+    width: 100%; max-width: 740px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+    margin-bottom: 16px;
+  }
+  .card-header {
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border2);
+    display: flex; align-items: center; gap: 10px;
+  }
+  .card-header-icon {
+    width: 28px; height: 28px;
+    border-radius: 6px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 14px;
+    flex-shrink: 0;
+  }
+  .card-title { font-size: 13px; font-weight: 600; color: var(--text); }
+  .card-body  { padding: 20px; }
+
+  /* ── Meta row ── */
+  .meta-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 14px;
+  }
+  @media (max-width: 600px) { .meta-grid { grid-template-columns: 1fr; } }
+
+  label {
+    display: block;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    margin-bottom: 6px;
+  }
+  label span.req { color: var(--accent-text); margin-left: 2px; }
+
+  select, input[type="text"], input[type="number"], input[type="month"] {
+    width: 100%;
+    background: var(--input-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font-family: 'Inter', system-ui, sans-serif;
+    font-size: 13px;
+    padding: 9px 12px;
+    outline: none;
+    transition: border-color 0.15s, box-shadow 0.15s;
+    appearance: none;
+  }
+  select {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%237d8590' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+    padding-right: 32px;
+  }
+  select:focus, input:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(46,160,67,0.15);
+  }
+  select option { background: var(--surface2); }
+
+  /* ── Section separator ── */
+  .section-label {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 20px 0 14px;
+  }
+  .section-label-text {
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    white-space: nowrap;
+  }
+  .section-label::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: var(--border2);
+  }
+
+  /* ── Item row ── */
+  .item-row {
+    display: grid;
+    grid-template-columns: 220px 1fr;
+    align-items: start;
+    gap: 12px 16px;
+    padding: 12px 0;
+    border-bottom: 1px solid var(--border2);
+  }
+  .item-row:last-child { border-bottom: none; }
+  .item-label-wrap { display: flex; flex-direction: column; gap: 4px; padding-top: 8px; }
+  .item-name { font-size: 13px; font-weight: 500; color: var(--text); }
+  .item-hint { font-size: 11px; color: var(--muted); }
+  .item-inputs { display: flex; flex-direction: column; gap: 8px; }
+  .input-group { display: flex; flex-direction: column; }
+  .input-group label { margin-bottom: 4px; }
+  .sub-inputs { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  @media (max-width: 500px) {
+    .item-row { grid-template-columns: 1fr; }
+    .sub-inputs { grid-template-columns: 1fr; }
+  }
+
+  .input-prefix-wrap {
+    position: relative;
+  }
+  .input-prefix {
+    position: absolute;
+    left: 10px; top: 50%; transform: translateY(-50%);
+    font-size: 12px;
+    color: var(--muted);
+    pointer-events: none;
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .input-prefix-wrap input { padding-left: 24px; font-family: 'JetBrains Mono', monospace; font-size: 13px; }
+  .input-unit-wrap { position: relative; }
+  .input-unit {
+    position: absolute;
+    right: 10px; top: 50%; transform: translateY(-50%);
+    font-size: 11px; color: var(--muted); pointer-events: none;
+  }
+  .input-unit-wrap input { padding-right: 52px; }
+
+  /* ── Notice box ── */
+  .notice {
+    border-radius: 8px;
+    padding: 14px 16px;
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+  }
+  .notice.info  { background: var(--info-dim);  border: 1px solid rgba(56,139,253,0.3); }
+  .notice.warn  { background: var(--warn-dim);  border: 1px solid rgba(240,136,62,0.3); }
+  .notice-icon  { font-size: 16px; flex-shrink: 0; margin-top: 1px; }
+  .notice-text  { font-size: 12px; line-height: 1.6; color: var(--muted); }
+  .notice-text strong { color: var(--text); }
+
+  /* ── Buttons ── */
+  .btn-row {
+    display: flex;
+    gap: 10px;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    margin-top: 4px;
+  }
+  button {
+    font-family: 'Inter', system-ui, sans-serif;
+    font-size: 13px;
+    font-weight: 600;
+    border: none;
+    border-radius: 6px;
+    padding: 9px 20px;
+    cursor: pointer;
+    transition: opacity 0.15s, transform 0.1s;
+    display: flex; align-items: center; gap: 6px;
+  }
+  button:active { transform: scale(0.98); }
+  .btn-primary {
+    background: var(--accent2);
+    color: #fff;
+  }
+  .btn-primary:hover { background: #2ea043; }
+  .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+  .btn-secondary {
+    background: var(--surface2);
+    color: var(--text);
+    border: 1px solid var(--border);
+  }
+  .btn-secondary:hover { background: var(--border2); }
+
+  /* ── Toast ── */
+  #toast {
+    position: fixed;
+    bottom: 28px;
+    left: 50%;
+    transform: translateX(-50%) translateY(80px);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 20px;
+    font-size: 13px;
+    font-weight: 500;
+    display: flex; align-items: center; gap: 10px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+    transition: transform 0.3s cubic-bezier(0.34,1.56,0.64,1), opacity 0.3s;
+    opacity: 0;
+    z-index: 99;
+    max-width: 360px;
+    text-align: center;
+  }
+  #toast.show { transform: translateX(-50%) translateY(0); opacity: 1; }
+  #toast.success { border-color: var(--accent); color: var(--accent-text); }
+  #toast.error   { border-color: var(--red);    color: var(--red); }
+
+  /* ── Submitted badge ── */
+  .submitted-badge {
+    display: none;
+    align-items: center;
+    gap: 6px;
+    background: var(--accent-dim);
+    border: 1px solid rgba(46,160,67,0.4);
+    border-radius: 6px;
+    padding: 6px 12px;
+    font-size: 12px;
+    color: var(--accent-text);
+  }
+  .submitted-badge.show { display: flex; }
+
+  /* ── Spinner ── */
+  .spinner {
+    width: 14px; height: 14px;
+    border: 2px solid rgba(255,255,255,0.3);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    display: none;
+  }
+  .btn-primary.loading .spinner { display: block; }
+  .btn-primary.loading .btn-label { opacity: 0.4; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ── Number inputs ── */
+  input[type="number"]::-webkit-inner-spin-button,
+  input[type="number"]::-webkit-outer-spin-button { opacity: 1; }
+
+  /* ── File upload ── */
+  .file-zone {
+    margin-top: 8px;
+    border: 1.5px dashed var(--border);
+    border-radius: 6px;
+    padding: 10px 12px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+    background: var(--input-bg);
+    position: relative;
+  }
+  .file-zone:hover { border-color: var(--accent); background: var(--accent-dim); }
+  .file-zone.has-file { border-color: var(--accent); background: var(--accent-dim); }
+  .file-zone.uploading { border-color: var(--info); background: var(--info-dim); }
+  .file-zone.uploaded  { border-color: var(--accent); background: var(--accent-dim); }
+  .file-zone input[type="file"] {
+    position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%;
+  }
+  .file-icon { font-size: 16px; flex-shrink: 0; }
+  .file-text { font-size: 11px; color: var(--muted); line-height: 1.4; }
+  .file-text strong { color: var(--accent-text); font-size: 12px; }
+  .file-clear {
+    margin-left: auto;
+    font-size: 14px;
+    cursor: pointer;
+    color: var(--muted);
+    flex-shrink: 0;
+    z-index: 1;
+    background: none;
+    border: none;
+    padding: 2px 4px;
+    border-radius: 3px;
+    line-height: 1;
+  }
+  .file-clear:hover { color: var(--red); background: var(--red-dim); }
+  .upload-status { font-size: 11px; margin-top: 4px; }
+  .upload-status.ok  { color: var(--accent-text); }
+  .upload-status.err { color: var(--red); }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo-row">
+    <div class="logo-icon">📋</div>
+    <span class="logo-text">DevX Operations</span>
+  </div>
+  <h1>Monthly Expense Submission</h1>
+  <p>Submit branch expenses managed by the CRM team. You can save a partial submission now and complete remaining fields later.</p>
+</header>
+
+<!-- Meta -->
+<div class="card">
+  <div class="card-header">
+    <div class="card-header-icon" style="background:#161b22;border:1px solid var(--border);">🏢</div>
+    <span class="card-title">Submission Details</span>
+    <div class="submitted-badge" id="submittedBadge">
+      <span>✓</span><span id="submittedInfo">Previous data loaded</span>
+    </div>
+  </div>
+  <div class="card-body">
+    <div class="meta-grid">
+      <div>
+        <label>Branch <span class="req">*</span></label>
+        <select id="branchId"><option value="">Select branch…</option></select>
+      </div>
+      <div>
+        <label>Month <span class="req">*</span></label>
+        <input type="month" id="month"/>
+      </div>
+      <div>
+        <label>Submitted by <span class="req">*</span></label>
+        <input type="text" id="submittedBy" placeholder="Your name"/>
+      </div>
+    </div>
+    <div style="margin-top:14px;display:flex;gap:8px;justify-content:flex-end">
+      <button class="btn-secondary" onclick="loadPrevious()" id="loadBtn">
+        <span>↙</span> Load Previous
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- Direct Expenses -->
+<div class="card">
+  <div class="card-header">
+    <div class="card-header-icon" style="background:rgba(56,139,253,0.1);border:1px solid rgba(56,139,253,0.3);">⚡</div>
+    <span class="card-title">Direct Expenses</span>
+  </div>
+  <div class="card-body" id="directItems">
+
+    <!-- Electricity & Utilities -->
+    <div class="item-row">
+      <div class="item-label-wrap">
+        <span class="item-name">Electricity &amp; Utilities</span>
+        <span class="item-hint">Monthly bill amount</span>
+      </div>
+      <div class="item-inputs">
+        <div class="input-group">
+          <label>Amount (₹)</label>
+          <div class="input-prefix-wrap">
+            <span class="input-prefix">₹</span>
+            <input type="number" id="elec_util" placeholder="0" min="0"/>
+          </div>
+        </div>
+        <div class="sub-inputs">
+          <div class="input-group">
+            <label>No. of Units Consumed</label>
+            <div class="input-unit-wrap">
+              <input type="number" id="elec_units" placeholder="0" min="0"/>
+              <span class="input-unit">kWh</span>
+            </div>
+          </div>
+          <div class="input-group">
+            <label>Rate per Unit (₹)</label>
+            <div class="input-prefix-wrap">
+              <span class="input-prefix">₹</span>
+              <input type="number" id="elec_rate" placeholder="0.00" min="0" step="0.01"/>
+            </div>
+          </div>
+        </div>
+        <div class="input-group">
+          <label>Attach Bill</label>
+          <div class="file-zone" id="zone_elec_util" onclick="triggerFile('elec_util')">
+            <input type="file" id="file_elec_util" accept=".pdf,.jpg,.jpeg,.png" onchange="onFileChosen('elec_util')"/>
+            <span class="file-icon">📎</span>
+            <span class="file-text" id="filelabel_elec_util">Click to attach (PDF / Image)</span>
+            <button type="button" class="file-clear" id="fileclear_elec_util" style="display:none" onclick="clearFile(event,'elec_util')">✕</button>
+          </div>
+          <div class="upload-status" id="filestatus_elec_util"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Housekeeping Materials -->
+    <div class="item-row">
+      <div class="item-label-wrap">
+        <span class="item-name">Housekeeping Materials</span>
+        <span class="item-hint">Cleaning supplies, consumables</span>
+      </div>
+      <div class="item-inputs">
+        <div class="input-group">
+          <label>Amount (₹)</label>
+          <div class="input-prefix-wrap">
+            <span class="input-prefix">₹</span>
+            <input type="number" id="hk_materials" placeholder="0" min="0"/>
+          </div>
+        </div>
+        <div class="input-group">
+          <label>Attach Bill</label>
+          <div class="file-zone" id="zone_hk_materials" onclick="triggerFile('hk_materials')">
+            <input type="file" id="file_hk_materials" accept=".pdf,.jpg,.jpeg,.png" onchange="onFileChosen('hk_materials')"/>
+            <span class="file-icon">📎</span>
+            <span class="file-text" id="filelabel_hk_materials">Click to attach (PDF / Image)</span>
+            <button type="button" class="file-clear" id="fileclear_hk_materials" style="display:none" onclick="clearFile(event,'hk_materials')">✕</button>
+          </div>
+          <div class="upload-status" id="filestatus_hk_materials"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Housekeeping Service -->
+    <div class="item-row">
+      <div class="item-label-wrap">
+        <span class="item-name">Housekeeping Service</span>
+        <span class="item-hint">Vendor service charges</span>
+      </div>
+      <div class="item-inputs">
+        <div class="input-group">
+          <label>Amount (₹)</label>
+          <div class="input-prefix-wrap">
+            <span class="input-prefix">₹</span>
+            <input type="number" id="hk_service" placeholder="0" min="0"/>
+          </div>
+        </div>
+        <div class="sub-inputs">
+          <div class="input-group">
+            <label>No. of HK Persons</label>
+            <input type="number" id="hk_persons" placeholder="0" min="0"/>
+          </div>
+          <div class="input-group">
+            <label>No. of Supervisors</label>
+            <input type="number" id="hk_supervisors" placeholder="0" min="0"/>
+          </div>
+        </div>
+        <div class="input-group">
+          <label>Attach Bill</label>
+          <div class="file-zone" id="zone_hk_service" onclick="triggerFile('hk_service')">
+            <input type="file" id="file_hk_service" accept=".pdf,.jpg,.jpeg,.png" onchange="onFileChosen('hk_service')"/>
+            <span class="file-icon">📎</span>
+            <span class="file-text" id="filelabel_hk_service">Click to attach (PDF / Image)</span>
+            <button type="button" class="file-clear" id="fileclear_hk_service" style="display:none" onclick="clearFile(event,'hk_service')">✕</button>
+          </div>
+          <div class="upload-status" id="filestatus_hk_service"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Internet & Connectivity -->
+    <div class="item-row">
+      <div class="item-label-wrap">
+        <span class="item-name">Internet &amp; Connectivity</span>
+        <span class="item-hint">ISP charges</span>
+      </div>
+      <div class="item-inputs">
+        <div class="input-group">
+          <label>Amount (₹)</label>
+          <div class="input-prefix-wrap">
+            <span class="input-prefix">₹</span>
+            <input type="number" id="internet" placeholder="0" min="0"/>
+          </div>
+        </div>
+        <div class="input-group">
+          <label>Internet Speed</label>
+          <div class="input-unit-wrap">
+            <input type="number" id="internet_mbps" placeholder="0" min="0"/>
+            <span class="input-unit">Mbps</span>
+          </div>
+        </div>
+        <div class="input-group">
+          <label>Attach Bill</label>
+          <div class="file-zone" id="zone_internet" onclick="triggerFile('internet')">
+            <input type="file" id="file_internet" accept=".pdf,.jpg,.jpeg,.png" onchange="onFileChosen('internet')"/>
+            <span class="file-icon">📎</span>
+            <span class="file-text" id="filelabel_internet">Click to attach (PDF / Image)</span>
+            <button type="button" class="file-clear" id="fileclear_internet" style="display:none" onclick="clearFile(event,'internet')">✕</button>
+          </div>
+          <div class="upload-status" id="filestatus_internet"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Pantry & Vending -->
+    <div class="item-row">
+      <div class="item-label-wrap">
+        <span class="item-name">Pantry &amp; Vending</span>
+        <span class="item-hint">Snacks, beverages, vending</span>
+      </div>
+      <div class="item-inputs">
+        <div class="input-group">
+          <label>Amount (₹)</label>
+          <div class="input-prefix-wrap">
+            <span class="input-prefix">₹</span>
+            <input type="number" id="pantry" placeholder="0" min="0"/>
+          </div>
+        </div>
+        <div class="input-group">
+          <label>Attach Bill</label>
+          <div class="file-zone" id="zone_pantry" onclick="triggerFile('pantry')">
+            <input type="file" id="file_pantry" accept=".pdf,.jpg,.jpeg,.png" onchange="onFileChosen('pantry')"/>
+            <span class="file-icon">📎</span>
+            <span class="file-text" id="filelabel_pantry">Click to attach (PDF / Image)</span>
+            <button type="button" class="file-clear" id="fileclear_pantry" style="display:none" onclick="clearFile(event,'pantry')">✕</button>
+          </div>
+          <div class="upload-status" id="filestatus_pantry"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Repairs & Maintenance -->
+    <div class="item-row">
+      <div class="item-label-wrap">
+        <span class="item-name">Repairs &amp; Maintenance</span>
+        <span class="item-hint">Facility upkeep, fixes</span>
+      </div>
+      <div class="item-inputs">
+        <div class="input-group">
+          <label>Amount (₹)</label>
+          <div class="input-prefix-wrap">
+            <span class="input-prefix">₹</span>
+            <input type="number" id="repairs" placeholder="0" min="0"/>
+          </div>
+        </div>
+        <div class="input-group">
+          <label>Attach Bill</label>
+          <div class="file-zone" id="zone_repairs" onclick="triggerFile('repairs')">
+            <input type="file" id="file_repairs" accept=".pdf,.jpg,.jpeg,.png" onchange="onFileChosen('repairs')"/>
+            <span class="file-icon">📎</span>
+            <span class="file-text" id="filelabel_repairs">Click to attach (PDF / Image)</span>
+            <button type="button" class="file-clear" id="fileclear_repairs" style="display:none" onclick="clearFile(event,'repairs')">✕</button>
+          </div>
+          <div class="upload-status" id="filestatus_repairs"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Security Services -->
+    <div class="item-row">
+      <div class="item-label-wrap">
+        <span class="item-name">Security Services</span>
+        <span class="item-hint">Guard agency charges</span>
+      </div>
+      <div class="item-inputs">
+        <div class="input-group">
+          <label>Amount (₹)</label>
+          <div class="input-prefix-wrap">
+            <span class="input-prefix">₹</span>
+            <input type="number" id="security" placeholder="0" min="0"/>
+          </div>
+        </div>
+        <div class="input-group">
+          <label>No. of Security Persons</label>
+          <input type="number" id="security_persons" placeholder="0" min="0"/>
+        </div>
+        <div class="input-group">
+          <label>Attach Bill</label>
+          <div class="file-zone" id="zone_security" onclick="triggerFile('security')">
+            <input type="file" id="file_security" accept=".pdf,.jpg,.jpeg,.png" onchange="onFileChosen('security')"/>
+            <span class="file-icon">📎</span>
+            <span class="file-text" id="filelabel_security">Click to attach (PDF / Image)</span>
+            <button type="button" class="file-clear" id="fileclear_security" style="display:none" onclick="clearFile(event,'security')">✕</button>
+          </div>
+          <div class="upload-status" id="filestatus_security"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tea & Coffee -->
+    <div class="item-row">
+      <div class="item-label-wrap">
+        <span class="item-name">Tea &amp; Coffee</span>
+        <span class="item-hint">Hot beverage service</span>
+      </div>
+      <div class="item-inputs">
+        <div class="input-group">
+          <label>Amount (₹)</label>
+          <div class="input-prefix-wrap">
+            <span class="input-prefix">₹</span>
+            <input type="number" id="tea_coffee" placeholder="0" min="0"/>
+          </div>
+        </div>
+        <div class="section-label" style="margin:10px 0 8px"><span class="section-label-text">Breakdown</span></div>
+        <div class="sub-inputs">
+          <div class="input-group">
+            <label>Cups — No. of Cups</label>
+            <input type="number" id="tea_cups" placeholder="0" min="0"/>
+          </div>
+          <div class="input-group">
+            <label>Rate per Cup (₹)</label>
+            <div class="input-prefix-wrap">
+              <span class="input-prefix">₹</span>
+              <input type="number" id="tea_cup_rate" placeholder="0.00" min="0" step="0.01"/>
+            </div>
+          </div>
+        </div>
+        <div class="sub-inputs">
+          <div class="input-group">
+            <label>Tea Bags — No. of Packets</label>
+            <input type="number" id="tea_bag_packets" placeholder="0" min="0"/>
+          </div>
+          <div class="input-group">
+            <label>Per Packet Rate (₹)</label>
+            <div class="input-prefix-wrap">
+              <span class="input-prefix">₹</span>
+              <input type="number" id="tea_bag_rate" placeholder="0.00" min="0" step="0.01"/>
+            </div>
+          </div>
+        </div>
+        <div class="sub-inputs">
+          <div class="input-group">
+            <label>Coffee Beans — No. of Packets</label>
+            <input type="number" id="coffee_packets" placeholder="0" min="0"/>
+          </div>
+          <div class="input-group">
+            <label>Per Packet Rate (₹)</label>
+            <div class="input-prefix-wrap">
+              <span class="input-prefix">₹</span>
+              <input type="number" id="coffee_rate" placeholder="0.00" min="0" step="0.01"/>
+            </div>
+          </div>
+        </div>
+        <div class="sub-inputs">
+          <div class="input-group">
+            <label>Stirrer — No. of Packets</label>
+            <input type="number" id="stirrer_packets" placeholder="0" min="0"/>
+          </div>
+          <div class="input-group">
+            <label>Per Packet Rate (₹)</label>
+            <div class="input-prefix-wrap">
+              <span class="input-prefix">₹</span>
+              <input type="number" id="stirrer_rate" placeholder="0.00" min="0" step="0.01"/>
+            </div>
+          </div>
+        </div>
+        <div class="input-group">
+          <label>Attach Bill</label>
+          <div class="file-zone" id="zone_tea_coffee" onclick="triggerFile('tea_coffee')">
+            <input type="file" id="file_tea_coffee" accept=".pdf,.jpg,.jpeg,.png" onchange="onFileChosen('tea_coffee')"/>
+            <span class="file-icon">📎</span>
+            <span class="file-text" id="filelabel_tea_coffee">Click to attach (PDF / Image)</span>
+            <button type="button" class="file-clear" id="fileclear_tea_coffee" style="display:none" onclick="clearFile(event,'tea_coffee')">✕</button>
+          </div>
+          <div class="upload-status" id="filestatus_tea_coffee"></div>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /card-body -->
+</div>
+
+<!-- Indirect Expenses -->
+<div class="card">
+  <div class="card-header">
+    <div class="card-header-icon" style="background:rgba(240,136,62,0.1);border:1px solid rgba(240,136,62,0.3);">📁</div>
+    <span class="card-title">Indirect Expenses</span>
+  </div>
+  <div class="card-body">
+
+    <!-- Subscription Expenses -->
+    <div class="item-row">
+      <div class="item-label-wrap">
+        <span class="item-name">Subscription Expenses</span>
+        <span class="item-hint">Software, tools, licenses</span>
+      </div>
+      <div class="item-inputs">
+        <div class="input-group">
+          <label>Amount (₹)</label>
+          <div class="input-prefix-wrap">
+            <span class="input-prefix">₹</span>
+            <input type="number" id="subscr" placeholder="0" min="0"/>
+          </div>
+        </div>
+        <div class="input-group">
+          <label>Attach Bill</label>
+          <div class="file-zone" id="zone_subscr" onclick="triggerFile('subscr')">
+            <input type="file" id="file_subscr" accept=".pdf,.jpg,.jpeg,.png" onchange="onFileChosen('subscr')"/>
+            <span class="file-icon">📎</span>
+            <span class="file-text" id="filelabel_subscr">Click to attach (PDF / Image)</span>
+            <button type="button" class="file-clear" id="fileclear_subscr" style="display:none" onclick="clearFile(event,'subscr')">✕</button>
+          </div>
+          <div class="upload-status" id="filestatus_subscr"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Travel & Conveyance -->
+    <div class="item-row">
+      <div class="item-label-wrap">
+        <span class="item-name">Travel &amp; Conveyance</span>
+        <span class="item-hint">Staff travel, fuel, cab</span>
+      </div>
+      <div class="item-inputs">
+        <div class="input-group">
+          <label>Amount (₹)</label>
+          <div class="input-prefix-wrap">
+            <span class="input-prefix">₹</span>
+            <input type="number" id="travel" placeholder="0" min="0"/>
+          </div>
+        </div>
+        <div class="input-group">
+          <label>Attach Bill</label>
+          <div class="file-zone" id="zone_travel" onclick="triggerFile('travel')">
+            <input type="file" id="file_travel" accept=".pdf,.jpg,.jpeg,.png" onchange="onFileChosen('travel')"/>
+            <span class="file-icon">📎</span>
+            <span class="file-text" id="filelabel_travel">Click to attach (PDF / Image)</span>
+            <button type="button" class="file-clear" id="fileclear_travel" style="display:none" onclick="clearFile(event,'travel')">✕</button>
+          </div>
+          <div class="upload-status" id="filestatus_travel"></div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- Notice -->
+<div class="card">
+  <div class="card-body" style="display:flex;flex-direction:column;gap:12px;">
+    <div class="notice info">
+      <span class="notice-icon">ℹ️</span>
+      <div class="notice-text">
+        <strong>Partial submissions are allowed.</strong> You can submit only the expenses you have bills for right now. Return and submit again when the remaining bills are received — previously submitted values are preserved and only new fields get updated.
+      </div>
+    </div>
+    <div class="notice warn">
+      <span class="notice-icon">🔒</span>
+      <div class="notice-text">
+        <strong>Admin-managed items are not included in this form:</strong> Office Rent, Property Maintenance, Employee Salaries &amp; Benefits, Brokerage Charges, Marketing &amp; Promotion, Other Indirect Expenses, Professional Fees &amp; Consultancy, Property Tax, Reimbursement Expenses, Stamp Duty &amp; Registration. These are handled by the finance team through the system module.
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Submit -->
+<div style="width:100%;max-width:740px;">
+  <div class="btn-row">
+    <button class="btn-secondary" onclick="clearForm()">Clear Form</button>
+    <button class="btn-primary" id="submitBtn" onclick="submitForm()">
+      <div class="spinner"></div>
+      <span class="btn-label">Submit Expenses</span>
+    </button>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+  const BASE = window.location.origin;
+  const CRM_FIELDS = [
+    'elec_util','elec_units','elec_rate',
+    'hk_materials',
+    'hk_service','hk_persons','hk_supervisors',
+    'internet','internet_mbps',
+    'pantry','repairs',
+    'security','security_persons',
+    'tea_coffee','tea_cups','tea_cup_rate','tea_bag_packets','tea_bag_rate','coffee_packets','coffee_rate','stirrer_packets','stirrer_rate',
+    'subscr','travel'
+  ];
+  const FILE_ITEMS = ['elec_util','hk_materials','hk_service','internet','pantry','repairs','security','tea_coffee','subscr','travel'];
+
+  // Set default month to previous month
+  (function setDefaultMonth() {
+    const d = new Date();
+    d.setMonth(d.getMonth() - 1);
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    document.getElementById('month').value = `${y}-${m}`;
+  })();
+
+  // Load branches
+  fetch(`${BASE}/api/crm/branches`)
+    .then(r => r.json())
+    .then(branches => {
+      const sel = document.getElementById('branchId');
+      branches.forEach(b => {
+        const o = document.createElement('option');
+        o.value = b.id; o.textContent = b.name;
+        sel.appendChild(o);
+      });
+    })
+    .catch(() => showToast('Could not load branch list', 'error'));
+
+  function showToast(msg, type = 'success') {
+    const t = document.getElementById('toast');
+    t.className = 'show ' + type;
+    t.textContent = type === 'success' ? '✓  ' + msg : '✕  ' + msg;
+    clearTimeout(t._tid);
+    t._tid = setTimeout(() => { t.className = ''; }, 3800);
+  }
+
+  function getVal(id) {
+    const el = document.getElementById(id);
+    if (!el) return null;
+    const v = el.value.trim();
+    return v === '' ? null : Number(v);
+  }
+
+  function setVal(id, v) {
+    const el = document.getElementById(id);
+    if (el && v != null) el.value = v;
+  }
+
+  // ── File helpers ──
+  function triggerFile(itemId) {
+    document.getElementById('file_' + itemId).click();
+  }
+
+  function onFileChosen(itemId) {
+    const inp  = document.getElementById('file_' + itemId);
+    const zone = document.getElementById('zone_' + itemId);
+    const lbl  = document.getElementById('filelabel_' + itemId);
+    const clr  = document.getElementById('fileclear_' + itemId);
+    const st   = document.getElementById('filestatus_' + itemId);
+    if (inp.files.length) {
+      const name = inp.files[0].name;
+      lbl.innerHTML = `<strong>📄 ${name}</strong>`;
+      zone.classList.add('has-file');
+      clr.style.display = 'block';
+      st.textContent = '';
+      st.className = 'upload-status';
+    }
+  }
+
+  function clearFile(e, itemId) {
+    e.stopPropagation();
+    const inp  = document.getElementById('file_' + itemId);
+    const zone = document.getElementById('zone_' + itemId);
+    const lbl  = document.getElementById('filelabel_' + itemId);
+    const clr  = document.getElementById('fileclear_' + itemId);
+    const st   = document.getElementById('filestatus_' + itemId);
+    inp.value = '';
+    lbl.textContent = 'Click to attach (PDF / Image)';
+    zone.classList.remove('has-file','uploaded','uploading');
+    clr.style.display = 'none';
+    st.textContent = '';
+  }
+
+  async function uploadBill(branchId, month, itemId) {
+    const inp = document.getElementById('file_' + itemId);
+    if (!inp || !inp.files.length) return true; // no file — skip
+    const zone = document.getElementById('zone_' + itemId);
+    const st   = document.getElementById('filestatus_' + itemId);
+    zone.classList.add('uploading');
+    st.textContent = 'Uploading…';
+    st.className = 'upload-status';
+    const fd = new FormData();
+    fd.append('branchId', branchId);
+    fd.append('month', month);
+    fd.append('itemId', itemId);
+    fd.append('bill', inp.files[0]);
+    try {
+      const r = await fetch(`${BASE}/api/crm/upload-bill`, { method: 'POST', body: fd });
+      if (!r.ok) throw new Error();
+      zone.classList.remove('uploading');
+      zone.classList.add('uploaded');
+      st.textContent = '✓ Saved to OneDrive';
+      st.className = 'upload-status ok';
+      return true;
+    } catch {
+      zone.classList.remove('uploading');
+      st.textContent = '✕ Upload failed';
+      st.className = 'upload-status err';
+      return false;
+    }
+  }
+
+  async function loadPrevious() {
+    const branch = document.getElementById('branchId').value;
+    const month  = document.getElementById('month').value;
+    if (!branch || !month) { showToast('Select a branch and month first', 'error'); return; }
+    try {
+      const r = await fetch(`${BASE}/api/crm/actuals`);
+      const data = await r.json();
+      const row = (data[branch] || {})[month];
+      if (!row) { showToast('No previous submission found', 'error'); return; }
+      CRM_FIELDS.forEach(f => setVal(f, row[f] != null ? row[f] : ''));
+      if (row.submittedBy) document.getElementById('submittedBy').value = row.submittedBy;
+      // Show previously uploaded bill names
+      FILE_ITEMS.forEach(f => {
+        if (row[f + '_bill']) {
+          const lbl = document.getElementById('filelabel_' + f);
+          const zone = document.getElementById('zone_' + f);
+          if (lbl) lbl.innerHTML = `<strong>📄 ${row[f + '_bill']}</strong> <span style="color:var(--muted);font-size:10px">(previously uploaded)</span>`;
+          if (zone) zone.classList.add('uploaded');
+          const st = document.getElementById('filestatus_' + f);
+          if (st) { st.textContent = '✓ Already in OneDrive'; st.className = 'upload-status ok'; }
+        }
+      });
+      const badge = document.getElementById('submittedBadge');
+      const info  = document.getElementById('submittedInfo');
+      const ts = row.updatedAt ? new Date(row.updatedAt).toLocaleDateString('en-IN', { day:'2-digit', month:'short', year:'numeric' }) : '';
+      info.textContent = ts ? `Last saved ${ts}` : 'Previous data loaded';
+      badge.classList.add('show');
+      showToast('Previous submission loaded');
+    } catch { showToast('Failed to load previous data', 'error'); }
+  }
+
+  async function submitForm() {
+    const branch      = document.getElementById('branchId').value;
+    const month       = document.getElementById('month').value;
+    const submittedBy = document.getElementById('submittedBy').value.trim();
+    if (!branch)      { showToast('Please select a branch', 'error'); return; }
+    if (!month)       { showToast('Please select a month', 'error'); return; }
+    if (!submittedBy) { showToast('Please enter your name', 'error'); return; }
+
+    const payload = { branchId: branch, month, submittedBy };
+    let hasAny = false;
+    CRM_FIELDS.forEach(f => {
+      const el = document.getElementById(f);
+      if (el && el.value.trim() !== '') { payload[f] = Number(el.value); hasAny = true; }
+    });
+    if (!hasAny) { showToast('Please fill at least one expense field', 'error'); return; }
+
+    const btn = document.getElementById('submitBtn');
+    btn.classList.add('loading'); btn.disabled = true;
+
+    try {
+      // 1. Submit expense data
+      const r = await fetch(`${BASE}/api/crm/actuals`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!r.ok) throw new Error(await r.text());
+
+      // 2. Upload any attached bills
+      const uploadResults = await Promise.all(FILE_ITEMS.map(f => uploadBill(branch, month, f)));
+      const failCount = uploadResults.filter(v => v === false).length;
+
+      if (failCount === 0) {
+        showToast('Expenses & bills submitted successfully!');
+      } else {
+        showToast(`Expenses saved. ${failCount} bill upload(s) failed — try again.`, 'error');
+      }
+
+      const badge = document.getElementById('submittedBadge');
+      document.getElementById('submittedInfo').textContent = `Saved on ${new Date().toLocaleDateString('en-IN', { day:'2-digit', month:'short', year:'numeric' })}`;
+      badge.classList.add('show');
+    } catch (e) {
+      showToast('Submission failed. Please try again.', 'error');
+    } finally {
+      btn.classList.remove('loading'); btn.disabled = false;
+    }
+  }
+
+  function clearForm() {
+    CRM_FIELDS.forEach(f => { const el = document.getElementById(f); if (el) el.value = ''; });
+    FILE_ITEMS.forEach(f => clearFile({ stopPropagation: ()=>{} }, f));
+    document.getElementById('submittedBy').value = '';
+    document.getElementById('submittedBadge').classList.remove('show');
+  }
+</script>
+</body>
+</html>

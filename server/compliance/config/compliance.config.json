@@ -1,0 +1,73 @@
+{
+  "_readme": "DEFAULT settings for the Compliance Dashboard. Anything you change in the app (Compliance Dashboard > Master > Lists / Settings) is saved separately and overrides the value here. Relative paths are relative to the project folder. See 'Compliance Dashboard/MAINTENANCE.md'.",
+
+  "fy_list": ["2025-26", "2026-27", "2027-28"],
+
+  "modules": [
+    { "key": "GST",     "label": "GST",     "folder": "GST" },
+    { "key": "Payroll", "label": "Payroll", "folder": "Payroll" },
+    { "key": "TDS",     "label": "TDS",     "folder": "TDS" }
+  ],
+
+  "folder_modules": ["TDS", "GST", "Payroll", "Other Compliance"],
+  "default_folder_module": "Other Compliance",
+  "folder_leaves": { "receipt": "Receipt", "challan": "Challan", "other": "Other Data" },
+  "fy_folder_prefix": "FY ",
+
+  "statuses": [
+    { "key": "Not Started", "kind": "user",          "color": "#64748B", "help": "Set by a user. Work has not begun." },
+    { "key": "In Progress", "kind": "user",          "color": "#2563EB", "help": "Set by a user. Work has begun." },
+    { "key": "Completed",   "kind": "user",          "color": "#15803D", "help": "Set by a user. Needs a completion date." },
+    { "key": "Due Soon",    "kind": "computed",      "color": "#D97706", "help": "Calculated: not completed and due within the Due Soon window." },
+    { "key": "Overdue",     "kind": "computed",      "color": "#DC2626", "help": "Calculated: not completed and the due date has passed." },
+    { "key": "N/A",         "kind": "applicability", "color": "#9BA8B0", "help": "Comes from Company Applicability = No. Never counts against compliance." }
+  ],
+
+  "document_types": [
+    "Challan",
+    "Payment Receipt",
+    "Return Filing Receipt",
+    "Acknowledgement Receipt",
+    "TRACES Document",
+    "Form 16A",
+    "Notice",
+    "Reply",
+    "Other"
+  ],
+
+  "storage_root": "compliance_storage",
+  "backup_dir": "server/compliance/backups",
+  "backup_keep": 30,
+
+  "due_soon_days": 7,
+  "upcoming_windows": [7, 15, 30],
+
+  "upload": {
+    "max_size_mb": 15,
+    "allowed_extensions": [".pdf", ".jpg", ".jpeg", ".png", ".xlsx", ".xls", ".csv", ".doc", ".docx", ".zip", ".txt"]
+  },
+  "allow_duplicate_across_tasks": false,
+
+  "applicability_default": "Yes",
+
+  "default_role": "viewer",
+  "roles": {
+    "admin":   { "label": "Admin",   "edit_tasks": true,  "manage_documents": true,  "edit_master": true,  "import": true,  "admin": true  },
+    "manager": { "label": "Manager", "edit_tasks": true,  "manage_documents": true,  "edit_master": true,  "import": true,  "admin": false },
+    "editor":  { "label": "Editor",  "edit_tasks": true,  "manage_documents": false, "edit_master": false, "import": false, "admin": false },
+    "viewer":  { "label": "Viewer",  "edit_tasks": false, "manage_documents": false, "edit_master": false, "import": false, "admin": false }
+  },
+
+  "zoho": {
+    "_readme": "What 'Sync Selected Period' reads from Zoho Books for one Company + FY + Month. Only list APIs are used. Verify these field names against your Zoho Books organisation.",
+    "max_pages_per_entity": 60,
+    "entities": [
+      { "key": "invoices",       "label": "Sales Invoices",  "path": "/invoices",       "list_key": "invoices",       "date_field": "date", "amount_field": "total",  "exclude_statuses": ["void", "draft"], "modules": ["GST"] },
+      { "key": "creditnotes",    "label": "Credit Notes",    "path": "/creditnotes",    "list_key": "creditnotes",    "date_field": "date", "amount_field": "total",  "exclude_statuses": ["void", "draft"], "modules": ["GST"] },
+      { "key": "bills",          "label": "Purchase Bills",  "path": "/bills",          "list_key": "bills",          "date_field": "date", "amount_field": "total",  "exclude_statuses": ["void", "draft"], "modules": ["GST", "TDS"] },
+      { "key": "vendorpayments", "label": "Vendor Payments", "path": "/vendorpayments", "list_key": "vendorpayments", "date_field": "date", "amount_field": "amount", "exclude_statuses": [],                "modules": ["TDS"] }
+    ]
+  },
+
+  "audit_max_entries": 50000
+}

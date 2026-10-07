@@ -1,0 +1,21 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "installCommand": "npm install",
+  "buildCommand": "cd client && npm install && CI=false npm run build",
+  "outputDirectory": "client/build",
+  "regions": ["bom1"],
+  "functions": {
+    "api/index.js": {
+      "maxDuration": 300,
+      "includeFiles": "server/**"
+    }
+  },
+  "rewrites": [
+    { "source": "/api/(.*)", "destination": "/api" },
+    { "source": "/(.*)", "destination": "/index.html" }
+  ],
+  "crons": [
+    { "path": "/api/cron/sync", "schedule": "30 7,9,12,15 * * *" },
+    { "path": "/api/cron/pocm", "schedule": "30 17 * * *" }
+  ]
+}

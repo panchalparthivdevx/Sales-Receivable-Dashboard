@@ -1,0 +1,41 @@
+# Dependencies — installed during build
+node_modules/
+client/node_modules/
+
+# Secrets — set these as Vercel environment variables instead
+.env
+server/.token_cache.json
+server/users.json
+
+# Data — lives in Neon (upload once with server/upload-to-neon.js), not in the deployment
+server/*.json
+server/branch_bills_cache/
+server/sync_data/
+server/pocm_disk_cache/
+server/pl_fy_cache/
+server/pocm_snapshots/
+data/
+
+# Uploaded and confidential files — never part of the deployment
+server/portal-uploads/
+server/vendor-uploads/
+server/compliance/data/
+server/compliance/backups/
+compliance_storage/
+Client Agreements/
+Compliance & Payroll/
+Compliance Dashboard/
+TDS Dashboard/
+MSME/
+Self Client Generated Code*.txt
+/*.xlsx
+
+# Old build copy (not served) and local tooling
+server/public/
+.claude/
+
+# Dev / OS files
+.DS_Store
+Thumbs.db
+*.log
+npm-debug.log*

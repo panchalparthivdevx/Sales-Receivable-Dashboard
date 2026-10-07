@@ -1,0 +1,46 @@
+{
+  "_readme": "Starting master data, loaded ONCE when the Compliance Dashboard first runs (migration v1). After that, edit masters in the app (Master tab) or by Excel import — not here. All statutory due dates below must be verified before use.",
+
+  "companies": [
+    { "id": "CO-001", "name": "Dev Accelerator Limited",       "short_code": "DEVX", "status": "Active", "zoho_org_id": "60027116474", "remarks": "" },
+    { "id": "CO-002", "name": "Needle And Thread Designs LLP", "short_code": "NTD",  "status": "Active", "zoho_org_id": "60007894213", "remarks": "" },
+    { "id": "CO-003", "name": "Saasjoy Solutions Pvt Ltd",     "short_code": "SAAS", "status": "Active", "zoho_org_id": "",            "remarks": "Add the Zoho Books organisation ID if this company uses Zoho Books." }
+  ],
+
+  "compliances": [
+    { "id": "GST001", "name": "GSTR-1 (Outward Supplies)",          "module": "GST", "frequency": "Monthly", "due_rule": "11th of following month", "form_name": "GSTR-1",  "active_months": "", "statutory": true,
+      "remarks": "Statutory due date — VERIFY BEFORE USE. QRMP (quarterly) filers use IFF / quarterly GSTR-1 instead." },
+    { "id": "GST002", "name": "GSTR-3B (Summary Return)",           "module": "GST", "frequency": "Monthly", "due_rule": "20th of following month", "form_name": "GSTR-3B", "active_months": "", "statutory": true,
+      "remarks": "Statutory due date — VERIFY BEFORE USE. QRMP filers: 22nd/24th of the month after the quarter, depending on state." },
+    { "id": "GST003", "name": "GST Payment",                        "module": "GST", "frequency": "Monthly", "due_rule": "20th of following month", "form_name": "PMT-06",  "active_months": "", "statutory": true,
+      "remarks": "Paid with GSTR-3B. Statutory due date — VERIFY BEFORE USE." },
+    { "id": "GST004", "name": "ITC Reconciliation (GSTR-2B vs Books)", "module": "GST", "frequency": "Monthly", "due_rule": "18th of following month", "form_name": "GSTR-2B", "active_months": "", "statutory": false,
+      "remarks": "Internal deadline (before GSTR-3B), not a statutory date. Adjust as needed." },
+    { "id": "GST005", "name": "GSTR-9 (Annual Return)",             "module": "GST", "frequency": "Annual",  "due_rule": "31-Dec",                  "form_name": "GSTR-9",  "active_months": "", "statutory": true,
+      "remarks": "Statutory due date — VERIFY BEFORE USE (often extended by notification). Turnover thresholds apply." },
+    { "id": "GST006", "name": "GSTR-9C (Reconciliation Statement)", "module": "GST", "frequency": "Annual",  "due_rule": "31-Dec",                  "form_name": "GSTR-9C", "active_months": "", "statutory": true,
+      "remarks": "Applies only above the turnover threshold — VERIFY applicability and due date before use." },
+
+    { "id": "PAY001", "name": "PF Payment & ECR",                   "module": "Payroll", "frequency": "Monthly", "due_rule": "15th of following month", "form_name": "ECR / PF Challan", "active_months": "", "statutory": true,
+      "remarks": "Statutory due date — VERIFY BEFORE USE." },
+    { "id": "PAY002", "name": "ESIC Payment",                       "module": "Payroll", "frequency": "Monthly", "due_rule": "15th of following month", "form_name": "ESIC Challan",     "active_months": "", "statutory": true,
+      "remarks": "Statutory due date — VERIFY BEFORE USE." },
+    { "id": "PAY003", "name": "Professional Tax (PT) Payment",      "module": "Payroll", "frequency": "Monthly", "due_rule": "15th of following month", "form_name": "PT Challan",       "active_months": "", "statutory": true,
+      "remarks": "STATE-SPECIFIC — VERIFY BEFORE USE. Due day and frequency differ by state (e.g. Gujarat 15th of following month, Maharashtra last day of the month, Karnataka 20th of following month)." },
+    { "id": "PAY004", "name": "Labour Welfare Fund (LWF)",          "module": "Payroll", "frequency": "Monthly", "due_rule": "15th of following month", "form_name": "LWF Challan",      "active_months": "JUN,DEC", "statutory": true,
+      "remarks": "STATE-SPECIFIC — VERIFY BEFORE USE. Set up as a half-yearly contribution for June and December wages (Gujarat-style). Change Applicable Months and the rule for your state." },
+
+    { "id": "TDS001", "name": "TDS Payment",                        "module": "TDS", "frequency": "Monthly",   "due_rule": "7th of following month; MAR=30-Apr",                    "form_name": "Challan ITNS 281", "active_months": "", "statutory": true,
+      "remarks": "Statutory due date — VERIFY BEFORE USE. March deductions are due 30-Apr. TDS payment and TDS return are tracked separately." },
+    { "id": "TDS002", "name": "TDS Return — Salary (24Q)",          "module": "TDS", "frequency": "Quarterly", "due_rule": "Q1=31-Jul; Q2=31-Oct; Q3=31-Jan; Q4=31-May",           "form_name": "Form 24Q", "active_months": "", "statutory": true,
+      "remarks": "Statutory due date — VERIFY BEFORE USE. Form names/numbers may change under the Income-tax Act, 2025 (effective 1-Apr-2026)." },
+    { "id": "TDS003", "name": "TDS Return — Non-Salary (26Q)",      "module": "TDS", "frequency": "Quarterly", "due_rule": "Q1=31-Jul; Q2=31-Oct; Q3=31-Jan; Q4=31-May",           "form_name": "Form 26Q", "active_months": "", "statutory": true,
+      "remarks": "Statutory due date — VERIFY BEFORE USE. Form names/numbers may change under the Income-tax Act, 2025 (effective 1-Apr-2026)." },
+    { "id": "TDS004", "name": "Form 16A Issue (Non-Salary)",        "module": "TDS", "frequency": "Quarterly", "due_rule": "Q1=15-Aug; Q2=15-Nov; Q3=15-Feb; Q4=15-Jun",           "form_name": "Form 16A", "active_months": "", "statutory": true,
+      "remarks": "Statutory due date — VERIFY BEFORE USE (15 days after the quarterly return due date)." },
+    { "id": "TDS005", "name": "Form 16 Issue (Salary)",             "module": "TDS", "frequency": "Annual",    "due_rule": "15-Jun",                                                 "form_name": "Form 16",  "active_months": "", "statutory": true,
+      "remarks": "Statutory due date — VERIFY BEFORE USE." }
+  ],
+
+  "applicability_default_rows": "all-yes"
+}

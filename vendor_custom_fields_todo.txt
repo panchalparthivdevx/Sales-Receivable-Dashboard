@@ -1,0 +1,147 @@
+Zoho Books — Vendor Custom Fields Creation List
+Generated: 2026-09-20T07:49:56.266Z
+Fields to create: 33
+
+Path: Zoho Books → Settings → Custom Fields → Contacts → + New Custom Field
+
+=== Company Info ===
+  Field Name : Trade Name
+  API Name   : cf_trade_name
+  Type       : Text (Single Line)
+
+  Field Name : Type of Vendor
+  API Name   : cf_vendor_type
+  Type       : Dropdown
+  Options    : Rent/Maint. Vendors | Recurring Vendors | Consultants Vendors | Project Vendors | Other Vendors | Client
+
+  Field Name : Number of Employees
+  API Name   : cf_number_of_employees
+  Type       : Number
+
+  Field Name : Has Brochure
+  API Name   : cf_has_brochure
+  Type       : Checkbox
+
+=== GST Details ===
+  Field Name : GST Registration Status
+  API Name   : cf_gst_registration_status
+  Type       : Dropdown
+  Options    : Regular | Composition | SEZ Unit | SEZ Developer
+
+  Field Name : Head Office GST Number
+  API Name   : cf_head_office_gst
+  Type       : Text (Single Line)
+
+  Field Name : Additional GST Registrations
+  API Name   : cf_additional_gst_registrations
+  Type       : Multi-line Text
+
+=== Turnover ===
+  Field Name : Turnover Previous FY (INR)
+  API Name   : cf_turnover_previous_fy
+  Type       : Decimal
+
+  Field Name : Turnover Current FY (INR)
+  API Name   : cf_turnover_current_fy
+  Type       : Decimal
+
+=== Statutory ===
+  Field Name : Has TAN Number
+  API Name   : cf_has_tan
+  Type       : Checkbox
+
+  Field Name : Has Multiple TANs
+  API Name   : cf_has_multiple_tan
+  Type       : Checkbox
+
+  Field Name : Additional TAN Numbers
+  API Name   : cf_additional_tan_numbers
+  Type       : Multi-line Text
+
+  Field Name : Is MSME / UDYAM Registered
+  API Name   : cf_is_msme
+  Type       : Checkbox
+
+  Field Name : MSME / UDYAM Number
+  API Name   : cf_msme_udyam_number
+  Type       : Text (Single Line)
+
+  Field Name : MSME Category
+  API Name   : cf_msme_category
+  Type       : Dropdown
+  Options    : Micro | Small | Medium
+
+  Field Name : Has Professional Tax
+  API Name   : cf_has_professional_tax
+  Type       : Checkbox
+
+  Field Name : Has Provident Fund
+  API Name   : cf_has_pf
+  Type       : Checkbox
+
+  Field Name : Has ESI
+  API Name   : cf_has_esi
+  Type       : Checkbox
+
+  Field Name : Shops & Est. License Number
+  API Name   : cf_shops_est_license_number
+  Type       : Text (Single Line)
+
+  Field Name : Shops & Est. State
+  API Name   : cf_shops_est_state
+  Type       : Text (Single Line)
+
+=== Signatory ===
+  Field Name : Signatory Name
+  API Name   : cf_signatory_name
+  Type       : Text (Single Line)
+
+  Field Name : Signatory Designation
+  API Name   : cf_signatory_designation
+  Type       : Text (Single Line)
+
+  Field Name : Signatory Mobile
+  API Name   : cf_signatory_mobile
+  Type       : Text (Single Line)
+
+  Field Name : Signatory Alt. Mobile
+  API Name   : cf_signatory_alt_mobile
+  Type       : Text (Single Line)
+
+  Field Name : Signatory Aadhar Number
+  API Name   : cf_signatory_aadhar
+  Type       : Text (Single Line)
+
+  Field Name : Signatory PAN
+  API Name   : cf_signatory_pan
+  Type       : Text (Single Line)
+
+  Field Name : Signatory DIN
+  API Name   : cf_signatory_din
+  Type       : Text (Single Line)
+
+=== Finance Contact ===
+  Field Name : Primary Finance Designation
+  API Name   : cf_primary_finance_designation
+  Type       : Text (Single Line)
+
+  Field Name : Secondary Finance Designation
+  API Name   : cf_secondary_finance_designation
+  Type       : Text (Single Line)
+
+=== E-Sign & Terms ===
+  Field Name : E-Sign Signer Name
+  API Name   : cf_esign_signer_name
+  Type       : Text (Single Line)
+
+  Field Name : E-Sign Signer Email
+  API Name   : cf_esign_signer_email
+  Type       : Email
+
+  Field Name : Terms Accepted
+  API Name   : cf_terms_accepted
+  Type       : Checkbox
+
+  Field Name : Vendor Suggestions
+  API Name   : cf_vendor_suggestions
+  Type       : Multi-line Text

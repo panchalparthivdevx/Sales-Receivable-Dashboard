@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Compliance Tracker - Prototype</title>
+<style>
+/* ===== EDIT COLOURS HERE ===== */
+:root{--navy:#0f2a4a;--blue:#2563eb;--bg:#f3f5f9;--card:#fff;--line:#e2e6ee}
+*{box-sizing:border-box}body{margin:0;font-family:system-ui,Segoe UI,Arial,sans-serif;background:var(--bg);color:#1c2433}
+header{background:var(--navy);color:#fff;padding:12px 20px;display:flex;gap:24px;align-items:center}
+header h1{font-size:18px;margin:0;flex:1}
+.tab{padding:6px 14px;border-radius:6px;cursor:pointer;opacity:.7}.tab.on{background:var(--blue);opacity:1}
+main{padding:16px 20px;max-width:1300px;margin:auto}
+.filters{display:grid;grid-template-columns:repeat(6,1fr);gap:10px;margin-bottom:14px}
+.filters label{font-size:11px;color:#667;display:block;margin-bottom:3px}
+select,input{width:100%;padding:7px;border:1px solid var(--line);border-radius:6px;background:#fff}
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px}
+.kpi{background:var(--card);border-radius:10px;padding:12px 14px;border:1px solid var(--line)}
+.kpi b{font-size:24px;display:block}.kpi span{font-size:12px;color:#667}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px;margin-bottom:14px;overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:13px}th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--line)}
+th{background:#f8f9fc;font-size:12px}
+.badge{padding:2px 8px;border-radius:10px;font-size:11px;color:#fff;white-space:nowrap}
+.Completed{background:#16a34a}.Pending,.NotStarted{background:#64748b}.InProgress{background:#2563eb}
+.DueSoon{background:#d97706}.Overdue{background:#dc2626}.NA{background:#9ca3af}
+.bar{height:8px;background:#e5e7eb;border-radius:4px;min-width:80px}.bar i{display:block;height:8px;background:var(--blue);border-radius:4px}
+button{background:var(--blue);color:#fff;border:0;border-radius:6px;padding:6px 12px;cursor:pointer}
+.hide{display:none}
+@media(max-width:800px){.filters{grid-template-columns:repeat(2,1fr)}.kpis{grid-template-columns:repeat(2,1fr)}}
+</style>
+</head>
+<body>
+<header><h1>Compliance Tracker (Prototype - dummy data)</h1>
+<span class="tab on" onclick="tab('dash',this)">Dashboard</span>
+<span class="tab" onclick="tab('master',this)">Master</span></header>
+<main>
+<!-- ================= DASHBOARD ================= -->
+<div id="dash">
+ <div class="filters" id="filters"></div>
+ <div class="kpis" id="kpis"></div>
+ <div class="card"><h3>Company-wise</h3><div id="byCompany"></div></div>
+ <div class="card"><h3>Module-wise</h3><div id="byModule"></div></div>
+ <div class="card"><h3>Tasks <button onclick="exportCsv()" style="float:right">Export CSV</button></h3><div id="tasks"></div></div>
+</div>
+<!-- ================= MASTER ================= -->
+<div id="master" class="hide">
+ <div class="card"><h3>Compliance Master (sample)</h3><div id="mCompliance"></div></div>
+ <div class="card"><h3>Company Master (sample)</h3><div id="mCompany"></div></div>
+</div>
+</main>
+<script>
+/* ===== SETTINGS: change lists here (later move to DB/JSON) ===== */
+const COMPANIES=["Alpha Pvt Ltd","Beta Traders","Gamma Infra"];
+const MODULES=["GST","Payroll","TDS"];
+const MONTHS=["Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec","Jan","Feb","Mar"];
+const FY="2026-27";
+/* Sample compliance rules: id, name, module, due day of following month */
+const RULES=[
+ {id:"GST001",name:"GSTR-1",module:"GST",day:11},
+ {id:"GST002",name:"GSTR-3B",module:"GST",day:20},
+ {id:"PAY001",name:"PF Payment",module:"Payroll",day:15},
+ {id:"PAY002",name:"ESIC Payment",module:"Payroll",day:15},
+ {id:"TDS001",name:"TDS Payment",module:"TDS",day:7}
+];
+const TODAY=new Date("2026-10-02"); // dummy "today"; use new Date() in real app
+
+/* ---- helpers ---- */
+const mIdx=m=>MONTHS.indexOf(m);
+const quarter=m=>"Q"+(Math.floor(mIdx(m)/3)+1);
+const half=m=>mIdx(m)<6?"H1":"H2";
+function dueDate(mon,day){ // due in following month
+  const i=mIdx(mon);const yr=i<9?2026:2027;const calM=(i+3)%12;
+  const d=new Date(yr,calM+1,day);return d;}
+function status(t){ // computed, never stored
+  if(t.na)return"NA"; if(t.user==="Completed")return"Completed";
+  const diff=(t.due-TODAY)/864e5;
+  if(diff<0)return"Overdue"; if(diff<=7)return"DueSoon";
+  return t.user.replace(" ","");}
+
+/* ---- generate dummy tasks (rules x companies x months) ---- */
+let TASKS=[];let seed=7;const rnd=()=>(seed=(seed*9301+49297)%233280)/233280;
+COMPANIES.forEach((c,ci)=>RULES.forEach(r=>MONTHS.forEach(m=>{
+ const due=dueDate(m,r.day);
+ let user="Not Started";const x=rnd();
+ if(due<TODAY)user=x<.8?"Completed":"Not Started"; else if(x<.2)user="In Progress";
+ TASKS.push({id:`${c.slice(0,3).toUpperCase()}-${r.id}-${FY}-${m.toUpperCase()}`,
+  company:c,module:r.module,name:r.name,month:m,q:quarter(m),h:half(m),due,user,
+  na:(r.id==="PAY002"&&ci===2),resp:["Ravi","Meena","Kiran"][ci]});
+})));
+
+/* ---- filters ---- */
+const F={fy:FY,company:"All",q:"All",h:"All",m:"All",mod:"All"};
+const defs=[["fy","Financial Year",[FY]],["company","Company",["All",...COMPANIES]],
+ ["q","Quarter",["All","Q1","Q2","Q3","Q4"]],["h","Half Year",["All","H1","H2"]],
+ ["m","Month",["All",...MONTHS]],["mod","Module",["All",...MODULES]]];
+document.getElementById("filters").innerHTML=defs.map(([k,l,o])=>
+ `<div><label>${l}</label><select onchange="F['${k}']=this.value;render()">${o.map(v=>`<option>${v}</option>`).join("")}</select></div>`).join("");
+
+const filtered=()=>TASKS.filter(t=>(F.company==="All"||t.company===F.company)&&(F.q==="All"||t.q===F.q)
+ &&(F.h==="All"||t.h===F.h)&&(F.m==="All"||t.month===F.m)&&(F.mod==="All"||t.module===F.mod));
+
+/* ---- KPI maths: Compliance % = Completed / (Total - N/A) ---- */
+function stats(list){
+ const s={total:list.length,Completed:0,Pending:0,Overdue:0,DueSoon:0,NA:0,InProgress:0};
+ list.forEach(t=>{const st=status(t);
+  if(st==="Completed")s.Completed++;else if(st==="NA")s.NA++;
+  else if(st==="Overdue")s.Overdue++;else if(st==="DueSoon")s.DueSoon++;else if(st==="InProgress")s.InProgress++;
+  if(st!=="Completed"&&st!=="NA")s.Pending++;});
+ const base=s.total-s.NA;s.pct=base?Math.round(s.Completed/base*100):0;return s;}
+const bar=p=>`<div class="bar"><i style="width:${p}%"></i></div>`;
+const fmt=d=>d.toLocaleDateString("en-GB");
+
+function group(key,list){return [...new Set(list.map(t=>t[key]))].map(k=>[k,stats(list.filter(t=>t[key]===k))]);}
+function render(){
+ const L=filtered(),s=stats(L);
+ const cards=[["Total Tasks",s.total],["Completed",s.Completed],["Pending",s.Pending],["Overdue",s.Overdue],
+  ["Due Soon",s.DueSoon],["In Progress",s.InProgress],["Not Applicable",s.NA],["Compliance %",s.pct+"%"]];
+ kpis.innerHTML=cards.map(([l,v])=>`<div class="kpi"><b>${v}</b><span>${l}</span></div>`).join("");
+ const tbl=(g)=>`<table><tr><th>Name</th><th>Total</th><th>Done</th><th>Pending</th><th>Overdue</th><th>N/A</th><th>Compliance</th></tr>`+
+  g.map(([k,x])=>`<tr><td>${k}</td><td>${x.total}</td><td>${x.Completed}</td><td>${x.Pending}</td><td>${x.Overdue}</td><td>${x.NA}</td><td>${bar(x.pct)}${x.pct}%</td></tr>`).join("")+`</table>`;
+ byCompany.innerHTML=tbl(group("company",L));byModule.innerHTML=tbl(group("module",L));
+ const rows=L.sort((a,b)=>a.due-b.due).slice(0,60);
+ tasks.innerHTML=`<table><tr><th>Task ID</th><th>Company</th><th>Compliance</th><th>Due</th><th>Responsible</th><th>Status</th><th>Update</th></tr>`+
+  rows.map(t=>{const st=status(t);return `<tr><td>${t.id}</td><td>${t.company}</td><td>${t.name}</td><td>${fmt(t.due)}</td><td>${t.resp}</td>
+  <td><span class="badge ${st}">${st==="DueSoon"?"Due Soon":st==="NA"?"N/A":st}</span></td>
+  <td>${st==="NA"?"":`<select onchange="upd('${t.id}',this.value)">${["Not Started","In Progress","Completed"].map(o=>`<option ${t.user===o?"selected":""}>${o}</option>`).join("")}</select>`}</td></tr>`}).join("")+
+  `</table><small>Showing first 60 of ${L.length}</small>`;}
+function upd(id,v){TASKS.find(t=>t.id===id).user=v;render();}
+function exportCsv(){const r=[["TaskID","Company","Module","Compliance","Due","Status"],
+ ...filtered().map(t=>[t.id,t.company,t.module,t.name,fmt(t.due),status(t)])];
+ const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([r.map(x=>x.join(",")).join("\n")],{type:"text/csv"}));
+ a.download="tasks.csv";a.click();}
+function tab(id,el){dash.classList.toggle("hide",id!=="dash");master.classList.toggle("hide",id!=="master");
+ document.querySelectorAll(".tab").forEach(t=>t.classList.remove("on"));el.classList.add("on");}
+mCompliance.innerHTML=`<table><tr><th>ID</th><th>Name</th><th>Module</th><th>Due rule</th></tr>`+
+ RULES.map(r=>`<tr><td>${r.id}</td><td>${r.name}</td><td>${r.module}</td><td>${r.day}th of following month</td></tr>`).join("")+`</table>`;
+mCompany.innerHTML=`<table><tr><th>Company</th><th>Responsible</th></tr>`+COMPANIES.map((c,i)=>`<tr><td>${c}</td><td>${["Ravi","Meena","Kiran"][i]}</td></tr>`).join("")+`</table>`;
+render();
+</script>
+</body>
+</html>
