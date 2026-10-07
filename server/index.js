@@ -244,6 +244,46 @@ async function fetchDetail(inv) {
   return promise;
 }
 
+// Branch and seat count (cf_no_of_seat over the line items) of one invoice — only Zoho's invoice
+// detail carries them. The office PC keeps details in memory (detailCache, 24 h). A Vercel
+// instance starts empty, and re-reading hundreds of details took ~3 minutes and as many Zoho calls
+// per Occupancy / Operational Data load, so Neon mode also keeps the result per invoice in kv
+// 'invoice_seats', re-read from Zoho only when the invoice's last_modified_time changes.
+// fetched = a Zoho call was needed (callers pause between batches only then).
+let _invSeats = {};
+const _invSeatsTouched = new Set();
+async function loadInvoiceSeats() {
+  if (!db.USE_DB) return;
+  const loaded = (await db.readJSON('invoice_seats', null, null)) || {};
+  for (const id of _invSeatsTouched) loaded[id] = _invSeats[id];       // not saved yet (other report running)
+  _invSeats = loaded;
+}
+async function saveInvoiceSeats() {
+  if (!db.USE_DB || !_invSeatsTouched.size) return;
+  const cur = (await db.readJSON('invoice_seats', null, null)) || {};   // keep other instances' entries
+  for (const id of _invSeatsTouched) if (_invSeats[id]) cur[id] = _invSeats[id];
+  _invSeatsTouched.clear();
+  _invSeats = cur;
+  await db.writeJSON('invoice_seats', null, cur).catch(e => console.warn('[invoice-seats] save error:', e.message));
+}
+async function invoiceSeats(inv) {
+  const lmt = inv.last_modified_time || null;
+  const kept = db.USE_DB ? _invSeats[inv.invoice_id] : null;
+  if (kept && kept.lmt === lmt) return { branch: kept.branch, seats: kept.seats, fetched: false };
+  const fetched = detailCache.get(`d_${inv.invoice_id}`) === undefined;
+  const full = await fetchDetail(inv);
+  if (!full) return null;
+  let seats = 0;
+  for (const li of full.line_items || []) {
+    for (const cf of li.item_custom_fields || []) {
+      if (cf.api_name === 'cf_no_of_seat') seats += parseFloat(cf.value) || 0;
+    }
+  }
+  const branch = full.branch_name || 'Unknown';
+  if (db.USE_DB) { _invSeats[inv.invoice_id] = { lmt, branch, seats }; _invSeatsTouched.add(inv.invoice_id); }
+  return { branch, seats, fetched };
+}
+
 // Mutates each invoice in-place with _sub_total.
 // BATCH=5 + 2s inter-batch delay keeps Zoho under 100 req/min rate limit.
 async function enrichWithSubTotals(invoices) {
@@ -1278,23 +1318,20 @@ app.get('/api/kpi/occupancy', cached('occupancy', 3600, async () => {
   const occupiedSeats = {};
   const BATCH = 5;
 
+  await loadInvoiceSeats();
   for (let i = 0; i < invoices.length; i += BATCH) {
     const batch = invoices.slice(i, i + BATCH);
+    let fetched = false;
     await Promise.all(batch.map(async inv => {
-      // fetchDetail uses the shared detailCache + in-flight deduplication
-      const full = await fetchDetail(inv);
-      if (!full) return;
-      const branch = full.branch_name || 'Unknown';
-      let seats = 0;
-      for (const li of full.line_items || []) {
-        for (const cf of li.item_custom_fields || []) {
-          if (cf.api_name === 'cf_no_of_seat') seats += parseFloat(cf.value) || 0;
-        }
-      }
-      occupiedSeats[branch] = (occupiedSeats[branch] || 0) + seats;
+      // invoiceSeats → fetchDetail (shared detailCache + in-flight deduplication)
+      const s = await invoiceSeats(inv);
+      if (!s) return;
+      if (s.fetched) fetched = true;
+      occupiedSeats[s.branch] = (occupiedSeats[s.branch] || 0) + s.seats;
     }));
-    if (i + BATCH < invoices.length) await new Promise(r => setTimeout(r, 2000));
+    if (fetched && i + BATCH < invoices.length) await new Promise(r => setTimeout(r, 2000));
   }
+  await saveInvoiceSeats();
 
   const totalSeatCount = Object.values(branchSeats).reduce((s, n) => s + n, 0);
   const totalOccupied = Math.round(Object.values(occupiedSeats).reduce((s, n) => s + n, 0));
@@ -4394,7 +4431,8 @@ const _MSME_CM_TTL_H = 24;
 
 function _ensureSyncDir2() {
   const dir = path.join(__dirname, 'sync_data');
-  if (!require('fs').existsSync(dir)) require('fs').mkdirSync(dir, { recursive: true });
+  // Optional on Vercel: its disk is read-only and these caches live in Neon there
+  try { if (!require('fs').existsSync(dir)) require('fs').mkdirSync(dir, { recursive: true }); } catch (_) {}
 }
 
 // Returns { data, fetched_at } when the map is within TTL, else null
@@ -7243,27 +7281,27 @@ app.get('/api/kpi/operational-data', cached('operational-data', 3600, async () =
     let occupied = 0;
     const BATCH = 10;
     for (let i = 0; i < monthInv.length; i += BATCH) {
+      let fetched = false;
       await Promise.all(monthInv.slice(i, i + BATCH).map(async inv => {
-        const full = await fetchDetail(inv);
-        if (!full) return;
-        for (const li of full.line_items || []) {
-          for (const cf of li.item_custom_fields || []) {
-            if (cf.api_name === 'cf_no_of_seat') occupied += parseFloat(cf.value) || 0;
-          }
-        }
+        const s = await invoiceSeats(inv);
+        if (!s) return;
+        if (s.fetched) fetched = true;
+        occupied += s.seats;
       }));
-      if (i + BATCH < monthInv.length) await new Promise(r => setTimeout(r, 1000));
+      if (fetched && i + BATCH < monthInv.length) await new Promise(r => setTimeout(r, 1000));
     }
     return Math.round(occupied);
   }
 
   // Fetch seat snapshots only for quarter-end months already in the past
+  await loadInvoiceSeats();
   const [q1Seats, q2Seats, q3Seats, q4Seats] = await Promise.all([
     today >= '2026-06-01' ? seatSnapshot('2026-06') : null,
     today >= '2026-09-01' ? seatSnapshot('2026-09') : null,
     today >= '2026-12-01' ? seatSnapshot('2026-12') : null,
     today >= '2027-03-01' ? seatSnapshot('2027-03') : null,
   ]);
+  await saveInvoiceSeats();
 
   // Latest available quarter-end seat count for YTD
   const ytdSeats = q4Seats ?? q3Seats ?? q2Seats ?? q1Seats ?? null;
@@ -7326,7 +7364,7 @@ function normalizeCompany(raw) {
 
 // ── Main payroll data: one row per employee per payroll month ─────────────────
 function readGroupSalaryData() {
-  if (!fs.existsSync(PAYROLL_WORKBOOK)) return [];
+  if (db.USE_DB ? !workbooks.stored('payroll') : !fs.existsSync(PAYROLL_WORKBOOK)) return [];
   const wb = workbooks.read('payroll', PAYROLL_WORKBOOK);
   const ws = wb.Sheets[GROUP_SHEET_NAME];
   if (!ws) return [];
@@ -7407,7 +7445,7 @@ function readGroupSalaryData() {
 // The 12-month % blocks are verified against the sheet's own "Total_<Company>" labels
 // and cross-checked (gross × % sums back to the sheet's own quarterly subtotal row).
 function readCaptiveSalaryData() {
-  if (!fs.existsSync(PAYROLL_WORKBOOK)) return { employees: [], monthKeys: [], companyOrder: [] };
+  if (db.USE_DB ? !workbooks.stored('payroll') : !fs.existsSync(PAYROLL_WORKBOOK)) return { employees: [], monthKeys: [], companyOrder: [] };
   const wb = workbooks.read('payroll', PAYROLL_WORKBOOK);
   const ws = wb.Sheets[CAPTIVE_SHEET_NAME];
   if (!ws) return { employees: [], monthKeys: [], companyOrder: [] };

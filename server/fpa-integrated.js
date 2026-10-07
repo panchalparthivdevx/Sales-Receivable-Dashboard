@@ -106,6 +106,12 @@ const writeTaxParams  = (d) => db.writeJSON(KEYS.taxParams,  FILES.taxParams,  d
 const writeOpenItems  = (d) => db.writeJSON(KEYS.openItems,  FILES.openItems,  d);
 const writeIntOutput  = (d) => db.writeJSON(KEYS.intOutput,  FILES.intOutput,  d);
 
+// Any other server/fpa/<file> (Step 14 checks and baselines), under the same database key
+// fpa-store.js gives it, so Vercel reads the uploaded copy instead of the (absent) file
+const fpaDocKey   = (file) => require('./fpa-store').keyOf(path.join(FPA, file));
+const readFpaDoc  = (file, def) => db.readJSON(fpaDocKey(file), path.join(FPA, file), def);
+const writeFpaDoc = (file, d)   => db.writeJSON(fpaDocKey(file), path.join(FPA, file), d);
+
 // ─── Utilities ────────────────────────────────────────────────────────────────
 const now   = () => new Date().toISOString();
 const genId = (pfx) => `${pfx}-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
@@ -1149,22 +1155,20 @@ router.get('/data-flags', async (req, res) => {
 // Aggregates all management input sources into a completeness report.
 router.get('/preflight', async (req, res) => {
   try {
-    const path = require('path');
-    const FPA_DIR = path.join(__dirname, 'fpa');
-    const readJ = (file, def) => { try { return require('fs').existsSync(path.join(FPA_DIR, file)) ? JSON.parse(require('fs').readFileSync(path.join(FPA_DIR, file), 'utf8')) : def; } catch { return def; } };
+    const readJ = readFpaDoc;
 
-    const bm   = readJ('branch_master.json', { branches: [] });
-    const cm   = readJ('client_master.json', { clients: [] });
-    const pa   = readJ('projection_assumptions.json', { client_assumptions: [], forecast_config: {} });
-    const occ  = readJ('occupancy_assumptions.json', { branch_templates: {}, overrides: {} });
-    const cost = readJ('cost_master.json', { assumptions: [] });
-    const capx = readJ('capex_master.json', { capex_entries: [] });
-    const dep  = readJ('deposit_master.json', { deposit_entries: [] });
-    const debt = readJ('debt_schedule.json', { facilities: [] });
-    const obs  = readJ('opening_balance_sheet.json', {});
-    const assets = readJ('asset_register.json', { assets: [] });
-    const acct = readJ('account_mapping.json', { summary: {} });
-    const ga   = readJ('global_assumptions.json', {});
+    const bm   = await readJ('branch_master.json', { branches: [] });
+    const cm   = await readJ('client_master.json', { clients: [] });
+    const pa   = await readJ('projection_assumptions.json', { client_assumptions: [], forecast_config: {} });
+    const occ  = await readJ('occupancy_assumptions.json', { branch_templates: {}, overrides: {} });
+    const cost = await readJ('cost_master.json', { assumptions: [] });
+    const capx = await readJ('capex_master.json', { capex_entries: [] });
+    const dep  = await readJ('deposit_master.json', { deposit_entries: [] });
+    const debt = await readJ('debt_schedule.json', { facilities: [] });
+    const obs  = await readJ('opening_balance_sheet.json', {});
+    const assets = await readJ('asset_register.json', { assets: [] });
+    const acct = await readJ('account_mapping.json', { summary: {} });
+    const ga   = await readJ('global_assumptions.json', {});
 
     const branches   = bm.branches || [];
     const clients    = cm.clients || [];
@@ -1242,12 +1246,8 @@ router.get('/preflight', async (req, res) => {
 // Verifies contracted client seats do not overlap with occupancy-driven vacant projection.
 router.get('/double-count-check', async (req, res) => {
   try {
-    const readFpaJson = (file, def) => {
-      const fp = path.join(FPA, file);
-      try { return require('fs').existsSync(fp) ? JSON.parse(require('fs').readFileSync(fp, 'utf8')) : def; } catch { return def; }
-    };
-    const branches = readFpaJson('branch_master.json', { branches: [] });
-    const pa       = readFpaJson('projection_assumptions.json', { client_assumptions: [] });
+    const branches = await readFpaDoc('branch_master.json', { branches: [] });
+    const pa       = await readFpaDoc('projection_assumptions.json', { client_assumptions: [] });
     const intOut   = await readIntOutput();
     const branchList = (branches.branches || []);
     const assums = pa.client_assumptions || [];
@@ -1280,15 +1280,13 @@ router.post('/generate-baseline', adminOnly, async (req, res) => {
     const { force = false, version_label, generated_by } = req.body || {};
 
     // Run pre-flight check
-    const path = require('path');
-    const FPA_DIR = path.join(__dirname, 'fpa');
-    const readJ = (file, def) => { try { return require('fs').existsSync(path.join(FPA_DIR, file)) ? JSON.parse(require('fs').readFileSync(path.join(FPA_DIR, file), 'utf8')) : def; } catch { return def; } };
+    const readJ = readFpaDoc;
 
-    const bm   = readJ('branch_master.json', { branches: [] });
-    const pa   = readJ('projection_assumptions.json', { client_assumptions: [], forecast_config: {} });
-    const cost = readJ('cost_master.json', { assumptions: [] });
-    const ga   = readJ('global_assumptions.json', {});
-    const obs  = readJ('opening_balance_sheet.json', {});
+    const bm   = await readJ('branch_master.json', { branches: [] });
+    const pa   = await readJ('projection_assumptions.json', { client_assumptions: [], forecast_config: {} });
+    const cost = await readJ('cost_master.json', { assumptions: [] });
+    const ga   = await readJ('global_assumptions.json', {});
+    const obs  = await readJ('opening_balance_sheet.json', {});
 
     const aContracted = (pa.client_assumptions || []).filter(a => a.contracted_monthly_revenue != null).length;
     const costActual  = (cost.assumptions || []).filter(c => c.active !== false).length;
@@ -1314,7 +1312,7 @@ router.post('/generate-baseline', adminOnly, async (req, res) => {
     const output = await runIntegratedComputation();
 
     // Create a baseline record
-    const baselines = readJ('baselines.json', { baselines: [] });
+    const baselines = await readJ('baselines.json', { baselines: [] });
     const newBaseline = {
       baseline_id: `BL-${Date.now()}`,
       version: `V${(baselines.baselines || []).length + 1}`,
@@ -1335,7 +1333,7 @@ router.post('/generate-baseline', adminOnly, async (req, res) => {
 
     if (!baselines.baselines) baselines.baselines = [];
     baselines.baselines.push(newBaseline);
-    require('fs').writeFileSync(path.join(FPA_DIR, 'baselines.json'), JSON.stringify(baselines, null, 2));
+    await writeFpaDoc('baselines.json', baselines);
 
     res.json({ ok: true, baseline: newBaseline, warnings: blockers.length > 0 ? blockers : undefined });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -1344,11 +1342,8 @@ router.post('/generate-baseline', adminOnly, async (req, res) => {
 // ─── Step 14: Freeze Baseline ─────────────────────────────────────────────────
 router.post('/freeze-baseline/:baseline_id', adminOnly, async (req, res) => {
   try {
-    const path = require('path');
-    const FPA_DIR = path.join(__dirname, 'fpa');
-    const blFile = path.join(FPA_DIR, 'baselines.json');
-    if (!require('fs').existsSync(blFile)) return res.status(404).json({ error: 'No baselines found' });
-    const baselines = JSON.parse(require('fs').readFileSync(blFile, 'utf8'));
+    const baselines = await readFpaDoc('baselines.json', null);
+    if (!baselines) return res.status(404).json({ error: 'No baselines found' });
     const idx = (baselines.baselines || []).findIndex(b => b.baseline_id === req.params.baseline_id);
     if (idx < 0) return res.status(404).json({ error: 'Baseline not found' });
     if (baselines.baselines[idx].frozen) return res.status(409).json({ error: 'Baseline already frozen. Cannot re-freeze.' });
@@ -1356,7 +1351,7 @@ router.post('/freeze-baseline/:baseline_id', adminOnly, async (req, res) => {
     baselines.baselines[idx].frozen_at = new Date().toISOString();
     baselines.baselines[idx].frozen_by = req.body?.frozen_by || 'admin';
     baselines.baselines[idx].status = 'frozen';
-    require('fs').writeFileSync(blFile, JSON.stringify(baselines, null, 2));
+    await writeFpaDoc('baselines.json', baselines);
     res.json({ ok: true, baseline: baselines.baselines[idx] });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -1364,10 +1359,8 @@ router.post('/freeze-baseline/:baseline_id', adminOnly, async (req, res) => {
 // ─── Step 14: List Baselines ──────────────────────────────────────────────────
 router.get('/baselines', async (req, res) => {
   try {
-    const path = require('path');
-    const blFile = path.join(__dirname, 'fpa', 'baselines.json');
-    if (!require('fs').existsSync(blFile)) return res.json({ baselines: [] });
-    const d = JSON.parse(require('fs').readFileSync(blFile, 'utf8'));
+    const d = await readFpaDoc('baselines.json', null);
+    if (!d) return res.json({ baselines: [] });
     res.json({ baselines: d.baselines || [] });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });

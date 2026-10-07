@@ -12,6 +12,7 @@
   },
   "rewrites": [
     { "source": "/api/(.*)", "destination": "/api" },
+    { "source": "/crm-form", "destination": "/api" },
     { "source": "/(.*)", "destination": "/index.html" }
   ],
   "crons": [

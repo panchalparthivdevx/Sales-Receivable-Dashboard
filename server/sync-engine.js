@@ -33,7 +33,11 @@ const { background } = require('./background');
 const SYNC_DIR           = path.join(__dirname, 'sync_data');
 const CHECKPOINTS_FILE   = path.join(__dirname, 'sync_checkpoints.json');
 const RUN_LOG_FILE       = path.join(__dirname, 'sync_run_log.json');
-const STALE_HOURS        = 4;   // synced data older than 4 h triggers Zoho fallback
+// Synced data older than this triggers a live Zoho fallback (4 h on the office PC). On Vercel a
+// live fetch of a whole list can outlast the 300-second function limit and eats the daily Zoho
+// quota shared with the PC, so synced data is served there until a day old; its scheduled syncs
+// (vercel.json + .github/workflows/scheduled-sync.yml) run every 2 h in office hours.
+const STALE_HOURS        = process.env.VERCEL ? 24 : 4;
 const MAX_RUN_LOG        = 100; // keep last N run entries
 const ENGINE_VERSION     = 2;   // caches written by an older engine get one full fetch
 const MAX_PAGES          = 250; // 50,000 records; exceeding it fails the entity instead of truncating
@@ -224,7 +228,8 @@ function lmtMs(s) {
 
 // ── Storage helpers ───────────────────────────────────────────────────────────
 function _ensureSyncDir() {
-  if (!fs.existsSync(SYNC_DIR)) fs.mkdirSync(SYNC_DIR, { recursive: true });
+  // Optional on Vercel: its disk is read-only and synced data lives in Neon there
+  try { if (!fs.existsSync(SYNC_DIR)) fs.mkdirSync(SYNC_DIR, { recursive: true }); } catch (_) {}
 }
 
 function _syncDataKey(entityKey)  { return `sync_data_${entityKey}`; }

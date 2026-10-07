@@ -6,6 +6,9 @@
 
 const path = require('path');
 const fs   = require('fs');
+const zlib = require('zlib');
+const util = require('util');
+const { background } = require('./background');
 
 const USE_DB = !!process.env.DATABASE_URL;
 // Neon writes also keep a local copy (backup) — except on Vercel, whose disk is read-only
@@ -80,14 +83,94 @@ async function initDB() {
 // key = logical name (e.g. 'users', 'budget_data')
 // localPath = fallback file path used when DATABASE_URL is not set
 
+// Neon's free plan allows 5 GB of data transfer a month, and the synced lists run to tens of MB,
+// so Neon mode saves on it twice:
+//  - Documents of 64 KB or more are stored brotli-compressed as {"__brotli":"<base64>"} (about
+//    40x smaller). Larger documents written before this are re-stored compressed the first time
+//    they are read, with content and updated_at unchanged.
+//  - The stored text of each document read is kept in memory; a read asks Neon for the text only
+//    when the row changed since (one small query otherwise).
+// Every read still parses its own fresh copy, exactly like reading a file on the office PC.
+const PACK_MIN    = 64 * 1024;
+const PACK_PREFIX = '{"__brotli":"';
+const _brotli   = util.promisify(zlib.brotliCompress);
+const _unbrotli = util.promisify(zlib.brotliDecompress);
+
+async function _pack(text) {
+  if (text.length < PACK_MIN) return text;
+  const buf = await _brotli(Buffer.from(text, 'utf8'), { params: {
+    [zlib.constants.BROTLI_PARAM_QUALITY]: 5,
+    [zlib.constants.BROTLI_PARAM_SIZE_HINT]: text.length,
+  } });
+  return `${PACK_PREFIX}${buf.toString('base64')}"}`;
+}
+async function _unpack(stored) {
+  if (!stored.startsWith(PACK_PREFIX)) return stored;
+  const b64 = stored.slice(PACK_PREFIX.length, stored.lastIndexOf('"'));
+  return (await _unbrotli(Buffer.from(b64, 'base64'))).toString('utf8');
+}
+// A large document still stored uncompressed: store it compressed, unless it changed meanwhile
+function _repack(key, at, text) {
+  background((async () => {
+    const packed = await _pack(text);
+    const r = await getPool().query(
+      'UPDATE kv_store SET value = $2::json WHERE key = $1 AND updated_at::text = $3', [key, packed, at]);
+    if (r.rowCount && _docCache.get(key)?.at === at) _cacheDoc(key, at, packed);
+  })().catch(e => console.warn(`[db] compressing ${key} failed:`, e.message)));
+}
+
+const DOC_CACHE_MAX = 400 * 1024 * 1024;  // characters of stored text held, least recently used dropped first
+const _docCache = new Map();              // key → { at: updated_at as text, text: as stored in Neon }
+const _docReads = new Map();              // key → the read in flight, shared by concurrent callers
+let _docCacheSize = 0;
+
+function _cacheDoc(key, at, text) {
+  _uncacheDoc(key);
+  _docCache.set(key, { at, text });
+  _docCacheSize += text.length;
+  for (const [k, v] of _docCache) {
+    if (_docCacheSize <= DOC_CACHE_MAX || k === key) break;
+    _docCache.delete(k);
+    _docCacheSize -= v.text.length;
+  }
+}
+function _uncacheDoc(key) {
+  const old = _docCache.get(key);
+  if (old) { _docCache.delete(key); _docCacheSize -= old.text.length; }
+}
+
+// Text of a document as stored in Neon (possibly compressed), or null when there is no row
+function _readStored(key) {
+  if (_docReads.has(key)) return _docReads.get(key);
+  const p = (async () => {
+    const hit = _docCache.get(key);
+    const r = await getPool().query(
+      `SELECT updated_at::text AS at,
+              CASE WHEN updated_at::text = $2 THEN NULL ELSE value::text END AS text
+         FROM kv_store WHERE key = $1`,
+      [key, hit ? hit.at : null]
+    );
+    if (!r.rows.length) { _uncacheDoc(key); return null; }
+    const { at, text } = r.rows[0];
+    if (text == null) {                                    // unchanged: mark as recently used
+      if (_docCache.get(key) === hit) { _docCache.delete(key); _docCache.set(key, hit); }
+      return hit.text;
+    }
+    _cacheDoc(key, at, text);
+    if (text.length >= PACK_MIN && !text.startsWith(PACK_PREFIX)) _repack(key, at, text);
+    return text;
+  })().finally(() => _docReads.delete(key));
+  _docReads.set(key, p);
+  return p;
+}
+
 async function readJSON(key, localPath, defaultVal = null) {
   if (!USE_DB) {
     try { return JSON.parse(fs.readFileSync(localPath, 'utf8')); } catch (_) { return defaultVal; }
   }
   try {
-    const r = await getPool().query('SELECT value FROM kv_store WHERE key = $1', [key]);
-    if (!r.rows.length) return defaultVal;
-    return r.rows[0].value;
+    const stored = await _readStored(key);
+    return stored == null ? defaultVal : JSON.parse(await _unpack(stored));
   } catch (e) {
     console.error(`[db] readJSON(${key}) error:`, e.message);
     return defaultVal;
@@ -100,12 +183,15 @@ async function writeJSON(key, localPath, data) {
     return;
   }
   try {
-    await getPool().query(
+    const stored = await _pack(JSON.stringify(data));
+    const r = await getPool().query(
       `INSERT INTO kv_store (key, value, updated_at)
        VALUES ($1, $2::json, NOW())
-       ON CONFLICT (key) DO UPDATE SET value = $2::json, updated_at = NOW()`,
-      [key, JSON.stringify(data)]
+       ON CONFLICT (key) DO UPDATE SET value = $2::json, updated_at = NOW()
+       RETURNING updated_at::text AS at`,
+      [key, stored]
     );
+    _cacheDoc(key, r.rows[0].at, stored);
     // Mirror to local file if path provided (optional backup)
     if (localPath && MIRROR) {
       try { fs.writeFileSync(localPath, JSON.stringify(data, null, 2), 'utf8'); } catch (_) {}
@@ -120,6 +206,7 @@ async function writeJSON(key, localPath, data) {
 async function deleteKey(key) {
   if (!USE_DB) return;
   await getPool().query('DELETE FROM kv_store WHERE key = $1', [key]);
+  _uncacheDoc(key);
 }
 
 // Neon only: keys under a prefix with their last write time ([] when using local files)
