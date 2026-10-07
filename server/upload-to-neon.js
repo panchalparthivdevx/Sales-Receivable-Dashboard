@@ -66,52 +66,149 @@ for (const k of ['compliance_data', 'compliance_audit', 'compliance_zoho_sync', 
   STORES[k] = path.join(COMPLIANCE_DIR, `${k}.json`);
 }
 
-// FP&A (KEYS / FILES in fpa-*.js and step15.js)
-const FPA = {
-  fpa_branch_master: 'branch_master', fpa_client_master: 'client_master',
-  fpa_branch_client_mapping: 'branch_client_mapping', fpa_occupancy_assumptions: 'occupancy_assumptions',
-  fpa_global_assumptions: 'global_assumptions', fpa_ramp_templates: 'ramp_templates',
-  fpa_capex_master: 'capex_master', fpa_cost_config: 'cost_config', fpa_cost_master: 'cost_master',
-  fpa_cost_output: 'cost_output', fpa_cost_overrides: 'cost_overrides', fpa_deposit_master: 'deposit_master',
-  fpa_int_account_mapping: 'account_mapping', fpa_int_assets: 'asset_register',
-  fpa_int_config: 'integrated_config', fpa_int_corp_cost: 'corporate_cost_master',
-  fpa_int_debt: 'debt_schedule', fpa_int_lease: 'lease_schedule', fpa_int_open_items: 'open_items',
-  fpa_int_opening_bs: 'opening_balance_sheet', fpa_int_output: 'integrated_output',
-  fpa_int_tax_params: 'tax_params', fpa_int_wc_params: 'wc_params',
-  fpa_proj_assumptions: 'projection_assumptions', fpa_proj_output: 'projection_output',
-  fpa_revenue_actuals: 'revenue_actuals', fpa_revenue_sync_meta: 'revenue_sync_meta',
-};
-for (const [k, f] of Object.entries(FPA)) STORES[k] = S('fpa', `${f}.json`);
+// FP&A: every server/fpa/*.json under the key the app uses for it (fpa-store.js keyOf)
+const { keyOf: fpaKeyOf } = require('./fpa-store');
+for (const f of fs.existsSync(S('fpa')) ? fs.readdirSync(S('fpa')).filter(f => f.endsWith('.json')) : []) {
+  STORES[fpaKeyOf(S('fpa', f))] = S('fpa', f);
+}
 
 // Synced Zoho entities: sync_data_<entity> ← sync_data/<entity>.json (sync-engine _syncDataKey)
 for (const [k, def] of Object.entries(require('./sync-engine').ENTITY_DEFS)) {
   if (def.path) STORES[`sync_data_${k}`] = S('sync_data', `${k}.json`);
 }
 
-const readFile = f => JSON.parse(fs.readFileSync(f, 'utf8').replace(/^﻿/, ''));
+// MSME Interest quarter results: msme_qr_<fy>_<q> (index.js _msmeQRKey) — key from the file's own fy/quarter
+for (const f of fs.readdirSync(S('sync_data')).filter(f => /^msme_qr_.*\.json$/.test(f))) {
+  try {
+    const r = JSON.parse(fs.readFileSync(S('sync_data', f), 'utf8')).result;
+    if (r && r.fy && r.quarter) STORES[`msme_qr_${r.fy}_${r.quarter}`] = S('sync_data', f);
+  } catch (_) {}
+}
+
+// Branch P&L settings, invoice sub-totals (index.js)
+STORES.pl_mapping         = S('pl_mapping.json');
+STORES.pl_branch_capacity = S('pl_branch_capacity.json');
+STORES.invoice_subtotals  = S('sync_data', 'invoice_subtotals.json');
+
+// Branch P&L caches: pl_fy_<fy>_<entity> ← pl_fy_cache/<fy>/<entity>.json (listed as one line)
+const PL_FY_DIR = S('pl_fy_cache');
+const PL_FY = {};
+for (const fy of fs.existsSync(PL_FY_DIR) ? fs.readdirSync(PL_FY_DIR) : []) {
+  const dir = path.join(PL_FY_DIR, fy);
+  if (!fs.statSync(dir).isDirectory()) continue;
+  for (const f of fs.readdirSync(dir).filter(f => f.endsWith('.json'))) PL_FY[`pl_fy_${fy}_${f.replace(/\.json$/, '')}`] = path.join(dir, f);
+}
+
+// POCM store: pocm_cache_<key> = { saved_at, data } (pocm-sync.js); quarter-lock snapshots by id
+const POCM = {};
+const POCM_DIR = S('pocm_disk_cache');
+for (const f of fs.existsSync(POCM_DIR) ? fs.readdirSync(POCM_DIR).filter(f => f.endsWith('.json')) : []) {
+  POCM[`pocm_cache_${f.replace(/\.json$/, '')}`] = { file: path.join(POCM_DIR, f), wrap: true };
+}
+const SNAP_DIR = S('pocm_snapshots');
+for (const f of fs.existsSync(SNAP_DIR) ? fs.readdirSync(SNAP_DIR).filter(f => f.endsWith('.json')) : []) {
+  POCM[`pocm_snapshot_${f.replace(/\.json$/, '')}`] = { file: path.join(SNAP_DIR, f), wrap: false };
+}
+
+// Excel workbooks read at runtime (server/workbooks.js) — same paths as index.js / rent-agreed.js
+const { pickLocalWorkbook, ROOT } = require('./rent-agreed');
+const rentPick = pickLocalWorkbook();
+const WORKBOOK_FILES = {
+  branch_seats: path.join(ROOT, 'Branch wise Total Seat.xlsx'),
+  payroll:      path.join(ROOT, 'Compliance & Payroll', 'Group Salary Sheet_24-09-26.xlsx'),
+  loans:        path.join(ROOT, 'Loan Module', 'Loan Data Final (1).xlsx'),
+  rent_module:  rentPick ? path.join(ROOT, rentPick.f) : null,
+};
+
+// Parsed exactly the way the office PC reads each store, so Vercel sees the same data:
+// db.readJSON and the FP&A / POCM / P&L readers use plain JSON.parse — a file that starts with
+// a byte-order mark (BOM, e.g. saved by PowerShell) fails there and counts as empty, so it is
+// skipped here too and listed at the end. Only db.readBranchCache strips a leading BOM.
+const readAsApp    = f => JSON.parse(fs.readFileSync(f, 'utf8'));
+const readStripBOM = f => JSON.parse(fs.readFileSync(f, 'utf8').replace(/^﻿/, ''));
+const hasBOM = f => fs.readFileSync(f).subarray(0, 3).equals(Buffer.from([0xEF, 0xBB, 0xBF]));
 const mb = n => (n / 1048576).toFixed(1) + ' MB';
 
-(async () => {
+async function main() {
   if (!DRY) await db.initDB();
   let sent = 0, skipped = 0, bytes = 0;
+  const unreadable = [];   // files the office PC cannot read either
+
+  // value to store, or undefined when the office PC can't read the file (then skipped)
+  const load = (key, file) => {
+    try { return readAsApp(file); }
+    catch (e) {
+      unreadable.push(`${path.relative(S('..'), file)} — ${hasBOM(file) ? 'starts with a BOM' : e.message}`);
+      skipped++;
+      return undefined;
+    }
+  };
 
   for (const [key, file] of Object.entries(STORES)) {
     if (!fs.existsSync(file)) { console.log(`  skip   ${key}  (no file ${path.relative(S('..'), file)})`); skipped++; continue; }
     const size = fs.statSync(file).size;
-    if (!DRY) await db.writeJSON(key, null, readFile(file)); // null → don't touch the local file
+    const value = load(key, file);
+    if (value === undefined) { console.log(`  skip   ${key}  (the office PC cannot read this file either — see below)`); continue; }
+    if (!DRY) await db.writeJSON(key, null, value); // null → don't touch the local file
     console.log(`  ${DRY ? 'would' : 'sent '}  ${key}  ${mb(size)}`);
     sent++; bytes += size;
+  }
+
+  let plBytes = 0, plSent = 0;
+  for (const [key, file] of Object.entries(PL_FY)) {
+    const value = load(key, file);
+    if (value === undefined) continue;
+    if (!DRY) await db.writeJSON(key, null, value);
+    plBytes += fs.statSync(file).size; plSent++;
+  }
+  console.log(`  ${DRY ? 'would' : 'sent '}  pl_fy_cache  (${plSent} files) ${mb(plBytes)}`);
+  sent += plSent; bytes += plBytes;
+
+  let pocmBytes = 0, pocmSent = 0;
+  for (const [key, { file, wrap }] of Object.entries(POCM)) {
+    const value = load(key, file);
+    if (value === undefined) continue;
+    const st = fs.statSync(file);
+    if (!DRY) await db.writeJSON(key, null, wrap ? { saved_at: st.mtimeMs, data: value } : value);
+    pocmBytes += st.size; pocmSent++;
+  }
+  console.log(`  ${DRY ? 'would' : 'sent '}  pocm store  (${pocmSent} files) ${mb(pocmBytes)}`);
+  sent += pocmSent; bytes += pocmBytes;
+
+  // Agreement Master listing (folder/file names only — the PDFs stay in OneDrive/SharePoint)
+  const structure = require('./agreements-folder').scanAgreementsFolder();
+  const clients = Object.values(structure).reduce((n, b) => n + Object.keys(b.clients).length, 0);
+  if (!DRY) await db.writeJSON('agreements_structure', null, structure);
+  console.log(`  ${DRY ? 'would' : 'sent '}  agreements_structure  (${Object.keys(structure).length} branches, ${clients} clients)`);
+  sent++;
+
+  const workbooks = require('./workbooks');
+  for (const [key, file] of Object.entries(WORKBOOK_FILES)) {
+    if (!file || !fs.existsSync(file)) { console.log(`  skip   xlsx_${key}  (no file ${file ? path.relative(ROOT, file) : 'Rent Recurring Module*.xlsx'})`); skipped++; continue; }
+    const st = fs.statSync(file);
+    if (!DRY) await workbooks.save(key, path.basename(file), fs.readFileSync(file), st.mtimeMs);
+    console.log(`  ${DRY ? 'would' : 'sent '}  xlsx_${key}  ${path.basename(file)}  ${mb(st.size)}`);
+    sent++; bytes += st.size;
   }
 
   // Branch bills cache has its own table (db.readBranchCache)
   const BRANCH_DIR = S('branch_bills_cache');
   for (const f of fs.existsSync(BRANCH_DIR) ? fs.readdirSync(BRANCH_DIR).filter(f => f.endsWith('.json')) : []) {
     const file = path.join(BRANCH_DIR, f);
-    if (!DRY) await db.writeBranchCache(f.replace(/\.json$/, ''), readFile(file), null);
+    if (!DRY) await db.writeBranchCache(f.replace(/\.json$/, ''), readStripBOM(file), null);   // the PC strips a BOM here
     sent++; bytes += fs.statSync(file).size;
   }
   console.log(`  ${DRY ? 'would' : 'sent '}  branch_bills_cache  (${fs.existsSync(BRANCH_DIR) ? fs.readdirSync(BRANCH_DIR).length : 0} branches)`);
 
-  console.log(`\n${DRY ? 'Dry run — nothing sent.' : 'Done.'} ${sent} item(s), ${mb(bytes)}; ${skipped} skipped (no local file).`);
-  process.exit(0);
-})().catch(e => { console.error('Upload failed:', e.message); process.exit(1); });
+  if (unreadable.length) {
+    console.log('\nNot uploaded — the office PC cannot read these files either, so Vercel matches it:');
+    for (const u of unreadable) console.log(`  ${u}`);
+  }
+  console.log(`\n${DRY ? 'Dry run — nothing sent.' : 'Done.'} ${sent} item(s), ${mb(bytes)}; ${skipped} skipped.`);
+  return { sent, skipped, bytes };
+}
+
+module.exports = { main };
+if (require.main === module) {
+  main().then(() => process.exit(0), e => { console.error('Upload failed:', e.message); process.exit(1); });
+}

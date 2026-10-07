@@ -34,11 +34,14 @@ router.use(authMiddleware);
 const FPA  = path.join(__dirname, 'fpa');
 const now  = () => new Date().toISOString();
 const r2   = (v) => Math.round((v || 0) * 100) / 100;
+const fpaStore = require('./fpa-store');   // Neon mode (Vercel): the documents live in the database
 const readJ = (file, def = {}) => {
+  if (fpaStore.enabled) return fpaStore.read(path.join(FPA, file), def);
   try { return JSON.parse(fs.readFileSync(path.join(FPA, file), 'utf8')); }
   catch { return def; }
 };
 const writeJ = (file, data) => {
+  if (fpaStore.enabled) return fpaStore.write(path.join(FPA, file), data);
   fs.writeFileSync(path.join(FPA, file), JSON.stringify(data, null, 2), 'utf8');
 };
 
@@ -614,6 +617,7 @@ router.get('/completion', async (req, res) => {
 
 const SYNC_DIR = path.join(__dirname, 'sync_data');
 const readSync = (file, def = {}) => {
+  if (fpaStore.enabled) return fpaStore.read(path.join(SYNC_DIR, file), def);
   try { return JSON.parse(fs.readFileSync(path.join(SYNC_DIR, file), 'utf8')); }
   catch { return def; }
 };

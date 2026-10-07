@@ -244,6 +244,88 @@ function ValidationPanel({ v, entities }) {
   );
 }
 
+// Excel files the server reads: on the office PC from the project folder; on Vercel the
+// copies stored in the database, replaced here.
+function WorkbooksPanel() {
+  const [data, setData] = useState(null);
+  const [busy, setBusy] = useState(null);   // key being uploaded
+  const [msg, setMsg]   = useState(null);   // { ok, text }
+  const inputs = useRef({});
+
+  const load = useCallback(() => {
+    api.workbooksList().then(setData).catch(() => setData({ error: true }));
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const upload = async (key, file) => {
+    if (!file) return;
+    setBusy(key); setMsg(null);
+    try {
+      const r = await api.workbookUpload(key, file);
+      setMsg({ ok: true, text: `${r.name} uploaded — reports now use it.` });
+      load();
+    } catch (e) {
+      setMsg({ ok: false, text: e.response?.data?.error || e.message });
+    } finally {
+      setBusy(null);
+      if (inputs.current[key]) inputs.current[key].value = '';
+    }
+  };
+
+  if (!data || data.error) return null;
+  const inDb = data.mode === 'database';
+  return (
+    <div style={S.section}>
+      <div style={S.sectionTitle}>Excel Files</div>
+      <div style={{ ...S.panel, padding: 0, overflow: 'hidden' }}>
+        <div style={{ padding: '0.75rem 1rem', color: '#5D6C7B', fontSize: '0.78rem', borderBottom: '1px solid #F2F2F2' }}>
+          {inDb
+            ? 'These reports read the Excel copies stored in the database. Upload a new .xlsx to replace one.'
+            : 'On this computer these reports read the Excel files in the project folder. To update one, replace the file there.'}
+        </div>
+        <div style={S.tableWrap}>
+          <table style={S.table}>
+            <thead>
+              <tr>
+                {['Workbook', 'Used by', 'File', 'Updated', 'Size', ...(inDb ? [''] : [])].map(h => (
+                  <th key={h} style={{ ...S.th, ...(h === 'Size' ? S.num : {}) }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {data.workbooks.map(w => (
+                <tr key={w.key}>
+                  <td style={{ ...S.td, fontWeight: 600 }}>{w.label}</td>
+                  <td style={S.td}>{w.used_by}</td>
+                  <td style={{ ...S.td, color: w.name ? '#18191B' : '#dc2626' }}>{w.name || (inDb ? 'Not uploaded yet' : 'File not found')}</td>
+                  <td style={S.td}>{fmtTime(w.updated_at)}</td>
+                  <td style={{ ...S.td, ...S.num }}>{w.size ? `${Math.round(w.size / 1024).toLocaleString('en-IN')} KB` : '—'}</td>
+                  {inDb && (
+                    <td style={S.td}>
+                      <input type="file" accept=".xlsx" style={{ display: 'none' }}
+                        ref={el => { inputs.current[w.key] = el; }}
+                        onChange={e => upload(w.key, e.target.files[0])} />
+                      <button style={{ ...S.btn, ...S.btnGhost, ...S.btnSmall }} disabled={!!busy}
+                        onClick={() => inputs.current[w.key]?.click()}>
+                        {busy === w.key ? 'Uploading…' : 'Upload new'}
+                      </button>
+                    </td>
+                  )}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {msg && (
+          <div style={{ padding: '0.6rem 1rem', fontSize: '0.78rem', color: msg.ok ? '#15803D' : '#991B1B', background: msg.ok ? '#F0FBF4' : '#FEF2F2' }}>
+            {msg.text}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function SyncMonitor() {
   const [status, setStatus]         = useState(null);
   const [loading, setLoading]       = useState(true);
@@ -581,6 +663,8 @@ export default function SyncMonitor() {
           </div>
         )}
       </div>
+
+      <WorkbooksPanel />
     </div>
   );
 }

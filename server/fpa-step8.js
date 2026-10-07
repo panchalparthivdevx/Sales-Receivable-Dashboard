@@ -13,13 +13,16 @@ router.use(authMiddleware);
 // ─── File helpers ───────────────────────────────────────────────────────────
 const FPA = path.join(__dirname, 'fpa');
 const r = (f) => path.join(FPA, f);
+const fpaStore = require('./fpa-store');   // Neon mode (Vercel): the documents live in the database
 
 function readJ(file) {
+  if (fpaStore.enabled) return fpaStore.read(r(file));
   try { return JSON.parse(fs.readFileSync(r(file), 'utf8')); } catch { return null; }
 }
 function writeJ(file, data) {
   data.last_updated = new Date().toISOString();
-  fs.writeFileSync(r(file), JSON.stringify(data, null, 2));
+  if (fpaStore.enabled) fpaStore.write(r(file), data);
+  else fs.writeFileSync(r(file), JSON.stringify(data, null, 2));
   return data;
 }
 const now = () => new Date().toISOString();
@@ -30,7 +33,8 @@ function writeState(patch) {
   const s = readState();
   const merged = deepMerge(s, patch);
   merged.last_updated = now();
-  fs.writeFileSync(r('step8_state.json'), JSON.stringify(merged, null, 2));
+  if (fpaStore.enabled) fpaStore.write(r('step8_state.json'), merged);
+  else fs.writeFileSync(r('step8_state.json'), JSON.stringify(merged, null, 2));
   return merged;
 }
 function deepMerge(base, overlay) {
@@ -74,7 +78,8 @@ function appendAudit(action, user, before, after, note) {
   const trail = readJ('audit_trail.json') || { entries: [] };
   trail.entries.push({ ts: now(), action, user: user || 'system', before, after, note });
   trail.last_updated = now();
-  fs.writeFileSync(r('audit_trail.json'), JSON.stringify(trail, null, 2));
+  if (fpaStore.enabled) fpaStore.write(r('audit_trail.json'), trail);
+  else fs.writeFileSync(r('audit_trail.json'), JSON.stringify(trail, null, 2));
 }
 
 // ─── Compute Migration Gate ───────────────────────────────────────────────────
@@ -785,6 +790,12 @@ router.post('/compute', adminOnly, async (req, res) => {
     // Instead: run the compute inline by calling its logic
     writeState({ compute: { status: 'running', started_at: now() } });
 
+    let result;
+    if (process.env.VERCEL) {
+      // Vercel has no localhost server to POST to: start the compute in-process
+      // (same answer the endpoint gives: HTTP 200 with { ok, message })
+      result = { ok: true, status: 200, body: integratedRouter.startIntegratedCompute() };
+    } else {
     // Since fpa-integrated doesn't export compute, we call our own endpoint
     const http = require('http');
     const port = process.env.PORT || 5000;
@@ -793,7 +804,7 @@ router.post('/compute', adminOnly, async (req, res) => {
       hostname: 'localhost', port: parseInt(port), path: '/api/fpa/integrated/compute',
       method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(postBody), 'Authorization': req.headers.authorization || '' }
     };
-    const result = await new Promise((resolve) => {
+    result = await new Promise((resolve) => {
       const r = http.request(options, (resp) => {
         let data = '';
         resp.on('data', chunk => data += chunk);
@@ -806,6 +817,7 @@ router.post('/compute', adminOnly, async (req, res) => {
       r.write(postBody);
       r.end();
     });
+    }
 
     if (result.ok) {
       writeState({ compute: { status: 'success', last_run: now() } });

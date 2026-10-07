@@ -804,6 +804,9 @@
 
 <script>
   const BASE = window.location.origin;
+  // Optional access key: when the server sets CRM_FORM_KEY, share this form as /crm-form?key=…
+  const FORM_KEY = new URLSearchParams(window.location.search).get('key') || '';
+  const KEY_HDR  = FORM_KEY ? { 'X-Form-Key': FORM_KEY } : {};
   const CRM_FIELDS = [
     'elec_util','elec_units','elec_rate',
     'hk_materials',
@@ -826,7 +829,7 @@
   })();
 
   // Load branches
-  fetch(`${BASE}/api/crm/branches`)
+  fetch(`${BASE}/api/crm/branches`, { headers: KEY_HDR })
     .then(r => r.json())
     .then(branches => {
       const sel = document.getElementById('branchId');
@@ -907,7 +910,7 @@
     fd.append('itemId', itemId);
     fd.append('bill', inp.files[0]);
     try {
-      const r = await fetch(`${BASE}/api/crm/upload-bill`, { method: 'POST', body: fd });
+      const r = await fetch(`${BASE}/api/crm/upload-bill`, { method: 'POST', body: fd, headers: KEY_HDR });
       if (!r.ok) throw new Error();
       zone.classList.remove('uploading');
       zone.classList.add('uploaded');
@@ -927,7 +930,7 @@
     const month  = document.getElementById('month').value;
     if (!branch || !month) { showToast('Select a branch and month first', 'error'); return; }
     try {
-      const r = await fetch(`${BASE}/api/crm/actuals`);
+      const r = await fetch(`${BASE}/api/crm/actuals`, { headers: KEY_HDR });
       const data = await r.json();
       const row = (data[branch] || {})[month];
       if (!row) { showToast('No previous submission found', 'error'); return; }
@@ -976,7 +979,7 @@
       // 1. Submit expense data
       const r = await fetch(`${BASE}/api/crm/actuals`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...KEY_HDR },
         body: JSON.stringify(payload)
       });
       if (!r.ok) throw new Error(await r.text());

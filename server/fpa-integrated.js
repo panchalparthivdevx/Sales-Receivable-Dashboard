@@ -19,6 +19,7 @@ const express = require('express');
 const router  = express.Router();
 const path    = require('path');
 const db      = require('./db');
+const { background } = require('./background'); // keeps background compute alive on Vercel
 const { authMiddleware, adminOnly } = require('./auth');
 
 // ─── File paths ────────────────────────────────────────────────────────────────
@@ -1055,12 +1056,12 @@ router.put('/open-items/:id', adminOnly, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Compute
-router.post('/compute', adminOnly, async (req, res) => {
-  if (intComputeInProgress) return res.json({ ok: false, message: 'Computation already in progress' });
+// Compute — starts in the background and returns at once (also called by fpa-step8 on Vercel,
+// where there is no localhost server to POST to)
+function startIntegratedCompute() {
+  if (intComputeInProgress) return { ok: false, message: 'Computation already in progress' };
   intComputeInProgress = true;
-  res.json({ ok: true, message: 'Integrated computation started in background' });
-  (async () => {
+  background((async () => {
     try {
       const output = await runIntegratedComputation();
       output.compute_in_progress = false;
@@ -1070,7 +1071,12 @@ router.post('/compute', adminOnly, async (req, res) => {
       await writeIntConfig(cfg);
     } catch (e) { console.error('[fpa-integrated] Compute error:', e.message); }
     finally { intComputeInProgress = false; }
-  })();
+  })());
+  return { ok: true, message: 'Integrated computation started in background' };
+}
+
+router.post('/compute', adminOnly, async (req, res) => {
+  res.json(startIntegratedCompute());
 });
 
 // Output endpoints
@@ -1468,3 +1474,4 @@ router.post('/acceptance-tests', adminOnly, async (req, res) => {
 });
 
 module.exports = router;
+module.exports.startIntegratedCompute = startIntegratedCompute;

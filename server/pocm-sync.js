@@ -26,6 +26,7 @@
 const path = require('path');
 const fs   = require('fs');
 const db   = require('./db');
+const { background } = require('./background');
 
 // ── Constants ────────────────────────────────────────────────────────────────
 const NT_ORG_ID    = '60007894213';
@@ -53,8 +54,10 @@ function nextPocmRun(now = new Date()) {
   return next;
 }
 
-// Cross-process lock (a manual one-off run and the server must not sync the same store at once)
+// Cross-process lock (a manual one-off run and the server must not sync the same store at once).
+// Neon mode (Vercel) has no shared disk; the in-process _syncInFlight guard still applies.
 function acquireFileLock(file) {
+  if (db.USE_DB) return true;
   try {
     const cur = JSON.parse(fs.readFileSync(file, 'utf8'));
     let alive = false;
@@ -65,6 +68,7 @@ function acquireFileLock(file) {
   return true;
 }
 function releaseFileLock(file) {
+  if (db.USE_DB) return;
   try { if (JSON.parse(fs.readFileSync(file, 'utf8')).pid === process.pid) fs.unlinkSync(file); } catch (_) {}
 }
 
@@ -118,9 +122,38 @@ async function isQuarterLocked(fy, quarter) {
 }
 
 // ── Cache file helpers ───────────────────────────────────────────────────────
+// Office PC: JSON files in pocm_disk_cache/. Neon mode (Vercel): kv_store
+// 'pocm_cache_<key>' = { saved_at, data }, held in memory once ensureLoaded() has run
+// (the POCM routes and syncs call it), so these helpers stay synchronous.
+const NEON_PREFIX     = 'pocm_cache_';
+const NEON_RECHECK_MS = 10 * 60 * 1000;   // pick up writes made by other Vercel instances
+let _neon = null;                          // key → { saved_at, data }
+let _neonLoadedAt = 0;
+let _neonLoading  = null;
+const _neonWrites = {};                    // key → promise chain, so writes land in order
+
+async function ensureLoaded() {
+  if (!db.USE_DB) return;
+  if (_neon && Date.now() - _neonLoadedAt < NEON_RECHECK_MS) return;
+  if (!_neonLoading) {
+    _neonLoading = (async () => {
+      const map = {};
+      for (const { key } of await db.listKeys(NEON_PREFIX)) {
+        const doc = await db.readJSON(key, null, null);
+        if (doc) map[key.slice(NEON_PREFIX.length)] = doc;
+      }
+      _neon = map;
+      _neonLoadedAt = Date.now();
+      for (const [key, doc] of Object.entries(map)) warmNodeCache(key, doc.data, 86400);
+    })().finally(() => { _neonLoading = null; });
+  }
+  await _neonLoading;
+}
+
 function cacheFile(key) { return path.join(CACHE_DIR, `${key}.json`); }
 
 function readDiskCache(key) {
+  if (db.USE_DB) return _neon?.[key]?.data ?? null;
   try {
     const raw = fs.readFileSync(cacheFile(key), 'utf8');
     return JSON.parse(raw);
@@ -128,7 +161,33 @@ function readDiskCache(key) {
 }
 
 function writeDiskCache(key, data) {
+  if (db.USE_DB) {
+    const doc = { saved_at: Date.now(), data };
+    if (_neon) _neon[key] = doc;
+    _neonWrites[key] = (_neonWrites[key] || Promise.resolve())
+      .then(() => db.writeJSON(NEON_PREFIX + key, null, doc))
+      .catch(e => console.warn(`[pocm-sync] save failed for ${key}: ${e.message}`));
+    background(_neonWrites[key]);
+    return;
+  }
   try { fs.writeFileSync(cacheFile(key), JSON.stringify(data), 'utf8'); } catch (_) {}
+}
+
+function removeDiskCache(key) {
+  if (db.USE_DB) {
+    if (_neon) delete _neon[key];
+    _neonWrites[key] = (_neonWrites[key] || Promise.resolve())
+      .then(() => db.deleteKey(NEON_PREFIX + key)).catch(() => {});
+    background(_neonWrites[key]);
+    return;
+  }
+  try { fs.unlinkSync(cacheFile(key)); } catch (_) {}
+}
+
+// When the cache was last written (ms), or 0 if it doesn't exist
+function diskCacheSavedAt(key) {
+  if (db.USE_DB) return _neon?.[key]?.saved_at || 0;
+  try { return fs.statSync(cacheFile(key)).mtimeMs; } catch (_) { return 0; }
 }
 
 function warmNodeCache(key, data, ttlSecs) {
@@ -155,7 +214,7 @@ async function relevantFYs() {
   const projFile = path.join(__dirname, 'pocm_projects.json');
   let minFY = curFY - 3;
   try {
-    const projects = JSON.parse(fs.readFileSync(projFile, 'utf8') || '[]');
+    const projects = (await db.readJSON('pocm_projects', projFile, [])) || [];
     for (const p of (Array.isArray(projects) ? projects : [])) {
       if (p.startDate) minFY = Math.min(minFY, dateToFY(p.startDate));
     }
@@ -174,7 +233,7 @@ async function getNameCategoryMap() {
   if (_cachedNameMap) return _cachedNameMap;
   const mappingFile = path.join(__dirname, 'pocm_mapping.json');
   let mapping = {};
-  try { mapping = JSON.parse(fs.readFileSync(mappingFile, 'utf8') || '{}'); } catch (_) {}
+  try { mapping = (await db.readJSON('pocm_mapping', mappingFile, {})) || {}; } catch (_) {}
 
   const nameMap = {};
   for (const [accountName, category] of Object.entries(mapping.accountCategories || {})) {
@@ -675,7 +734,7 @@ async function syncVendorPayments(opts = {}) {
 
     const pocmNames = new Set();
     try {
-      for (const p of JSON.parse(fs.readFileSync(path.join(__dirname, 'pocm_projects.json'), 'utf8') || '[]')) {
+      for (const p of (await db.readJSON('pocm_projects', path.join(__dirname, 'pocm_projects.json'), [])) || []) {
         pocmNames.add((p.zohoProjectName || p.name || '').trim());
       }
     } catch (_) {}
@@ -855,7 +914,7 @@ async function syncVendorPayments(opts = {}) {
     });
     writeDiskCache(VENDPAY_KEY, store);
     warmNodeCache(VENDPAY_KEY, store, 86400);
-    try { fs.unlinkSync(cacheFile(VENDPAY_PARTIAL_KEY)); } catch (_) {}
+    removeDiskCache(VENDPAY_PARTIAL_KEY);
     if (_nodeCache) _nodeCache.del(VENDPAY_PARTIAL_KEY);
     console.log(`[pocm-sync] vendor payments: done — ${store.payments.length} payments, ${detailsFetched} payment + ${billDetailsFetched} bill detail calls, ${store.stats.pending_bill_details} bills pending, ${dur}ms`);
     return { status: 'success', ...store.stats };
@@ -875,7 +934,8 @@ async function syncVendorPayments(opts = {}) {
 let _vendPayMtime = 0;
 function getVendorPayments() {
   let mtime = 0;
-  try { mtime = fs.statSync(VENDPAY_FILE()).mtimeMs; } catch (_) { return null; }
+  mtime = diskCacheSavedAt(VENDPAY_KEY);
+  if (!mtime) return null;
   const hit = _nodeCache && _nodeCache.get(VENDPAY_KEY);
   if (hit && mtime === _vendPayMtime) return hit;
   const disk = readDiskCache(VENDPAY_KEY);
@@ -1000,12 +1060,15 @@ async function lockQuarter(fy, quarter, user, reason, snapshotData) {
   const now    = new Date().toISOString();
   const snapId = `snap_${fy}_Q${quarter}_${Date.now()}`;
 
-  // Save snapshot to disk
-  const snapFile = path.join(SNAPSHOTS_DIR, `${snapId}.json`);
-  fs.writeFileSync(snapFile, JSON.stringify({
-    snap_id: snapId, fy, quarter, locked_at: now, locked_by: user,
-    data: snapshotData || null,
-  }), 'utf8');
+  // Save snapshot (office PC: pocm_snapshots/<id>.json; Neon: kv_store 'pocm_snapshot_<id>')
+  const snapDoc = { snap_id: snapId, fy, quarter, locked_at: now, locked_by: user, data: snapshotData || null };
+  let snapFile = null;
+  if (db.USE_DB) {
+    await db.writeJSON(`pocm_snapshot_${snapId}`, null, snapDoc);
+  } else {
+    snapFile = path.join(SNAPSHOTS_DIR, `${snapId}.json`);
+    fs.writeFileSync(snapFile, JSON.stringify(snapDoc), 'utf8');
+  }
 
   locks[key] = {
     locked:     true,
@@ -1061,6 +1124,7 @@ async function getQuarterLocks() {
 async function getSnapshot(fy, quarter) {
   const locks = await readLocks();
   const entry = locks[lockKey(fy, quarter)];
+  if (db.USE_DB && entry?.snap_id) return db.readJSON(`pocm_snapshot_${entry.snap_id}`, null, null);
   if (!entry?.snap_file) return null;
   try {
     return JSON.parse(fs.readFileSync(entry.snap_file, 'utf8'));
@@ -1091,7 +1155,7 @@ async function getMappingExceptions() {
 
 // ── Pre-load all disk cache files into node-cache at startup ─────────────────
 function preloadAtStartup() {
-  if (!_nodeCache) return;
+  if (!_nodeCache || db.USE_DB) return;   // Neon mode: ensureLoaded() on first POCM use
   try {
     const files = fs.readdirSync(CACHE_DIR).filter(f => f.endsWith('.json'));
     for (const f of files) {
@@ -1138,6 +1202,10 @@ function startPocmScheduler() {
 
 module.exports = {
   init,
+  ensureLoaded,
+  readDiskCache,
+  writeDiskCache,
+  diskCacheSavedAt,
   syncFY,
   syncAll,
   syncBillsFY,

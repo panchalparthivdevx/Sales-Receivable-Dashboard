@@ -213,6 +213,12 @@ export const api = {
   syncRetry:     (entity)   => axios.post(`${BASE}/admin/sync/retry`, { entity }).then(r => r.data),
   syncProgress:  ()         => axios.get(`${BASE}/admin/sync/progress`).then(r => r.data),
   syncFreshness: ()         => axios.get(`${BASE}/sync/freshness`).then(r => r.data),
+  workbooksList: ()         => axios.get(`${BASE}/admin/workbooks`).then(r => r.data),
+  workbookUpload: (key, file) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    return axios.post(`${BASE}/admin/workbooks/${key}`, fd).then(r => r.data);
+  },
 };
 
 // Generic authenticated fetch helper used by the FP&A module.
@@ -231,6 +237,30 @@ export async function apiFetch(path, options = {}) {
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
   return data;
+}
+
+// Vercel accepts at most ~4.5 MB per request, so there attachments go up first, one file per
+// request, and the form is then submitted without them. The server answers { staged: false }
+// on the office PC, where files keep travelling with the form. Returns null in that case,
+// else { session, token, files: { field: uploaded file info } }.
+export async function stageUploads(base, files, headers = {}) {
+  const s = await fetch(`${base}/upload-session`, { method: 'POST', headers }).then(r => r.json());
+  if (!s.staged) return null;
+  const uploaded = {};
+  for (const [field, file] of Object.entries(files)) {
+    if (!file) continue;
+    const fd = new FormData();
+    fd.append('field', field);
+    fd.append('file', file);
+    const r = await fetch(`${base}/upload-file`, {
+      method: 'POST', body: fd,
+      headers: { ...headers, 'X-Upload-Session': s.sid, 'X-Upload-Token': s.token },
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || `Upload of ${file.name} failed`);
+    uploaded[field] = d;
+  }
+  return { session: s.sid, token: s.token, files: uploaded };
 }
 
 // Plain <a href> file links can't send the Authorization header, so the login

@@ -19,6 +19,10 @@ const { zohoGet, zohoGetAll, zohoPost, zohoPut } = require('./zoho');
 const multer = require('multer');
 const { MODULES, allPerms, loadUsers, saveUsers, signToken, authMiddleware, adminOnly } = require('./auth');
 const db         = require('./db');
+const workbooks  = require('./workbooks');
+const fileStore  = require('./file-store');
+const { background } = require('./background');
+const IS_VERCEL  = !!process.env.VERCEL;
 const syncEngine  = require('./sync-engine');
 const { attachAgreed: attachRentAgreed } = require('./rent-agreed');
 const pocmSync    = require('./pocm-sync');
@@ -40,7 +44,7 @@ const pocmSync    = require('./pocm-sync');
 })();
 
 // ─── Agreement file paths ──────────────────────────────────────────────────────
-const AGREEMENTS_DIR      = path.join(__dirname, '..', 'Client Agreements');
+const { AGREEMENTS_DIR, isAmendmentFile, scanAgreementsFolder } = require('./agreements-folder');
 const AGREEMENTS_DATA_FILE = path.join(__dirname, 'agreements_data.json');
 
 async function readAgreementsData() {
@@ -48,50 +52,6 @@ async function readAgreementsData() {
 }
 async function writeAgreementsData(d) {
   await db.writeJSON('agreements_data', AGREEMENTS_DATA_FILE, d);
-}
-
-function isAmendmentFile(name) {
-  return /amendment|deed|variation|renewal|addendum|\d+(st|nd|rd|th)\s/i.test(name);
-}
-
-function scanClientFiles(dir, urlBase) {
-  const files = [];
-  if (!fs.existsSync(dir)) return files;
-  for (const item of fs.readdirSync(dir)) {
-    const full = path.join(dir, item);
-    const ext  = path.extname(item).toLowerCase();
-    if (fs.statSync(full).isDirectory()) {
-      files.push(...scanClientFiles(full, `${urlBase}/${encodeURIComponent(item)}`));
-    } else if (['.pdf', '.docx', '.doc'].includes(ext)) {
-      files.push({
-        name: item,
-        url:  `/api/agreements/file${urlBase}/${encodeURIComponent(item)}`,
-        is_amendment: isAmendmentFile(item),
-      });
-    }
-  }
-  return files;
-}
-
-function scanAgreementsFolder() {
-  const result = {};
-  if (!fs.existsSync(AGREEMENTS_DIR)) return result;
-  for (const state of fs.readdirSync(AGREEMENTS_DIR)) {
-    const statePath = path.join(AGREEMENTS_DIR, state);
-    if (!fs.statSync(statePath).isDirectory()) continue;
-    for (const branch of fs.readdirSync(statePath)) {
-      const branchPath = path.join(statePath, branch);
-      if (!fs.statSync(branchPath).isDirectory()) continue;
-      if (!result[branch]) result[branch] = { state, clients: {} };
-      for (const client of fs.readdirSync(branchPath)) {
-        const clientPath = path.join(branchPath, client);
-        if (!fs.statSync(clientPath).isDirectory()) continue;
-        const urlBase = `/${encodeURIComponent(state)}/${encodeURIComponent(branch)}/${encodeURIComponent(client)}`;
-        result[branch].clients[client] = { files: scanClientFiles(clientPath, urlBase) };
-      }
-    }
-  }
-  return result;
 }
 
 // Parse "12 months", "1 year", "6 months" → add to a date string, return YYYY-MM-DD
@@ -122,6 +82,8 @@ const cache = new NodeCache({ stdTTL: 300 });
 // Prevents fetching the same invoice from Zoho more than once per day across ALL endpoints.
 const detailCache = new NodeCache({ stdTTL: 86400 });
 const inFlight = new Map(); // deduplicates concurrent fetches for the same invoice_id
+// Neon mode: an Excel upload seen by this instance refreshes every report built from it
+workbooks.onChange(() => cache.flushAll());
 
 app.use(cors());
 // The GST 180-day export posts the full report back (~300 KB+), so it skips the default
@@ -133,7 +95,7 @@ app.use((req, res, next) => (req.path === '/api/gst/export' ? next() : _jsonPars
 // listens after start-up, so this never waits; on Vercel a request can arrive sooner.
 let _markReady;
 const _appReady = new Promise(resolve => { _markReady = resolve; });
-app.use((req, res, next) => { _appReady.then(() => next()); });
+app.use((req, res, next) => { _appReady.then(() => { workbooks.refreshIfStale(); next(); }); });
 
 // ─── Login required for every /api route ──────────────────────────────────────
 // Open only to what the login page, the public vendor form and Vercel Cron use
@@ -143,16 +105,35 @@ const PUBLIC_API = new Set([
   'POST /api/auth/login',
   'GET /api/health',
   'POST /api/vendor-registration/submit',
+  'POST /api/vendor-registration/upload-session',
+  'POST /api/vendor-registration/upload-file',
   'GET /api/vendor-registration/public-url',
   'GET /api/cron/sync',
   'GET /api/cron/pocm',
+  'GET /api/cron/pl',
+]);
+// The CRM team's standalone form (/crm-form) has no dashboard login: its calls stay open as
+// before, unless CRM_FORM_KEY is set — then the form link must carry ?key=<CRM_FORM_KEY>.
+// Without the key, these routes fall through to the normal login (the Budget page uses them).
+const CRM_FORM_API = new Set([
+  'GET /api/crm/branches',
+  'GET /api/crm/actuals',
+  'POST /api/crm/actuals',
+  'POST /api/crm/upload-bill',
 ]);
 app.use('/api', (req, res, next) => {
-  if (req.method === 'OPTIONS' || PUBLIC_API.has(`${req.method} ${req.baseUrl}${req.path}`)) return next();
+  const route = `${req.method} ${req.baseUrl}${req.path}`;
+  if (req.method === 'OPTIONS' || PUBLIC_API.has(route)) return next();
+  if (CRM_FORM_API.has(route) && (!process.env.CRM_FORM_KEY || req.headers['x-form-key'] === process.env.CRM_FORM_KEY)) return next();
   if (!req.headers.authorization && req.method === 'GET' && req.query.token && req.path.includes('/file/')) {
     req.headers.authorization = `Bearer ${req.query.token}`;
   }
   authMiddleware(req, res, next);
+});
+
+// Neon mode (Vercel): POCM pages need the POCM store in memory (loaded on first use)
+app.use('/api/pocm', (req, res, next) => {
+  pocmSync.ensureLoaded().then(() => next(), e => res.status(503).json({ error: `POCM data could not be loaded: ${e.message}` }));
 });
 
 function cached(key, ttl, fn) {
@@ -286,9 +267,13 @@ const INV_SUBTOTALS_FILE = path.join(__dirname, 'sync_data', 'invoice_subtotals.
 let _invSubTotals = {}; // invoice_id → sub_total (number)
 let _enrichingNow = false;
 
-function _loadInvSubTotals() {
+// Neon mode keeps the map in kv_store 'invoice_subtotals'; the office PC keeps the file.
+async function _loadInvSubTotals() {
   try {
-    if (fs.existsSync(INV_SUBTOTALS_FILE)) {
+    if (db.USE_DB) {
+      _invSubTotals = (await db.readJSON('invoice_subtotals', null, null)) || {};
+      console.log(`[inv-subtotals] loaded ${Object.keys(_invSubTotals).length} entries`);
+    } else if (fs.existsSync(INV_SUBTOTALS_FILE)) {
       _invSubTotals = JSON.parse(fs.readFileSync(INV_SUBTOTALS_FILE, 'utf8'));
       console.log(`[inv-subtotals] loaded ${Object.keys(_invSubTotals).length} entries`);
     }
@@ -296,6 +281,11 @@ function _loadInvSubTotals() {
 }
 
 function _saveInvSubTotals() {
+  if (db.USE_DB) {
+    background(db.writeJSON('invoice_subtotals', null, _invSubTotals)
+      .catch(e => console.warn('[inv-subtotals] save error:', e.message)));
+    return;
+  }
   try {
     fs.writeFileSync(INV_SUBTOTALS_FILE, JSON.stringify(_invSubTotals), 'utf8');
   } catch (e) { console.warn('[inv-subtotals] save error:', e.message); }
@@ -892,7 +882,7 @@ app.get('/api/kpi/revenue', cached('revenue', 60, async () => {
   // Trigger background detail-enrichment for any invoices missing sub_total.
   // Non-blocking: response is served immediately with best available data.
   // When enrichment completes the 'revenue' cache is busted so next request is accurate.
-  enrichSubTotalsBackground(thisFY).catch(() => {});
+  background(enrichSubTotalsBackground(thisFY).catch(() => {}));
 
   return {
     this_month:        thisMonth.reduce((s, i) => s + subTotal(i), 0),
@@ -1233,9 +1223,11 @@ app.get('/api/charts/client-payment-delay', cached('client-delay', 600, async ()
 }));
 
 // ─── Branch Seats (read from Excel) ───────────────────────────────────────────
+const BRANCH_SEATS_FILE = path.join(__dirname, '..', 'Branch wise Total Seat.xlsx');
+
 function readBranchSeats() {
-  const excelPath = path.join(__dirname, '..', 'Branch wise Total Seat.xlsx');
-  const workbook = XLSX.readFile(excelPath);
+  const excelPath = BRANCH_SEATS_FILE;
+  const workbook = workbooks.read('branch_seats', excelPath);
   const ws = workbook.Sheets[workbook.SheetNames[0]];
   const rows = XLSX.utils.sheet_to_json(ws, { header: 1 });
   const map = {};
@@ -1256,8 +1248,8 @@ const CLOSED_BRANCHES = new Set([
 ]);
 
 function readBranchConfig() {
-  const excelPath = path.join(__dirname, '..', 'Branch wise Total Seat.xlsx');
-  const workbook = XLSX.readFile(excelPath);
+  const excelPath = BRANCH_SEATS_FILE;
+  const workbook = workbooks.read('branch_seats', excelPath);
   const ws = workbook.Sheets[workbook.SheetNames[0]];
   const rows = XLSX.utils.sheet_to_json(ws, { header: 1 });
   let totalSeats = 0, totalArea = 0;
@@ -1404,6 +1396,13 @@ app.get('/api/kpi/ar-aging', cached('ar-aging', 60, async () => {
 // Serve PDF/DOCX files — path validated to stay inside AGREEMENTS_DIR
 app.get('/api/agreements/file/*', (req, res) => {
   const rel  = decodeURIComponent(req.params[0] || '');
+  if (IS_VERCEL) {
+    // Vercel holds no PDFs: open the company OneDrive/SharePoint copy of "Client Agreements"
+    // (same folder layout), e.g. AGREEMENTS_BASE_URL=https://<tenant>.sharepoint.com/sites/<site>/Shared Documents/Client Agreements
+    const base = (process.env.AGREEMENTS_BASE_URL || '').replace(/\/+$/, '');
+    if (!base) return res.status(404).send('Agreement PDFs are kept in the company OneDrive — AGREEMENTS_BASE_URL is not set.');
+    return res.redirect(`${base}/${rel.split('/').map(encodeURIComponent).join('/')}`);
+  }
   const full = path.resolve(AGREEMENTS_DIR, rel);
   if (!full.startsWith(path.resolve(AGREEMENTS_DIR))) return res.status(403).send('Forbidden');
   if (!fs.existsSync(full)) return res.status(404).send('Not found');
@@ -1411,8 +1410,12 @@ app.get('/api/agreements/file/*', (req, res) => {
 });
 
 // Folder structure scan
-app.get('/api/agreements/structure', (req, res) => {
-  try { res.json(scanAgreementsFolder()); }
+app.get('/api/agreements/structure', async (req, res) => {
+  try {
+    // Vercel has no agreements folder: the listing stored by upload-to-neon.js
+    if (IS_VERCEL) return res.json((await db.readJSON('agreements_structure', null, null)) || {});
+    res.json(scanAgreementsFolder());
+  }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -2493,7 +2496,7 @@ const PL_RETIRED_HEAD_IDS = new Set(['travel_recurring', 'travel_opex']);
 // head's mapped accounts by id, so renamed or moved heads keep their mappings.
 async function readPLMapping() {
   let savedHeads = [];
-  try { savedHeads = JSON.parse(await fs.promises.readFile(PL_MAPPING_FILE, 'utf8')).heads || []; } catch {}
+  try { savedHeads = (await db.readJSON('pl_mapping', PL_MAPPING_FILE, null))?.heads || []; } catch {}
   savedHeads = savedHeads.filter(h => !PL_RETIRED_HEAD_IDS.has(h.id));
   const savedById  = new Map(savedHeads.map(h => [h.id, h]));
   const defaultIds = new Set(PL_DEFAULT_HEADS.map(h => h.id));
@@ -2522,21 +2525,19 @@ function plTotalRevenue(heads, headAmounts) {
 }
 
 async function writePLMapping(data) {
-  await fs.promises.writeFile(PL_MAPPING_FILE, JSON.stringify(data, null, 2), 'utf8');
+  await db.writeJSON('pl_mapping', PL_MAPPING_FILE, data);
 }
 
 async function readPLCapacity() {
-  try {
-    return JSON.parse(await fs.promises.readFile(PL_CAPACITY_FILE, 'utf8'));
-  } catch {
-    const cap = {};
-    for (const b of BUDGET_BRANCHES) cap[b.name] = { sqft: b.sqft, seats: 0 };
-    return cap;
-  }
+  const saved = await db.readJSON('pl_branch_capacity', PL_CAPACITY_FILE, null);
+  if (saved) return saved;
+  const cap = {};
+  for (const b of BUDGET_BRANCHES) cap[b.name] = { sqft: b.sqft, seats: 0 };
+  return cap;
 }
 
 async function writePLCapacity(data) {
-  await fs.promises.writeFile(PL_CAPACITY_FILE, JSON.stringify(data, null, 2), 'utf8');
+  await db.writeJSON('pl_branch_capacity', PL_CAPACITY_FILE, data);
 }
 
 function parseFYStr(fy) {
@@ -2608,12 +2609,15 @@ function plFYCachePath(fy, entity) {
   return path.join(PL_FY_CACHE_DIR, fy, `${entity}.json`);
 }
 
+// Neon mode: kv_store 'pl_fy_<fy>_<entity>' (the office PC keeps pl_fy_cache/<fy>/<entity>.json)
 async function readPLFYCache(fy, entity) {
+  if (db.USE_DB) return db.readJSON(`pl_fy_${fy}_${entity}`, null, null);
   try { return JSON.parse(await fs.promises.readFile(plFYCachePath(fy, entity), 'utf8')); }
   catch { return null; }
 }
 
 async function writePLFYCache(fy, entity, data) {
+  if (db.USE_DB) return db.writeJSON(`pl_fy_${fy}_${entity}`, null, data);
   const dir = path.join(PL_FY_CACHE_DIR, fy);
   await fs.promises.mkdir(dir, { recursive: true });
   await fs.promises.writeFile(plFYCachePath(fy, entity), JSON.stringify(data), 'utf8');
@@ -2666,6 +2670,7 @@ const PL_ACCT_TXN_DISK_TTL = 23 * 3600 * 1000; // 23-hour disk TTL (refreshed at
 const _plPrefetchStatus = {};                    // fy → { running, total, done, … }
 
 async function readPLAcctTxnsDisk(fy, accountId) {
+  if (db.USE_DB) return db.readJSON(`pl_fy_${fy}_acct_${accountId}`, null, null);
   try {
     const p = path.join(PL_FY_CACHE_DIR, fy, `acct_${accountId}.json`);
     const raw = await fs.promises.readFile(p, 'utf8');
@@ -2675,14 +2680,12 @@ async function readPLAcctTxnsDisk(fy, accountId) {
 
 async function writePLAcctTxnsDisk(fy, accountId, txns) {
   const { fyStart, fyEnd } = parseFYStr(fy);
+  const doc = { account_id: accountId, fy, fy_start: fyStart, fy_end: fyEnd,
+    fetched_at: new Date().toISOString(), transactions: txns };
+  if (db.USE_DB) return db.writeJSON(`pl_fy_${fy}_acct_${accountId}`, null, doc);
   const dir = path.join(PL_FY_CACHE_DIR, fy);
   await fs.promises.mkdir(dir, { recursive: true });
-  await fs.promises.writeFile(
-    path.join(dir, `acct_${accountId}.json`),
-    JSON.stringify({ account_id: accountId, fy, fy_start: fyStart, fy_end: fyEnd,
-      fetched_at: new Date().toISOString(), transactions: txns }),
-    'utf8'
-  );
+  await fs.promises.writeFile(path.join(dir, `acct_${accountId}.json`), JSON.stringify(doc), 'utf8');
 }
 
 // Fetch ALL FY transactions for one account from Zoho, save to disk, return rows.
@@ -2810,7 +2813,7 @@ function plAcctNet(rows, accountId, ctx, branchSet) {
 
 function queuePLBranchDetails(rows) {
   for (const t of rows) if (PL_TXN_DETAIL[t.transaction_type]) _plBranchQueue.set(t.transaction_id, t.transaction_type);
-  if (_plBranchQueue.size && !_plBranchWorker) _plBranchWorker = drainPLBranchQueue().finally(() => { _plBranchWorker = null; });
+  if (_plBranchQueue.size && !_plBranchWorker) _plBranchWorker = background(drainPLBranchQueue().finally(() => { _plBranchWorker = null; }));
 }
 
 async function drainPLBranchQueue() {
@@ -2850,16 +2853,35 @@ async function drainPLBranchQueue() {
 }
 
 // Sequentially prefetch all accounts for a FY; saves to disk.
+// Neon: accounts ordered oldest-cache-first, dropping any written within freshMs
+async function plPrefetchOrder(fy, accountIds, freshMs) {
+  const prefix = `pl_fy_${fy}_acct_`;
+  const age = {};
+  for (const r of await db.listKeys(prefix)) age[r.key.slice(prefix.length)] = new Date(r.updated_at).getTime();
+  const now = Date.now();
+  return accountIds
+    .filter(id => !(age[id] && now - age[id] < freshMs))
+    .sort((a, b) => (age[a] || 0) - (age[b] || 0));
+}
+
 async function runPLPrefetch(fy, accountIds, label) {
   if (_plPrefetchStatus[fy]?.running) {
     console.log(`[prefetch] FY ${fy} already running, skipping`);
     return;
+  }
+  // Vercel: one function run lasts at most 5 minutes, so refresh the stalest accounts first
+  // and stop in time; the next trigger (cron, report load, button) carries on from there.
+  let deadline = Infinity;
+  if (IS_VERCEL) {
+    accountIds = await plPrefetchOrder(fy, accountIds, label === 'manual' ? 3600e3 : 20 * 3600e3);
+    deadline = Date.now() + 240e3;
   }
   _plPrefetchStatus[fy] = { running: true, label: label || 'prefetch',
     started_at: new Date().toISOString(), total: accountIds.length, done: 0,
     total_txns: 0, error: null, accounts: {} };
   console.log(`[prefetch] FY ${fy}: fetching ${accountIds.length} accounts sequentially`);
   for (const accountId of accountIds) {
+    if (Date.now() > deadline) { _plPrefetchStatus[fy].stopped_early = true; break; }
     try {
       const txns = await fetchAndCacheAccountTxnsFY(fy, accountId);
       _plPrefetchStatus[fy].done++;
@@ -2877,7 +2899,18 @@ async function runPLPrefetch(fy, accountIds, label) {
 }
 
 // ─── Daily 11 PM auto-sync ─────────────────────────────────────────────────────
+// Refresh every mapped account's FY transactions (also called by Vercel Cron: /api/cron/pl)
+async function plDailyRefresh(label) {
+  const fy = currentFYTag();
+  const mapping = await readPLMapping();
+  const ids = [...new Set(
+    mapping.heads.flatMap(h => (h.accounts || []).map(a => a.account_id).filter(Boolean))
+  )];
+  if (ids.length) await runPLPrefetch(fy, ids, label);
+}
+
 ;(function schedulePLDailySync() {
+  if (IS_VERCEL) return; // no long-lived timers on Vercel — Vercel Cron calls /api/cron/pl
   function msUntil11PM() {
     const now = new Date();
     const t = new Date(now);
@@ -2888,12 +2921,7 @@ async function runPLPrefetch(fy, accountIds, label) {
   setTimeout(async function runSync() {
     console.log('[pl/daily-sync] 11 PM trigger running…');
     try {
-      const fy = currentFYTag();
-      const mapping = await readPLMapping();
-      const ids = [...new Set(
-        mapping.heads.flatMap(h => (h.accounts || []).map(a => a.account_id).filter(Boolean))
-      )];
-      if (ids.length) await runPLPrefetch(fy, ids, 'daily-11pm');
+      await plDailyRefresh('daily-11pm');
     } catch (e) { console.error('[pl/daily-sync]', e.message); }
     setTimeout(runSync, msUntil11PM());
   }, msUntil11PM());
@@ -3100,7 +3128,7 @@ app.get('/api/pl/report', authMiddleware, async (req, res) => {
         mapping.heads.flatMap(h => (h.accounts || []).map(a => a.account_id).filter(Boolean))
       )];
       console.log(`[pl/report] ${missingAccounts.length} accounts missing cache; queuing prefetch for FY ${fy}`);
-      setImmediate(() => runPLPrefetch(fy, allAcctIds, 'auto-on-report-load'));
+      background(new Promise(done => setImmediate(() => runPLPrefetch(fy, allAcctIds, 'auto-on-report-load').finally(done))));
     }
 
     const headResults = {};
@@ -3260,7 +3288,7 @@ app.post('/api/pl/prefetch', authMiddleware, async (req, res) => {
   const mapping = await readPLMapping();
   const accountIds = [...new Set(mapping.heads.flatMap(h => (h.accounts||[]).map(a => a.account_id).filter(Boolean)))];
   if (!accountIds.length) return res.json({ ok: false, message: 'No accounts mapped yet. Configure P&L Mapping first.' });
-  setImmediate(() => runPLPrefetch(fy, accountIds, 'manual'));
+  background(new Promise(done => setImmediate(() => runPLPrefetch(fy, accountIds, 'manual').finally(done))));
   res.json({ ok: true, fy, account_count: accountIds.length, message: `Fetching ${accountIds.length} accounts for FY ${fy}. Check /api/pl/prefetch/status for progress.` });
 });
 
@@ -4335,7 +4363,6 @@ app.get('/api/purchase/msme-report', async (req, res) => {
 
 // ─── MSME Interest Report ─────────────────────────────────────────────────────
 const MSME_IR_DATA_FILE = path.join(__dirname, 'msme_interest_data.json');
-const MSME_VRG_FILE     = path.join(__dirname, 'vendor_registrations.json');
 
 async function readMsmeIR() {
   const def = {
@@ -4672,7 +4699,7 @@ app.put('/api/msme-interest/settings', authMiddleware, adminOnly, async (req, re
     await writeMsmeIR(d);
     cache.keys().filter(k => k.startsWith('msme-ir-')).forEach(k => cache.del(k));
     // Settings affect interest calculation → invalidate all persistent quarter result caches
-    invalidateMsmeQR().catch(() => {});
+    background(invalidateMsmeQR().catch(() => {}));
     const s = d.settings;
     res.json({ ...s, simple_rate: s.bank_rate * s.multiplier, effective_rate: Math.pow(1 + s.bank_rate * s.multiplier / 12, 12) - 1 });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -4701,8 +4728,8 @@ app.put('/api/msme-interest/vendor-master/:vid', authMiddleware, adminOnly, asyn
     await writeMsmeIR(d);
     cache.keys().filter(k => k.startsWith('msme-ir-')).forEach(k => cache.del(k));
     // vendor_master change affects MSME classification → invalidate contact map + all quarter results
-    invalidateMsmeCM().catch(() => {});
-    invalidateMsmeQR().catch(() => {});
+    background(invalidateMsmeCM().catch(() => {}));
+    background(invalidateMsmeQR().catch(() => {}));
     res.json({ ok: true, vid, data: d.vendor_master[vid] });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -4752,7 +4779,7 @@ app.get('/api/msme-interest/quarter', authMiddleware, async (req, res) => {
     const billsSyncHash = `${billsHashBase}|cm:${cmStamp}`;
 
     let vendorRegs = [];
-    try { vendorRegs = JSON.parse(fs.readFileSync(MSME_VRG_FILE, 'utf8')); } catch (_) {}
+    try { vendorRegs = (await readVendorRegs()) || []; } catch (_) {}
     const regByZohoId = {};
     for (const vr of vendorRegs) {
       if (vr.zohoContactId && vr.data) regByZohoId[vr.zohoContactId] = vr.data;
@@ -4901,7 +4928,7 @@ app.get('/api/msme-interest/major-activity-diagnostics', authMiddleware, adminOn
       const billMap = {};
       for (const b of [...openR.data, ...overdueR.data]) billMap[b.bill_id] = b;
       let vendorRegs = [];
-      try { vendorRegs = JSON.parse(fs.readFileSync(MSME_VRG_FILE, 'utf8')); } catch (_) {}
+      try { vendorRegs = (await readVendorRegs()) || []; } catch (_) {}
       const regByZohoId = {};
       for (const vr of vendorRegs) if (vr.zohoContactId && vr.data) regByZohoId[vr.zohoContactId] = vr.data;
       dashBills = computeQuarterBills(Object.values(billMap), cm, d.vendor_master || {}, regByZohoId, qDates.end, d.settings);
@@ -7300,7 +7327,7 @@ function normalizeCompany(raw) {
 // ── Main payroll data: one row per employee per payroll month ─────────────────
 function readGroupSalaryData() {
   if (!fs.existsSync(PAYROLL_WORKBOOK)) return [];
-  const wb = XLSX.readFile(PAYROLL_WORKBOOK);
+  const wb = workbooks.read('payroll', PAYROLL_WORKBOOK);
   const ws = wb.Sheets[GROUP_SHEET_NAME];
   if (!ws) return [];
   const raw = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: null });
@@ -7381,7 +7408,7 @@ function readGroupSalaryData() {
 // and cross-checked (gross × % sums back to the sheet's own quarterly subtotal row).
 function readCaptiveSalaryData() {
   if (!fs.existsSync(PAYROLL_WORKBOOK)) return { employees: [], monthKeys: [], companyOrder: [] };
-  const wb = XLSX.readFile(PAYROLL_WORKBOOK);
+  const wb = workbooks.read('payroll', PAYROLL_WORKBOOK);
   const ws = wb.Sheets[CAPTIVE_SHEET_NAME];
   if (!ws) return { employees: [], monthKeys: [], companyOrder: [] };
   const raw = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: null });
@@ -7508,11 +7535,12 @@ app.get('/api/payroll/data', payrollAuth, cached('payroll-data', 3600, async () 
 
 // ─── Loan Module ─────────────────────────────────────────────────────────────
 const LOAN_BASE = path.join(__dirname, '..', 'Loan Module');
+const LOAN_FILE = path.join(LOAN_BASE, 'Loan Data Final (1).xlsx');
 
 function readLoanData() {
-  const filePath = path.join(LOAN_BASE, 'Loan Data Final (1).xlsx');
-  if (!fs.existsSync(filePath)) return { institutional: [], other: [] };
-  const wb = XLSX.readFile(filePath);
+  const filePath = LOAN_FILE;
+  if (db.USE_DB ? !workbooks.stored('loans') : !fs.existsSync(filePath)) return { institutional: [], other: [] };
+  const wb = workbooks.read('loans', filePath);
   const ws = wb.Sheets[wb.SheetNames[0]];
   const rows = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: '' });
 
@@ -8334,7 +8362,7 @@ async function rptOptions(source, refresh) {
   if (!refresh && !_rptOptInflight.has(source)) {
     const hit = (await rptStore('rpt_zoho_options', RPT_OPTIONS_FILE))[source];
     if (hit?.items?.length && !syncEngine.isFresh(hit.fetched_at, RPT_OPTIONS_TTL_H)) {
-      rptOptionsFetch(source, true).catch(() => {});
+      background(rptOptionsFetch(source, true).catch(() => {}));
       return { items: hit.items, stale: true };
     }
   }
@@ -8628,6 +8656,25 @@ function genVendorId() {
   return Date.now().toString(36) + Math.random().toString(36).substr(2, 6);
 }
 
+// ── Uploads on Vercel ─────────────────────────────────────────────────────────
+// Vercel accepts at most ~4.5 MB per request, so its screens send attachments first, one per
+// request (upload-session → upload-file), then submit the form without them. Files go to
+// private Blob storage (file-store.js). The office PC keeps receiving files with the form.
+const stagedUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 4 * 1024 * 1024 } });
+const uploadToken = (kind, sid) => crypto.createHmac('sha256', process.env.JWT_SECRET).update(`upload:${kind}:${sid}`).digest('hex');
+function validUploadToken(kind, sid, token) {
+  if (!sid || !token || !/^[a-z0-9]+$/.test(String(sid))) return false;
+  const a = Buffer.from(String(token)), b = Buffer.from(uploadToken(kind, String(sid)));
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+const parseJSON = (s, fallback) => { try { return JSON.parse(s); } catch { return fallback; } };
+function stagedFileMiddleware(req, res, next) {
+  stagedUpload.single('file')(req, res, err => {
+    if (err) return res.status(400).json({ error: err.code === 'LIMIT_FILE_SIZE' ? 'Each file must be under 4 MB' : err.message });
+    next();
+  });
+}
+
 const vendorStorage = multer.diskStorage({
   destination: (req, file, cb) => {
     if (!req.vendorSubmissionId) req.vendorSubmissionId = genVendorId();
@@ -8637,7 +8684,7 @@ const vendorStorage = multer.diskStorage({
   },
   filename: (req, file, cb) => cb(null, file.fieldname + path.extname(file.originalname)),
 });
-const vendorUpload = multer({ storage: vendorStorage, limits: { fileSize: 20 * 1024 * 1024 } });
+const vendorUpload = multer({ storage: fileStore.enabled ? multer.memoryStorage() : vendorStorage, limits: { fileSize: 20 * 1024 * 1024 } });
 
 const VENDOR_FILE_FIELDS = [
   { name: 'regOfficeGstCertificate',    maxCount: 1 },
@@ -8665,17 +8712,61 @@ const VENDOR_FILE_FIELDS = [
   { name: 'additionalGstCert_4',        maxCount: 1 },
 ];
 
+const VENDOR_FIELD_NAMES = new Set(VENDOR_FILE_FIELDS.map(f => f.name));
+
+// Vercel only (public, used by the vendor form): one attachment per request into Blob storage
+app.post('/api/vendor-registration/upload-session', (req, res) => {
+  if (!fileStore.enabled) return res.json({ staged: false });
+  const sid = genVendorId();
+  res.json({ staged: true, sid, token: uploadToken('vendor', sid) });
+});
+app.post('/api/vendor-registration/upload-file', stagedFileMiddleware, async (req, res) => {
+  const sid = String(req.headers['x-upload-session'] || '');
+  if (!fileStore.enabled || !validUploadToken('vendor', sid, req.headers['x-upload-token'])) {
+    return res.status(403).json({ error: 'Upload session not valid' });
+  }
+  const field = String(req.body?.field || '');
+  if (!VENDOR_FIELD_NAMES.has(field)) return res.status(400).json({ error: `Unknown attachment: ${field}` });
+  if (!req.file) return res.status(400).json({ error: 'No file received' });
+  try {
+    const filename = field + path.extname(req.file.originalname);
+    await fileStore.save(`vendor-uploads/${sid}/${filename}`, req.file.buffer, req.file.mimetype);
+    res.json({ field, filename });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // POST /api/vendor-registration/submit — public endpoint
 app.post('/api/vendor-registration/submit',
   (req, res, next) => { req.vendorSubmissionId = genVendorId(); next(); },
   vendorUpload.fields(VENDOR_FILE_FIELDS),
   async (req, res) => {
     try {
-      const id = req.vendorSubmissionId;
+      let id = req.vendorSubmissionId;
       const body = req.body || {};
       const fileMap = {};
-      for (const [field, arr] of Object.entries(req.files || {})) {
-        fileMap[field] = arr[0]?.filename || null;
+      if (fileStore.enabled) {
+        // Vercel: attachments uploaded beforehand, one per request …
+        if (body.uploadSession) {
+          if (!validUploadToken('vendor', body.uploadSession, body.uploadToken)) {
+            return res.status(403).json({ error: 'Upload session not valid — please submit again' });
+          }
+          id = body.uploadSession;
+          for (const [field, filename] of Object.entries(parseJSON(body.uploadedFiles, {}))) {
+            if (VENDOR_FIELD_NAMES.has(field) && filename === field + path.extname(filename)) fileMap[field] = filename;
+          }
+        }
+        // … or sent with the form (small submissions): into Blob storage
+        for (const [field, arr] of Object.entries(req.files || {})) {
+          const f = arr[0];
+          if (!f) continue;
+          const filename = field + path.extname(f.originalname);
+          await fileStore.save(`vendor-uploads/${id}/${filename}`, f.buffer, f.mimetype);
+          fileMap[field] = filename;
+        }
+      } else {
+        for (const [field, arr] of Object.entries(req.files || {})) {
+          fileMap[field] = arr[0]?.filename || null;
+        }
       }
       const record = {
         id,
@@ -9152,6 +9243,10 @@ app.get('/api/vendor-registrations/:id/file/:field', async (req, res) => {
   if (!rec) return res.status(404).send('Not found');
   const filename = rec.files?.[req.params.field];
   if (!filename) return res.status(404).send('File not found');
+  if (fileStore.enabled) {
+    if (!(await fileStore.send(res, `vendor-uploads/${rec.id}/${filename}`))) res.status(404).send('File missing in storage');
+    return;
+  }
   const filePath = path.join(VENDOR_UPLOADS_DIR, req.params.id, filename);
   if (!fs.existsSync(filePath)) return res.status(404).send('File missing on disk');
   res.sendFile(filePath);
@@ -9880,7 +9975,9 @@ const pocmInFlight = new Map();
 const POCM_DISK_CACHE_DIR = path.join(__dirname, 'pocm_disk_cache');
 try { fs.mkdirSync(POCM_DISK_CACHE_DIR, { recursive: true }); } catch (_) {} // read-only disk on Vercel
 
+// Neon mode (Vercel): the same store lives in kv_store via pocm-sync (pocmSync.ensureLoaded)
 function diskCacheSave(key, data) {
+  if (db.USE_DB) return pocmSync.writeDiskCache(key, data);
   try {
     fs.writeFileSync(path.join(POCM_DISK_CACHE_DIR, `${key}.json`), JSON.stringify(data), 'utf8');
     console.log(`[POCM disk-cache] saved ${key} (${data.length} entries)`);
@@ -9890,6 +9987,11 @@ function diskCacheSave(key, data) {
 }
 
 function diskCacheLoad(key, ttl) {
+  if (db.USE_DB) {
+    const data = pocmSync.readDiskCache(key);
+    if (data) cache.set(key, data, ttl);
+    return data;
+  }
   try {
     const file = path.join(POCM_DISK_CACHE_DIR, `${key}.json`);
     if (!fs.existsSync(file)) return null;
@@ -11055,7 +11157,7 @@ function pocmUtilisation(targetDate, detailFor = null) {
     const key = `pocm-bills-v8-${y}-04-01`;
     let entries = cache.get(key);
     if (!entries) {
-      try { entries = JSON.parse(fs.readFileSync(path.join(POCM_DISK_CACHE_DIR, `${key}.json`), 'utf8')); }
+      try { entries = db.USE_DB ? (pocmSync.readDiskCache(key) || []) : JSON.parse(fs.readFileSync(path.join(POCM_DISK_CACHE_DIR, `${key}.json`), 'utf8')); }
       catch (_) { entries = []; }
     }
     for (const e of entries) {
@@ -11203,7 +11305,7 @@ function pocmTeamColumns({ projectList, qe, targetDate }) {
       const key = `pocm-invoices-v5-${y}-04-01`;
       let invoices = cache.get(key);
       if (!invoices) {
-        try { invoices = JSON.parse(fs.readFileSync(path.join(POCM_DISK_CACHE_DIR, `${key}.json`), 'utf8')); }
+        try { invoices = db.USE_DB ? (pocmSync.readDiskCache(key) || []) : JSON.parse(fs.readFileSync(path.join(POCM_DISK_CACHE_DIR, `${key}.json`), 'utf8')); }
         catch (_) { invoices = []; }
       }
       for (const inv of invoices) {
@@ -11795,26 +11897,69 @@ const portalStorage = multer.diskStorage({
     try { fs.mkdirSync(dir, { recursive: true }); } catch (e) { return cb(e); } // e.g. read-only disk on Vercel
     cb(null, dir);
   },
-  filename(req, file, cb) {
-    const ext  = path.extname(file.originalname) || '';
-    const base = path.basename(file.originalname, ext).replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 60);
-    cb(null, `${Date.now()}-${base}${ext}`);
-  },
+  filename(req, file, cb) { cb(null, portalFileName(file.originalname)); },
 });
-const portalUpload = multer({ storage: portalStorage, limits: { fileSize: 25 * 1024 * 1024 } });
+function portalFileName(original) {
+  const ext  = path.extname(original) || '';
+  const base = path.basename(original, ext).replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 60);
+  return `${Date.now()}-${base}${ext}`;
+}
+const portalUpload = multer({ storage: fileStore.enabled ? multer.memoryStorage() : portalStorage, limits: { fileSize: 25 * 1024 * 1024 } });
+const PORTAL_FILE_FIELDS = new Set(['bill_attachment', 'loi_attachment', 'statement_attachment', 'payment_attachment']);
+
+// Vercel only: one attachment per request into Blob storage (see stagedUpload)
+app.post('/api/portal/upload-session', (req, res) => {
+  if (!fileStore.enabled) return res.json({ staged: false });
+  const sid = 'ps' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  res.json({ staged: true, sid, token: uploadToken('portal', sid) });
+});
+app.post('/api/portal/upload-file', stagedFileMiddleware, async (req, res) => {
+  const sid = String(req.headers['x-upload-session'] || '');
+  if (!fileStore.enabled || !validUploadToken('portal', sid, req.headers['x-upload-token'])) {
+    return res.status(403).json({ error: 'Upload session not valid' });
+  }
+  const field = String(req.body?.field || '');
+  if (!PORTAL_FILE_FIELDS.has(field)) return res.status(400).json({ error: `Unknown attachment: ${field}` });
+  if (!req.file) return res.status(400).json({ error: 'No file received' });
+  try {
+    const filename = portalFileName(req.file.originalname);
+    await fileStore.save(`portal-uploads/${sid}/${filename}`, req.file.buffer, req.file.mimetype);
+    res.json({ field, filename, original: req.file.originalname, size: req.file.size });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 
 const setPortalId = async (req, res, next) => {
   req._portalId = await genPortalId();
-  try { fs.mkdirSync(path.join(PORTAL_UPLOADS, req._portalId), { recursive: true }); } catch (_) {}
+  if (!fileStore.enabled) { try { fs.mkdirSync(path.join(PORTAL_UPLOADS, req._portalId), { recursive: true }); } catch (_) {} }
   next();
 };
 
 app.post('/api/portal/submit', setPortalId, portalUpload.any(), async (req, res) => {
   try {
     const b     = req.body || {};
-    const files = (req.files || []).map(f => ({
-      field: f.fieldname, filename: f.filename, original: f.originalname, size: f.size,
-    }));
+    let files;
+    if (fileStore.enabled) {
+      // Vercel: attachments uploaded beforehand (kept under their upload session) …
+      files = [];
+      if (b.uploadSession) {
+        if (!validUploadToken('portal', b.uploadSession, b.uploadToken)) return res.status(403).json({ error: 'Upload session not valid — please submit again' });
+        for (const f of parseJSON(b.uploadedFiles, [])) {
+          if (PORTAL_FILE_FIELDS.has(f.field) && /^[\w.-]+$/.test(f.filename || '')) {
+            files.push({ field: f.field, filename: f.filename, original: String(f.original || ''), size: Number(f.size) || 0, folder: b.uploadSession });
+          }
+        }
+      }
+      // … or sent with the form (small submissions): into Blob storage
+      for (const f of req.files || []) {
+        const filename = portalFileName(f.originalname);
+        await fileStore.save(`portal-uploads/${req._portalId}/${filename}`, f.buffer, f.mimetype);
+        files.push({ field: f.fieldname, filename, original: f.originalname, size: f.size });
+      }
+    } else {
+      files = (req.files || []).map(f => ({
+        field: f.fieldname, filename: f.filename, original: f.originalname, size: f.size,
+      }));
+    }
     const sub = {
       id:                req._portalId,
       submission_type:   b.submission_type   || '',
@@ -11900,8 +12045,16 @@ app.patch('/api/portal/submissions/:id', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.get('/api/portal/file/:id/:filename', (req, res) => {
+app.get('/api/portal/file/:id/:filename', async (req, res) => {
+  if (fileStore.enabled) {
+    const sub = (await readPortal()).find(s => s.id === req.params.id);
+    const f = sub?.files?.find(x => x.filename === req.params.filename);
+    if (!f || !(await fileStore.send(res, `portal-uploads/${f.folder || sub.id}/${f.filename}`))) res.status(404).send('Not found');
+    return;
+  }
   const fp = path.join(PORTAL_UPLOADS, req.params.id, req.params.filename);
+  // Stay inside portal-uploads (an encoded ../ in the URL must not reach other server files)
+  if (!path.resolve(fp).startsWith(path.resolve(PORTAL_UPLOADS) + path.sep)) return res.status(403).send('Forbidden');
   if (!fs.existsSync(fp)) return res.status(404).send('Not found');
   res.sendFile(fp);
 });
@@ -12673,27 +12826,34 @@ app.post('/api/crm/actuals', async (req, res) => {
 // CRM bill file uploads — saved to OneDrive month-wise folders
 const CRM_BILLS_ROOT = 'D:\\OneDrive - Dev Accelerator Limited\\Submitted Documents\\CRM Team Bills Folder';
 
+// <month>/<branch name> folder of a bill (office PC: under CRM_BILLS_ROOT; Vercel: Blob crm-bills/)
+function crmBillFolder({ branchId, month }) {
+  const branch = BUDGET_BRANCHES.find(b => b.id === branchId);
+  const safeBranch = (branch ? branch.name : branchId).replace(/[\/\\:*?"<>|]/g, '_');
+  return [month || 'unknown', safeBranch];
+}
+function crmBillFileName({ itemId }, original) {
+  return `${itemId || 'bill'}_${Date.now()}${path.extname(original) || '.pdf'}`;
+}
+
 const crmBillStorage = multer.diskStorage({
   destination: (req, file, cb) => {
-    const { branchId, month } = req.body;
-    const branch = BUDGET_BRANCHES.find(b => b.id === branchId);
-    const safeBranch = (branch ? branch.name : branchId).replace(/[\/\\:*?"<>|]/g, '_');
-    const dir = path.join(CRM_BILLS_ROOT, month || 'unknown', safeBranch);
+    const dir = path.join(CRM_BILLS_ROOT, ...crmBillFolder(req.body));
     try { fs.mkdirSync(dir, { recursive: true }); } catch (e) { return cb(e); } // e.g. read-only disk on Vercel
     cb(null, dir);
   },
-  filename: (req, file, cb) => {
-    const itemId = req.body.itemId || 'bill';
-    const ext = path.extname(file.originalname) || '.pdf';
-    cb(null, `${itemId}_${Date.now()}${ext}`);
-  }
+  filename: (req, file, cb) => cb(null, crmBillFileName(req.body, file.originalname)),
 });
-const crmBillUpload = multer({ storage: crmBillStorage, limits: { fileSize: 25 * 1024 * 1024 } });
+const crmBillUpload = multer({ storage: fileStore.enabled ? multer.memoryStorage() : crmBillStorage, limits: { fileSize: 25 * 1024 * 1024 } });
 
 app.post('/api/crm/upload-bill', crmBillUpload.single('bill'), async (req, res) => {
   const { branchId, month, itemId } = req.body;
   if (!branchId || !month || !itemId || !req.file) {
     return res.status(400).json({ error: 'branchId, month, itemId and file required' });
+  }
+  if (fileStore.enabled) {   // Vercel: into Blob storage (crm-bills/<month>/<branch>/<file>)
+    req.file.filename = crmBillFileName(req.body, req.file.originalname);
+    await fileStore.save(['crm-bills', ...crmBillFolder(req.body), req.file.filename].join('/'), req.file.buffer, req.file.mimetype);
   }
   const data = await readCrmActuals();
   if (!data[branchId]) data[branchId] = {};
@@ -15245,12 +15405,71 @@ app.get('/api/cron/sync', cronAuth, async (req, res) => {
   cache.flushAll();
   res.json({ ok: true });
 });
+app.get('/api/cron/pl', cronAuth, async (req, res) => {
+  try {
+    await plDailyRefresh('daily-cron'); // stops before Vercel's time limit; next run continues
+    res.json({ ok: true, status: _plPrefetchStatus[currentFYTag()] || null });
+  } catch (e) {
+    console.error('[pl/daily-sync] Cron error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
 app.get('/api/cron/pocm', cronAuth, async (req, res) => {
   try {
+    await pocmSync.ensureLoaded();   // Neon mode: the POCM store, before syncing onto it
     await pocmSync.syncAll({ trigger: 'scheduled' });
     res.json({ ok: true });
   } catch (e) {
     console.error('[pocm-sync] Cron sync error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── Admin: Excel workbooks the server reads (Sync Monitor → Excel Files) ──────
+// Office PC: read from the project folder (replace the file there). Neon (Vercel): the
+// stored copy, replaced by uploading a new .xlsx here.
+const WORKBOOK_INFO = {
+  branch_seats: { label: 'Branch-wise Total Seats',   used_by: 'Occupancy & capacity',  file: () => BRANCH_SEATS_FILE },
+  payroll:      { label: 'Group Salary Sheet',        used_by: 'Payroll Dashboard',     file: () => PAYROLL_WORKBOOK },
+  loans:        { label: 'Loan Data',                 used_by: 'Loan Module',           file: () => LOAN_FILE },
+  rent_module:  { label: 'Rent Recurring Module',     used_by: 'Rent report — Agreed',  file: () => { const p = require('./rent-agreed').pickLocalWorkbook(); return p ? path.join(__dirname, '..', p.f) : null; } },
+};
+const workbookUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 4 * 1024 * 1024 } });
+
+app.get('/api/admin/workbooks', authMiddleware, adminOnly, (req, res) => {
+  res.json({
+    mode: db.USE_DB ? 'database' : 'files',
+    workbooks: workbooks.KEYS.map(key => {
+      const info = WORKBOOK_INFO[key];
+      if (db.USE_DB) {
+        const s = workbooks.stored(key);
+        return { key, label: info.label, used_by: info.used_by, name: s?.name || null, size: s?.size || null, updated_at: s ? new Date(s.mtime).toISOString() : null };
+      }
+      const f = info.file();
+      const st = f && fs.existsSync(f) ? fs.statSync(f) : null;
+      return { key, label: info.label, used_by: info.used_by, name: st ? path.basename(f) : null, size: st?.size || null, updated_at: st ? st.mtime.toISOString() : null };
+    }),
+  });
+});
+
+app.post('/api/admin/workbooks/:key', authMiddleware, adminOnly, (req, res, next) => {
+  workbookUpload.single('file')(req, res, err => {
+    if (err) return res.status(400).json({ error: err.code === 'LIMIT_FILE_SIZE' ? 'File is larger than 4 MB' : err.message });
+    next();
+  });
+}, async (req, res) => {
+  const { key } = req.params;
+  if (!workbooks.KEYS.includes(key)) return res.status(400).json({ error: `Unknown workbook: ${key}` });
+  if (!db.USE_DB) return res.status(409).json({ error: 'On the office PC the dashboard reads this Excel file from the project folder — replace the file there.' });
+  if (!req.file || !/\.xlsx$/i.test(req.file.originalname)) return res.status(400).json({ error: 'Choose an .xlsx file' });
+  try { XLSX.read(req.file.buffer, { type: 'buffer' }); }
+  catch { return res.status(400).json({ error: 'This file could not be read as an Excel workbook' }); }
+  try {
+    await workbooks.save(key, req.file.originalname, req.file.buffer);
+    cache.flushAll();   // reports built from this sheet recompute
+    const s = workbooks.stored(key);
+    res.json({ ok: true, key, name: s.name, size: s.size, updated_at: new Date(s.mtime).toISOString() });
+  } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
@@ -15294,13 +15513,15 @@ app.post('/api/admin/sync/full-resync', authMiddleware, adminOnly, async (req, r
 
 // ── Admin: start a sync run in the background (poll /progress) ─────────────────
 // body: { mode: normal|recheck|full|full_refresh, entity?, confirm? }
-app.post('/api/admin/sync/run', authMiddleware, adminOnly, (req, res) => {
+app.post('/api/admin/sync/run', authMiddleware, adminOnly, async (req, res) => {
   const { mode = 'normal', entity } = req.body || {};
   if (!syncEngine.MODES[mode]) return res.status(400).json({ error: `Unknown mode: ${mode}` });
   if (entity && !syncEngine.ENTITY_DEFS[entity]) return res.status(400).json({ error: `Unknown entity: ${entity}` });
   if (mode === 'full_refresh' && !entity && req.body?.confirm !== true) {
     return res.status(400).json({ error: 'Full Data Refresh requires confirm: true' });
   }
+  const elsewhere = await syncEngine.sharedRunning();   // Neon: a run on another Vercel instance
+  if (elsewhere) return res.status(409).json({ error: 'A sync is already running', run_id: elsewhere.run_id });
   const onComplete = () => cache.flushAll();
   const r = entity
     ? syncEngine.startRun({ mode, trigger: 'entity', entities: syncEngine.withDependents(entity), onComplete })
@@ -15310,17 +15531,19 @@ app.post('/api/admin/sync/run', authMiddleware, adminOnly, (req, res) => {
 });
 
 // ── Admin: retry a failed entity (same mode it failed in) ─────────────────────
-app.post('/api/admin/sync/retry', authMiddleware, adminOnly, (req, res) => {
+app.post('/api/admin/sync/retry', authMiddleware, adminOnly, async (req, res) => {
   const { entity } = req.body || {};
   if (!syncEngine.ENTITY_DEFS[entity]) return res.status(400).json({ error: `Unknown entity: ${entity}` });
+  const elsewhere = await syncEngine.sharedRunning();
+  if (elsewhere) return res.status(409).json({ error: 'A sync is already running', run_id: elsewhere.run_id });
   const r = syncEngine.startRetry(entity, () => cache.flushAll());
   if (r.status === 'busy') return res.status(409).json({ error: 'A sync is already running', run_id: r.run_id });
   res.status(202).json(r);
 });
 
 // ── Admin: live progress of the current / last run (never triggers a sync) ───
-app.get('/api/admin/sync/progress', authMiddleware, adminOnly, (req, res) => {
-  res.json(syncEngine.getProgress());
+app.get('/api/admin/sync/progress', authMiddleware, adminOnly, async (req, res) => {
+  res.json(await syncEngine.getSharedProgress());
 });
 
 // ── Data freshness for dashboards ("Data as of …") — any signed-in user ───────
@@ -15347,7 +15570,7 @@ app.post('/api/admin/invoice-subtotals/refresh', authMiddleware, adminOnly, asyn
   // Force-clear map so ALL invoices are re-enriched (full refresh)
   if (req.body?.full) _invSubTotals = {};
   const toFetch = invoices.filter(i => i.invoice_id && _invSubTotals[i.invoice_id] == null).length;
-  enrichSubTotalsBackground(invoices).catch(() => {});
+  background(enrichSubTotalsBackground(invoices).catch(() => {}));
   res.json({ message: `Sub_total enrichment started for ${toFetch} invoices`, total: invoices.length });
 });
 
@@ -15359,6 +15582,13 @@ app.get('/api/admin/sync/log', authMiddleware, adminOnly, async (req, res) => {
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+// Neon mode (Vercel): steps 7, 8 and 15 read their documents from memory (fpa-store.js),
+// refreshed here with anything changed since the last request
+const fpaStore = require('./fpa-store');
+app.use(['/api/fpa/step15', '/api/fpa/step8', '/api/fpa/step7'], (req, res, next) => {
+  fpaStore.ensureLoaded().then(() => next(), e => res.status(503).json({ error: `FP&A data could not be loaded: ${e.message}` }));
 });
 
 // ─── FP&A Step 15 — Management Data Completion & Forecast Activation ──────────
@@ -15496,11 +15726,11 @@ app.get('*', (req, res) => {
 });
 
 const PORT = process.env.PORT || 3002;
-const IS_VERCEL = !!process.env.VERCEL;
 db.initDB()
-  .then(() => {
+  .then(async () => {
     // Load persisted invoice sub_totals (detail-fetched) so revenue KPIs are accurate on startup
-    _loadInvSubTotals();
+    await _loadInvSubTotals();
+    await workbooks.preload(); // Neon mode: stored Excel copies (office PC reads the files)
 
     // Initialise POCM sync module — injects dependencies and pre-loads disk cache into node-cache
     pocmSync.init(cache, zohoGet, zohoGetAll);

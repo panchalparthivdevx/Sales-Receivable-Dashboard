@@ -1,0 +1,36 @@
+# Extra scheduled runs for the dashboard on Vercel.
+# Vercel's free plan runs each cron in vercel.json once a day; these calls keep the Zoho data
+# refreshed through the day and let the nightly Branch P&L refresh finish in several passes.
+#
+# Needs two repository secrets (Settings → Secrets and variables → Actions):
+#   APP_URL      the dashboard's address, e.g. https://sales-receivable-dashboard.vercel.app
+#   CRON_SECRET  the same value as CRON_SECRET in the Vercel project
+# Until APP_URL is set the job does nothing.
+name: Scheduled sync
+
+on:
+  schedule:
+    - cron: '30 7,9,12,15 * * *'   # 1, 3, 6 and 9 PM IST — Zoho sync
+    - cron: '45 17 * * *'          # 11:15 PM IST — POCM sync, second pass (Vercel runs it at 11 PM)
+    - cron: '10,20,30 18 * * *'    # 11:40 PM – 12:00 AM IST — Branch P&L refresh, continued
+  workflow_dispatch:               # "Run workflow" button: a Zoho sync now
+
+jobs:
+  call:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      APP_URL: ${{ secrets.APP_URL }}
+      CRON_SECRET: ${{ secrets.CRON_SECRET }}
+      SCHEDULE: ${{ github.event.schedule }}
+    steps:
+      - name: Call the dashboard
+        if: env.APP_URL != ''
+        run: |
+          case "$SCHEDULE" in
+            "45 17 * * *")       path=/api/cron/pocm ;;
+            "10,20,30 18 * * *") path=/api/cron/pl ;;
+            *)                   path=/api/cron/sync ;;
+          esac
+          curl --fail-with-body --max-time 330 -sS \
+            -H "Authorization: Bearer $CRON_SECRET" "${APP_URL%/}$path"

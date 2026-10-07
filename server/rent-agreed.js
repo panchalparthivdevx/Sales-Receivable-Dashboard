@@ -10,6 +10,8 @@
 const fs   = require('fs');
 const path = require('path');
 const XLSX = require('xlsx');
+const db   = require('./db');
+const workbooks = require('./workbooks');
 
 const ROOT    = path.join(__dirname, '..');
 const FILE_RE = /^rent recurring module.*\.xlsx$/i;
@@ -109,12 +111,20 @@ const HEADERS = {
   amount:   'amount',
 };
 
-function pickWorkbook() {
+// Newest workbook in the project folder (the office PC; also what upload-to-neon.js sends)
+function pickLocalWorkbook() {
   const files = fs.readdirSync(ROOT)
     .filter(f => FILE_RE.test(f) && !f.startsWith('~$'))
     .map(f => ({ f, mtime: fs.statSync(path.join(ROOT, f)).mtimeMs }))
     .sort((a, b) => b.mtime - a.mtime);
   return files.length ? files[0] : null;
+}
+
+// Neon mode (Vercel) reads the uploaded copy instead
+function pickWorkbook() {
+  if (!db.USE_DB) return pickLocalWorkbook();
+  const s = workbooks.stored('rent_module');
+  return s ? { f: s.name, mtime: s.mtime } : null;
 }
 
 let _cache = null;   // { file, mtime, entries }
@@ -128,7 +138,7 @@ function loadAgreements() {
 
   let wb;
   try {
-    wb = XLSX.readFile(path.join(ROOT, pick.f));
+    wb = workbooks.read('rent_module', path.join(ROOT, pick.f));
   } catch (e) {
     if (_cache) return _cache;   // e.g. mid-save in Excel — keep the last good read
     throw e;
@@ -319,4 +329,4 @@ function attachAgreed(rows, monthKeys) {
   return { file: book.file, matched, groups: Object.keys(groups).length, unmatched };
 }
 
-module.exports = { attachAgreed, loadAgreements, agreedForMonth, branchKey, vendorKey, officeKey, nameScore, toMonth };
+module.exports = { attachAgreed, loadAgreements, pickLocalWorkbook, ROOT, agreedForMonth, branchKey, vendorKey, officeKey, nameScore, toMonth };

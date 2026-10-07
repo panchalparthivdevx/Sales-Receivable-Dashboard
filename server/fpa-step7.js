@@ -25,8 +25,9 @@ const FILES = {
   tbData:     path.join(DATA, 'financial_tb_data.json'),
 };
 
-const readJ  = f => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return null; } };
-const writeJ = (f, d) => fs.writeFileSync(f, JSON.stringify(d, null, 2), 'utf8');
+const fpaStore = require('./fpa-store');   // Neon mode (Vercel): the documents live in the database
+const readJ  = f => { if (fpaStore.enabled) return fpaStore.read(f); try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return null; } };
+const writeJ = (f, d) => (fpaStore.enabled ? fpaStore.write(f, d) : fs.writeFileSync(f, JSON.stringify(d, null, 2), 'utf8'));
 const now    = () => new Date().toISOString();
 
 // ── GL grouping → FP&A line mapping ────────────────────────────────────────

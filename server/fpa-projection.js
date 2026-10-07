@@ -10,6 +10,7 @@ const express  = require('express');
 const path     = require('path');
 const router   = express.Router();
 const db       = require('./db');
+const { background } = require('./background'); // keeps background compute alive on Vercel
 const { authMiddleware, adminOnly } = require('./auth');
 
 // ─── File paths ───────────────────────────────────────────────────────────────
@@ -750,7 +751,7 @@ router.post('/compute', adminOnly, async (req, res) => {
   if (computeInProgress) return res.json({ ok: false, message: 'Compute already running' });
   computeInProgress = true;
   res.json({ ok: true, message: 'Computation started in background' });
-  (async () => {
+  background((async () => {
     try {
       const pa = await readPA();
       const output = await runComputation(pa);
@@ -761,7 +762,7 @@ router.post('/compute', adminOnly, async (req, res) => {
     } catch (err) {
       console.error('[fpa-projection] Compute error:', err.message);
     } finally { computeInProgress = false; }
-  })();
+  })());
 });
 
 // ─── GET /api/fpa/projection/output ──────────────────────────────────────────

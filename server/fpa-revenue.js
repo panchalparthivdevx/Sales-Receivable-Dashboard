@@ -10,6 +10,7 @@ const express    = require('express');
 const path       = require('path');
 const router     = express.Router();
 const db         = require('./db');
+const { background } = require('./background'); // keeps background compute alive on Vercel
 const { authMiddleware, adminOnly } = require('./auth');
 const { zohoGetAll } = require('./zoho');
 
@@ -285,7 +286,7 @@ router.post('/sync', adminOnly, async (req, res) => {
   await writeMeta(meta);
 
   // Fire-and-forget: respond immediately so the client isn't blocked
-  (async () => {
+  background((async () => {
     try {
       const [{ branches }, { mappings }] = await Promise.all([readBranches(), readMappings()]);
       const currentMeta = await readMeta();
@@ -346,7 +347,7 @@ router.post('/sync', adminOnly, async (req, res) => {
     } finally {
       syncInProgress = false;
     }
-  })();
+  })());
 
   res.json({ ok: true, message: 'Sync started in background' });
 });

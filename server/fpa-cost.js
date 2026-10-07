@@ -14,6 +14,7 @@ const express  = require('express');
 const path     = require('path');
 const router   = express.Router();
 const db       = require('./db');
+const { background } = require('./background'); // keeps background compute alive on Vercel
 const { authMiddleware, adminOnly } = require('./auth');
 
 // ─── File paths ───────────────────────────────────────────────────────────────
@@ -890,7 +891,7 @@ router.post('/compute', adminOnly, async (req, res) => {
   if (costComputeInProgress) return res.json({ ok: false, message: 'Compute already running' });
   costComputeInProgress = true;
   res.json({ ok: true, message: 'Cost computation started in background' });
-  (async () => {
+  background((async () => {
     try {
       const output = await runCostComputation();
       await writeCostOutput(output);
@@ -901,7 +902,7 @@ router.post('/compute', adminOnly, async (req, res) => {
     } catch (err) {
       console.error('[fpa-cost] Compute error:', err.message);
     } finally { costComputeInProgress = false; }
-  })();
+  })());
 });
 
 // ─── Output metadata ──────────────────────────────────────────────────────────

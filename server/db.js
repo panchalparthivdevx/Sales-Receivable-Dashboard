@@ -8,6 +8,8 @@ const path = require('path');
 const fs   = require('fs');
 
 const USE_DB = !!process.env.DATABASE_URL;
+// Neon writes also keep a local copy (backup) — except on Vercel, whose disk is read-only
+const MIRROR = !process.env.VERCEL;
 
 let _pool = null;
 
@@ -26,6 +28,9 @@ function getPool() {
 }
 
 // ─── Schema bootstrap ──────────────────────────────────────────────────────────
+// Documents are stored as `json` (kept exactly as written), not `jsonb`: jsonb re-sorts
+// object keys, so branch lists and other keyed data would come back in a different
+// order than the office PC's files.
 async function initDB() {
   if (!USE_DB) return;
   const client = await getPool().connect();
@@ -33,13 +38,13 @@ async function initDB() {
     await client.query(`
       CREATE TABLE IF NOT EXISTS kv_store (
         key        TEXT PRIMARY KEY,
-        value      JSONB NOT NULL,
+        value      JSON NOT NULL,
         updated_at TIMESTAMPTZ DEFAULT NOW()
       );
 
       CREATE TABLE IF NOT EXISTS branch_bills_cache (
         branch_id  TEXT PRIMARY KEY,
-        data       JSONB NOT NULL,
+        data       JSON NOT NULL,
         synced_at  TIMESTAMPTZ DEFAULT NOW()
       );
 
@@ -51,12 +56,21 @@ async function initDB() {
 
       CREATE TABLE IF NOT EXISTS sync_entity_cache (
         cache_key   TEXT PRIMARY KEY,
-        data        JSONB NOT NULL DEFAULT '[]',
+        data        JSON NOT NULL DEFAULT '[]',
         record_count INT  DEFAULT 0,
         synced_at   TIMESTAMPTZ DEFAULT NOW(),
         run_id      TEXT
       );
     `);
+    // Tables created as jsonb by an earlier version: switch to json (re-upload restores key order)
+    const old = await client.query(`
+      SELECT table_name, column_name FROM information_schema.columns
+      WHERE table_schema = current_schema() AND data_type = 'jsonb'
+        AND ((table_name = 'kv_store' AND column_name = 'value')
+          OR (table_name = 'branch_bills_cache' AND column_name = 'data'))`);
+    for (const { table_name: t, column_name: c } of old.rows) {
+      await client.query(`ALTER TABLE ${t} ALTER COLUMN ${c} TYPE json USING ${c}::json`);
+    }
   } finally {
     client.release();
   }
@@ -88,18 +102,34 @@ async function writeJSON(key, localPath, data) {
   try {
     await getPool().query(
       `INSERT INTO kv_store (key, value, updated_at)
-       VALUES ($1, $2::jsonb, NOW())
-       ON CONFLICT (key) DO UPDATE SET value = $2::jsonb, updated_at = NOW()`,
+       VALUES ($1, $2::json, NOW())
+       ON CONFLICT (key) DO UPDATE SET value = $2::json, updated_at = NOW()`,
       [key, JSON.stringify(data)]
     );
     // Mirror to local file if path provided (optional backup)
-    if (localPath) {
+    if (localPath && MIRROR) {
       try { fs.writeFileSync(localPath, JSON.stringify(data, null, 2), 'utf8'); } catch (_) {}
     }
   } catch (e) {
     console.error(`[db] writeJSON(${key}) error:`, e.message);
     throw e;
   }
+}
+
+// Neon only: remove a document (no-op when using local files)
+async function deleteKey(key) {
+  if (!USE_DB) return;
+  await getPool().query('DELETE FROM kv_store WHERE key = $1', [key]);
+}
+
+// Neon only: keys under a prefix with their last write time ([] when using local files)
+async function listKeys(prefix) {
+  if (!USE_DB) return [];
+  const r = await getPool().query(
+    `SELECT key, updated_at FROM kv_store WHERE key LIKE $1`,
+    [prefix.replace(/[\\%_]/g, '\\$&') + '%']
+  );
+  return r.rows;
 }
 
 // ─── Branch bills cache ───────────────────────────────────────────────────────
@@ -127,12 +157,12 @@ async function writeBranchCache(branchId, data, localDir) {
   try {
     await getPool().query(
       `INSERT INTO branch_bills_cache (branch_id, data, synced_at)
-       VALUES ($1, $2::jsonb, NOW())
-       ON CONFLICT (branch_id) DO UPDATE SET data = $2::jsonb, synced_at = NOW()`,
+       VALUES ($1, $2::json, NOW())
+       ON CONFLICT (branch_id) DO UPDATE SET data = $2::json, synced_at = NOW()`,
       [branchId, JSON.stringify(data)]
     );
     // Mirror locally too
-    if (localDir) {
+    if (localDir && MIRROR) {
       try {
         if (!fs.existsSync(localDir)) fs.mkdirSync(localDir, { recursive: true });
         fs.writeFileSync(path.join(localDir, `${branchId}.json`), JSON.stringify(data, null, 2), 'utf8');
@@ -203,7 +233,7 @@ async function writeZohoToken(token, expiry, localPath) {
        ON CONFLICT (id) DO UPDATE SET token = $1, expiry = $2`,
       [token, expiry]
     );
-    if (localPath) {
+    if (localPath && MIRROR) {
       try { fs.writeFileSync(localPath, JSON.stringify({ token, expiry }), 'utf8'); } catch (_) {}
     }
   } catch (e) {
@@ -216,6 +246,8 @@ module.exports = {
   initDB,
   readJSON,
   writeJSON,
+  deleteKey,
+  listKeys,
   readBranchCache,
   writeBranchCache,
   listBranchCaches,

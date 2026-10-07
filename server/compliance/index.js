@@ -128,6 +128,13 @@ function runUpload(req, res, field, maxMb) {
 // ── Auth for everything below ─────────────────────────────────────────────────
 router.use(authMiddleware, AC.attach());
 
+// Vercel has no lasting disk: the document folders, uploads and downloads stay on the office PC
+router.use(['/folders', '/documents', '/tasks/:id/documents'], (req, res, next) => (
+  process.env.VERCEL
+    ? res.status(503).json({ error: 'Compliance documents are stored on the office PC — not available in the online version yet.' })
+    : next()
+));
+
 // First request after start-up: make sure the data store exists and is on the latest schema
 let schemaReady = false;
 router.use(wrap(async (req, res, next) => {

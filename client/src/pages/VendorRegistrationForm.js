@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { stageUploads } from '../utils/api';
 
 /* ─── Static data ─────────────────────────────────────────────────────────── */
 const INDIAN_STATES = [
@@ -179,7 +180,15 @@ export default function VendorRegistrationForm() {
         else if (typeof v === 'boolean')  fd.append(k, v ? 'Yes' : 'No');
         else fd.append(k, v);
       });
-      Object.entries(files).forEach(([k, v]) => { if (v) fd.append(k, v); });
+      // Online (Vercel) the attachments go up one per request first; on the office PC with the form
+      const staged = await stageUploads('/api/vendor-registration', files);
+      if (staged) {
+        fd.append('uploadSession', staged.session);
+        fd.append('uploadToken', staged.token);
+        fd.append('uploadedFiles', JSON.stringify(Object.fromEntries(Object.entries(staged.files).map(([k, v]) => [k, v.filename]))));
+      } else {
+        Object.entries(files).forEach(([k, v]) => { if (v) fd.append(k, v); });
+      }
       const res = await fetch('/api/vendor-registration/submit', { method:'POST', body:fd });
       if (!res.ok) { const d = await res.json(); throw new Error(d.error||'Submission failed'); }
       setSubmitted(true);

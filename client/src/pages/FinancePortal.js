@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { api, withToken } from '../utils/api';
+import { api, withToken, stageUploads } from '../utils/api';
 import { useAuth } from '../contexts/AuthContext';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -408,10 +408,21 @@ export default function FinancePortal() {
       fd.append('submitted_by',      user.username  || '');
       fd.append('submitted_by_name', user.name || user.username || '');
 
-      if (billFileRef.current?.files?.[0])  fd.append('bill_attachment', billFileRef.current.files[0]);
-      if (loiFileRef.current?.files?.[0])   fd.append('loi_attachment',  loiFileRef.current.files[0]);
-      if (stmtFileRef.current?.files?.[0])  fd.append('statement_attachment', stmtFileRef.current.files[0]);
-      if (payFileRef.current?.files?.[0])   fd.append('payment_attachment', payFileRef.current.files[0]);
+      const attachments = {
+        bill_attachment:      billFileRef.current?.files?.[0],
+        loi_attachment:       loiFileRef.current?.files?.[0],
+        statement_attachment: stmtFileRef.current?.files?.[0],
+        payment_attachment:   payFileRef.current?.files?.[0],
+      };
+      // Online (Vercel) the attachments go up one per request first; on the office PC with the form
+      const staged = await stageUploads('/api/portal', attachments, { Authorization: `Bearer ${localStorage.getItem('da_token')}` });
+      if (staged) {
+        fd.append('uploadSession', staged.session);
+        fd.append('uploadToken', staged.token);
+        fd.append('uploadedFiles', JSON.stringify(Object.values(staged.files)));
+      } else {
+        Object.entries(attachments).forEach(([k, f]) => { if (f) fd.append(k, f); });
+      }
 
       const res = await api.portalSubmit(fd);
       setMsg({ type: 'success', text: `Submitted successfully! Reference: ${res.id}` });

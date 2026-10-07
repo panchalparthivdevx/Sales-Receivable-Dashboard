@@ -28,6 +28,7 @@
 const path = require('path');
 const fs   = require('fs');
 const db   = require('./db');
+const { background } = require('./background');
 
 const SYNC_DIR           = path.join(__dirname, 'sync_data');
 const CHECKPOINTS_FILE   = path.join(__dirname, 'sync_checkpoints.json');
@@ -153,6 +154,29 @@ let _zohoGetAll = null;
 let _zohoGet    = null;
 let _activeRun  = null;   // the run currently executing (one at a time)
 let _progress   = null;   // live/last run progress for the Sync Monitor
+
+// Neon mode (Vercel): requests can land on different instances, so the live progress and
+// the "already running" lock are shared through kv_store 'sync_progress'. A running record
+// whose heartbeat is older than SHARED_STALE_MS belongs to a run Vercel cut off.
+const SHARED_PROGRESS_KEY = 'sync_progress';
+const SHARED_STALE_MS     = 6 * 60 * 1000;
+
+let _publishChain = Promise.resolve();   // writes land in order, so 'running' never overwrites the final state
+function _publishProgress(progress) {
+  if (!db.USE_DB || !progress) return;
+  const doc = { ...JSON.parse(JSON.stringify(progress)), heartbeat_at: new Date().toISOString() };
+  _publishChain = _publishChain
+    .then(() => db.writeJSON(SHARED_PROGRESS_KEY, null, doc))
+    .catch(e => console.warn('[sync] progress publish failed:', e.message));
+  background(_publishChain);
+}
+
+async function _sharedRunning() {
+  if (!db.USE_DB) return null;
+  const p = await db.readJSON(SHARED_PROGRESS_KEY, null, null).catch(() => null);
+  if (!p || p.status !== 'running') return null;
+  return Date.now() - new Date(p.heartbeat_at).getTime() < SHARED_STALE_MS ? p : null;
+}
 
 function init(zohoGetAll, zohoGet) {
   _zohoGetAll = zohoGetAll;
@@ -583,6 +607,12 @@ async function syncRun(opts = {}) {
   }
   const runId = opts.runId || `run_${Date.now()}`;
   _activeRun = { runId };   // reserve synchronously so concurrent callers see 'busy'
+  const shared = await _sharedRunning();   // Neon: a run on another Vercel instance
+  if (shared && shared.run_id !== runId) {
+    _activeRun = null;
+    console.log(`[sync] ${trigger} ${mode} run requested while ${shared.run_id} is running elsewhere — skipped`);
+    return { status: 'busy', run_id: shared.run_id };
+  }
   const started = new Date().toISOString();
   let run;
   try {
@@ -606,6 +636,7 @@ async function syncRun(opts = {}) {
   const initialKeys = run.initialKeys;
   _activeRun = run;
   _progress  = run.progress;
+  _publishProgress(run.progress);
   console.log(`[sync] Starting ${trigger} ${mode} run — ${runId} (${keys.length} entities)`);
 
   const results = {};
@@ -614,6 +645,7 @@ async function syncRun(opts = {}) {
     for (const key of keys) {
       const effMode = initialKeys.has(key) && mode === 'normal' ? 'full' : mode;
       results[key] = await _runEntity(key, effMode, run);
+      _publishProgress(run.progress);
     }
 
     const rs = Object.values(results);
@@ -661,8 +693,10 @@ async function syncRun(opts = {}) {
         failed: failedCount, duration_ms: entry.duration_ms,
       },
     });
+    _publishProgress(run.progress);
   } catch (e) {
     Object.assign(run.progress, { status: 'failed', completed_at: new Date().toISOString(), error: e.message });
+    _publishProgress(run.progress);
     throw e;
   } finally {
     _activeRun = null;
@@ -681,9 +715,9 @@ async function syncRun(opts = {}) {
 function startRun(opts = {}) {
   if (_activeRun) return { status: 'busy', run_id: _activeRun.runId };
   const runId = `run_${Date.now()}`;
-  syncRun({ ...opts, runId })
+  background(syncRun({ ...opts, runId })
     .then(entry => { if (entry && opts.onComplete) opts.onComplete(entry); })
-    .catch(e => console.error('[sync] background run error:', e.message));
+    .catch(e => console.error('[sync] background run error:', e.message)));
   return { status: 'started', run_id: runId };
 }
 
@@ -711,10 +745,10 @@ function startRetry(entityKey, onComplete) {
   if (_activeRun) return { status: 'busy', run_id: _activeRun.runId };
   const runId = `run_${Date.now()}`;
   _activeRun = { runId };
-  _retryMode(entityKey)
+  background(_retryMode(entityKey)
     .then(mode => { _activeRun = null; return syncRun({ mode, trigger: 'retry', entities: _withDependents(entityKey), runId, onComplete }); })
     .then(entry => { if (entry && entry.run_id && onComplete) onComplete(entry); })
-    .catch(e => { _activeRun = null; console.error('[sync] retry error:', e.message); });
+    .catch(e => { _activeRun = null; console.error('[sync] retry error:', e.message); }));
   return { status: 'started', run_id: runId };
 }
 
@@ -782,6 +816,16 @@ async function getSyncStatus() {
 
 function getProgress() {
   return { running: !!_activeRun, progress: _progress };
+}
+
+// Sync Monitor: this instance's run, else (Neon) the shared record from whichever instance runs it
+async function getSharedProgress() {
+  if (_activeRun || !db.USE_DB) return getProgress();
+  const p = await db.readJSON(SHARED_PROGRESS_KEY, null, null).catch(() => null);
+  if (!p) return getProgress();
+  const live = p.status === 'running' && Date.now() - new Date(p.heartbeat_at).getTime() < SHARED_STALE_MS;
+  if (p.status === 'running' && !live) p.status = 'interrupted';
+  return { running: live, progress: p };
 }
 
 // Lightweight freshness map for dashboards ("Data as of …")
@@ -877,6 +921,8 @@ module.exports = {
   getSyncedOrFetch,
   getSyncStatus,
   getProgress,
+  getSharedProgress,
+  sharedRunning: _sharedRunning,
   getFreshness,
   readSyncedData,
   filterByDateRange,
