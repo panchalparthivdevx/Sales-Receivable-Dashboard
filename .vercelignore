@@ -19,6 +19,7 @@ data/
 # Uploaded and confidential files — never part of the deployment
 server/portal-uploads/
 server/vendor-uploads/
+server/vpr-bill-uploads/
 server/compliance/data/
 server/compliance/backups/
 compliance_storage/
