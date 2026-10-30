@@ -14,12 +14,15 @@ server/.token_cache.json
 
 # Runtime caches — rebuilt automatically from Zoho on every sync
 server/sync_data/
+# MSME other companies (Neddle …): their synced data and dashboard entries, like DevX's above
+server/companies/
 server/pocm_disk_cache/
 server/pl_fy_cache/
 
 # Uploaded documents (confidential)
 server/vendor-uploads/
 server/portal-uploads/
+server/vpr-bill-uploads/
 
 # Company documents and data — stay on this PC, never in git (deployed data lives in Neon)
 Client Agreements/

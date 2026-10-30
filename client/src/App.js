@@ -16,7 +16,7 @@ import FinancePortal from './pages/FinancePortal';
 import ActivityTracker from './pages/ActivityTracker';
 import FinancialStatements from './pages/FinancialStatements';
 import BudgetVsActual from './pages/BudgetVsActual';
-import MSMECompliance from './pages/MSMECompliance';
+import { MSMECompanies } from './pages/MSMECompliance';
 import GSTDashboard from './pages/GSTDashboard';
 import SyncMonitor from './pages/SyncMonitor';
 import FPADashboard from './pages/FPADashboard';
@@ -84,7 +84,7 @@ function AppInner() {
           {page === 'finance-overview' && (hasModule('sales') || hasModule('purchase')) && <FinanceOverview />}
           {page === 'sales'        && hasModule('sales')        && <Dashboard />}
           {page === 'purchase'     && hasModule('purchase')     && <PurchaseDashboard />}
-          {page === 'msme'         && hasModule('msme_compliance') && <MSMECompliance />}
+          {(page === 'msme' || page === 'msme-neddle') && hasModule('msme_compliance') && <MSMECompanies active={page === 'msme-neddle' ? 'neddle' : 'devx'} />}
           {page === 'vendor-regs'  && hasModule('vendor_regs')  && <VendorRegistrations />}
           {page === 'rpt'          && hasModule('rpt')          && <RPTDashboard />}
           {page === 'gst'          && hasModule('gst')          && <GSTDashboard />}
@@ -100,8 +100,8 @@ function AppInner() {
           {page === 'admin'        && user.role === 'admin'     && <AdminPage />}
           {page === 'sync-monitor' && user.role === 'admin'     && <SyncMonitor />}
           {/* Access denied message */}
-          {['sales','purchase','vendor-regs','rpt','gst','tds','payroll','compliance','loan','pocm','msme'].includes(page) &&
-            !hasModule(page === 'vendor-regs' ? 'vendor_regs' : page === 'msme' ? 'msme_compliance' : page) && (
+          {['sales','purchase','vendor-regs','rpt','gst','tds','payroll','compliance','loan','pocm','msme','msme-neddle'].includes(page) &&
+            !hasModule(page === 'vendor-regs' ? 'vendor_regs' : (page === 'msme' || page === 'msme-neddle') ? 'msme_compliance' : page) && (
             <div style={{ padding: '4rem 2rem', textAlign: 'center', color: '#334155' }}>
               <div style={{ fontSize: '3rem', marginBottom: '1rem' }}>🔒</div>
               <div style={{ fontSize: '1rem', fontWeight: 600, color: '#475569', marginBottom: 8 }}>Access Restricted</div>

@@ -1,8 +1,8 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   TrendingUp, ShoppingCart, Receipt, Percent,
   Landmark, Users, ShieldCheck, BarChart3,
-  ChevronLeft, ChevronRight, GitMerge, ClipboardList,
+  ChevronLeft, ChevronRight, ChevronDown, GitMerge, ClipboardList,
   Settings, LogOut, CreditCard, TrendingDown, Inbox, Activity, BookOpen, Target, BadgeCheck, RefreshCw, Layers, CheckSquare,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
@@ -17,7 +17,8 @@ const NAV = [
   { id: 'finance-overview', label: 'Finance Overview',     icon: BarChart3,    live: true,  module: 'sales'       },
   { id: 'sales',        label: 'Sales & Receivables',  icon: TrendingUp,   live: true,  module: 'sales'       },
   { id: 'purchase',     label: 'Purchase & Payables',   icon: ShoppingCart, live: true,  module: 'purchase'        },
-  { id: 'msme',         label: 'MSME Compliance',       icon: BadgeCheck,   live: true,  module: 'msme_compliance', sub: true },
+  { id: 'msme-group',   label: 'MSME Compliance',       icon: BadgeCheck,   live: true,  module: 'msme_compliance', sub: true,
+    children: [{ id: 'msme', label: 'DevX' }, { id: 'msme-neddle', label: 'Neddle' }] },
   { id: 'vendor-regs',  label: 'Vendor Registrations',  icon: ClipboardList,live: true,  module: 'vendor_regs',    sub: true },
   { id: 'rpt',          label: 'Related Party Txns',    icon: GitMerge,     live: true,  module: 'rpt'         },
   null,
@@ -37,6 +38,7 @@ const NAV = [
 
 export default function Sidebar({ page, onNavigate, open, onToggle }) {
   const { user, logout, hasModule } = useAuth();
+  const [expanded, setExpanded] = useState({});   // group id → open (default: open while one of its pages is active)
 
   const visibleNav = NAV.map(item => {
     if (!item) return null;
@@ -73,6 +75,42 @@ export default function Sidebar({ page, onNavigate, open, onToggle }) {
         {cleanNav.map((item, i) => {
           if (!item) return <div key={i} style={S.divider} />;
           const Icon = item.icon;
+          if (item.children) {
+            // Group (MSME Compliance → DevX / Neddle): click expands; collapsed sidebar opens the first
+            const childActive = item.children.some(c => c.id === page);
+            const isOpen = open && (expanded[item.id] ?? childActive);
+            return (
+              <React.Fragment key={item.id}>
+                <button
+                  title={!open ? item.label : undefined}
+                  onClick={() => (open ? setExpanded(e => ({ ...e, [item.id]: !isOpen })) : onNavigate(item.children[0].id))}
+                  style={{
+                    ...S.navBtn,
+                    ...(childActive && !isOpen ? S.navBtnActive : {}),
+                    padding: open ? (item.sub ? '0.45rem 1.1rem 0.45rem 2rem' : '0.6rem 1.1rem') : '0.6rem',
+                    justifyContent: open ? 'flex-start' : 'center',
+                  }}
+                >
+                  <Icon size={18} style={{ flexShrink: 0 }} color={childActive && !isOpen ? '#EAF4EF' : '#8BAAA6'} />
+                  {open && (
+                    <>
+                      <span style={{ ...S.navLabel, color: childActive && !isOpen ? '#FFFFFF' : '#A8C4C0' }}>{item.label}</span>
+                      {isOpen ? <ChevronDown size={13} color="#8BAAA6" /> : <ChevronRight size={13} color="#8BAAA6" />}
+                    </>
+                  )}
+                </button>
+                {isOpen && item.children.map(c => {
+                  const a = page === c.id;
+                  return (
+                    <button key={c.id} onClick={() => onNavigate(c.id)}
+                      style={{ ...S.navBtn, ...(a ? S.navBtnActive : {}), padding: '0.35rem 1.1rem 0.35rem 3.3rem', justifyContent: 'flex-start' }}>
+                      <span style={{ ...S.navLabel, fontSize: '0.78rem', color: a ? '#FFFFFF' : '#A8C4C0' }}>{c.label}</span>
+                    </button>
+                  );
+                })}
+              </React.Fragment>
+            );
+          }
           const active = page === item.id;
           return (
             <button

@@ -9,11 +9,13 @@
  *   2 Primary txns       invoices_fy, bills_fy
  *   3 Settlements        vendor_credits_all, vendor_payments_fy, customer_payments_fy, credit_notes_fy
  *   4 Status views       invoices_unpaid, invoices_paid_12mo, bills_open, bills_overdue
- *     + derived          vendor_msme_master (registered by index.js — MSME Sector / Enterprise Type)
+ *     + derived          vendor_msme_master, msme_form1_settlements, vendor_payment_report (registered by index.js)
  *
  * Sync modes:
  *   normal        "Sync Data"          incremental (Zoho last_modified_time) — scheduler uses this
- *   recheck       "Recheck Data"       incremental + ID reconciliation of the last 90 days
+ *   recheck       "Recheck Data"       incremental + ID reconciliation of each entity's window
+ *                                      (records deleted in Zoho are removed once confirmed by ID);
+ *                                      the first scheduled run of each IST day uses this mode
  *   full          "Full Sync Data"     full re-fetch of every entity, diffed against the cache
  *   full_refresh  "Full Data Refresh"  full re-fetch + count/total/MSME validation report
  *
@@ -27,7 +29,10 @@
 
 const path = require('path');
 const fs   = require('fs');
-const db   = require('./db');
+// Another company's engine is a separate copy of this module (company-context.js) whose CFG brings
+// its company-scoped storage, entity list and schedule. The DevX engine loads with no CFG.
+const CFG  = global.__syncEngineCfg || {};
+const db   = CFG.db || require('./db');
 const { background } = require('./background');
 
 const SYNC_DIR           = path.join(__dirname, 'sync_data');
@@ -42,7 +47,8 @@ const MAX_RUN_LOG        = 100; // keep last N run entries
 const ENGINE_VERSION     = 2;   // caches written by an older engine get one full fetch
 const MAX_PAGES          = 250; // 50,000 records; exceeding it fails the entity instead of truncating
 const INC_OVERLAP_MS     = 15 * 60000; // incremental re-reads 15 min before the high-water mark
-const RECHECK_DAYS       = 90;  // Recheck Data reconciles IDs over this many recent days
+const RECHECK_DAYS       = 90;  // getCurrentDates().recheckStart (Recheck Data now checks the whole window)
+const MAX_DELETE_CHECKS  = 300; // records missing from a list that are confirmed one by one before removal
 
 const MODES = {
   normal:       'Sync Data',
@@ -151,6 +157,8 @@ const ENTITY_DEFS = {
     description: 'Zoho Status.Overdue (all time). Re-fetched in full every run.',
   },
 };
+// A company engine syncs only the entities its module needs (MSME: vendors, bills, payments, credits)
+if (CFG.entities) for (const k of Object.keys(ENTITY_DEFS)) if (!CFG.entities.includes(k)) delete ENTITY_DEFS[k];
 
 // ── Internal state ────────────────────────────────────────────────────────────
 const _locks = new Set(); // per-entity in-process concurrency locks
@@ -314,6 +322,35 @@ async function _pageAll(def, params, ctx, { dateFrom = null, stopBeforeMs = null
   return out;
 }
 
+// Zoho's answer for a record that no longer exists: HTTP 404, code 1002 "… does not exist."
+function _isNotFound(e) {
+  return e?.response?.status === 404 || e?.response?.data?.code === 1002;
+}
+
+// A record missing from Zoho's list is removed only after Zoho confirms by ID that it no longer
+// exists. Anything else (still there, or not checkable) stays cached for the next check. More than
+// MAX_DELETE_CHECKS missing records points at an incomplete list rather than deletions: none removed.
+async function _confirmDeleted(def, ids, ctx) {
+  if (!ids.length) return { deleted: [], kept: [] };
+  if (ids.length > MAX_DELETE_CHECKS) {
+    console.warn(`[sync] ${def.path}: ${ids.length} cached records missing from Zoho's list — more than ${MAX_DELETE_CHECKS}, none removed`);
+    return { deleted: [], kept: ids };
+  }
+  const deleted = [], kept = [];
+  for (const id of ids) {
+    try { await _zohoGet(`${def.path}/${id}`); kept.push(id); }
+    catch (e) {
+      if (_isNotFound(e)) { deleted.push(id); continue; }
+      const t = _classifyError(e);
+      if (t === 'rate_limit' || t === 'daily_limit' || t === 'auth') throw e;   // entity fails, cache unchanged
+      kept.push(id);
+    }
+    ctx.pages++;
+  }
+  if (deleted.length) console.log(`[sync] ${def.path}: ${deleted.length} record(s) deleted in Zoho removed from the cache`);
+  return { deleted, kept };
+}
+
 function _dedupe(records, idField) {
   const m = new Map();
   let dup = 0;
@@ -418,9 +455,10 @@ async function _syncListEntity(key, def, mode, run, ctx) {
       }
     }
 
-    // Recheck: reconcile IDs over the recent window — finds records missed or deleted in Zoho
+    // Recheck: reconcile IDs over the whole window — finds records missed or deleted in Zoho.
+    // A deletion never bumps last_modified_time, so the incremental fetch above cannot see it.
     if (strategy === 'recheck') {
-      const rf = win.from > d.recheckStart ? win.from : d.recheckStart;
+      const rf = win.from;
       const fetched = await _pageAll(def,
         { ...(def.incParams || def.params), sort_column: 'date', sort_order: 'D' }, ctx, { dateFrom: rf });
       stats.checked += fetched.length;
@@ -435,9 +473,11 @@ async function _syncListEntity(key, def, mode, run, ctx) {
         else if (_changed(p, r)) stats.updated++;
         universe.set(id, r);
       }
-      for (const [id, r] of [...universe]) {
-        if (r.date && r.date >= rf && !seen.has(id)) { universe.delete(id); stats.removed++; }
-      }
+      const gone = [...universe].filter(([id, r]) => r.date && r.date >= rf && !seen.has(id)).map(([id]) => id);
+      const { deleted, kept } = await _confirmDeleted(def, gone, ctx);
+      for (const id of deleted) { universe.delete(id); stats.removed++; }
+      stats.deleted_in_zoho = deleted.length;
+      if (kept.length) stats.unconfirmed = kept.length;
     }
 
     // Rolling window: prune records that fell out of the date range
@@ -716,6 +756,57 @@ async function syncRun(opts = {}) {
   return entry;
 }
 
+// Targeted correction: re-checks the given cached records by ID and removes those Zoho reports as
+// deleted. The cache's watermark, window and sync time are kept, so the next incremental sync
+// carries on exactly where it was. records: { entityKey: [ids] }. Logged in the run log.
+async function removeDeletedRecords(records, { trigger = 'manual' } = {}) {
+  if (_activeRun) { const e = new Error('A sync is already running'); e.busy = true; throw e; }
+  const runId = `fix_${Date.now()}`;
+  _activeRun = { runId };
+  const started = new Date().toISOString();
+  const results = {};
+  try {
+    for (const [key, ids] of Object.entries(records || {})) {
+      const def = ENTITY_DEFS[key];
+      if (!def || def.run || !def.idField) throw new Error(`${key} is not a Zoho list entity`);
+      const prev = await readSyncedData(key);
+      if (!prev) throw new Error(`${key} has no cached data`);
+      const idF = def.idField;
+      const cached = new Set([...(prev.data || []), ...(prev.future || [])].map(r => r[idF]));
+      const want = [...new Set(ids || [])].filter(id => cached.has(id));
+      const t0 = Date.now();
+      const { deleted, kept } = await _confirmDeleted(def, want, { pages: 0 });
+      if (deleted.length) {
+        const del = new Set(deleted);
+        const payload = { ...prev, data: (prev.data || []).filter(r => !del.has(r[idF])) };
+        if (prev.future) payload.future = prev.future.filter(r => !del.has(r[idF]));
+        payload.record_count = payload.data.length;
+        await db.writeJSON(_syncDataKey(key), _syncDataFile(key), payload);
+        await _updateCheckpoint(key, { record_count: payload.record_count });
+      }
+      results[key] = {
+        entity: key, status: 'success', strategy: 'targeted', record_count: (prev.data || []).length - deleted.length,
+        checked: want.length, added: 0, updated: 0, removed: deleted.length, unchanged: kept.length,
+        duration_ms: Date.now() - t0, deleted_ids: deleted, kept_ids: kept, not_cached: (ids || []).length - want.length,
+      };
+    }
+    const rs = Object.values(results);
+    const sum = f => rs.reduce((s, r) => s + (r[f] || 0), 0);
+    const entry = {
+      run_id: runId, trigger, mode: 'targeted', mode_label: 'Remove Deleted Records',
+      started_at: started, completed_at: new Date().toISOString(), duration_ms: Date.now() - new Date(started).getTime(),
+      status: 'success', entities_processed: rs.length, total_records: sum('record_count'),
+      records_checked: sum('checked'), added: 0, updated: 0, removed: sum('removed'), unchanged: sum('unchanged'),
+      failed_count: 0, errors: [], entities: results, validation: null,
+    };
+    await _appendRunLog(entry);
+    console.log(`[sync] Remove deleted records — ${entry.records_checked} checked by ID, ${entry.removed} removed`);
+    return entry;
+  } finally {
+    _activeRun = null;
+  }
+}
+
 // Starts a run without waiting for it (UI polls getProgress). Returns { run_id } or { status: 'busy' }.
 function startRun(opts = {}) {
   if (_activeRun) return { status: 'busy', run_id: _activeRun.runId };
@@ -804,7 +895,7 @@ async function getSyncStatus() {
       locked:      _locks.has(key),
     };
   }
-  const systemRun = log.find(r => r.trigger !== 'entity' && r.trigger !== 'retry') || null;
+  const systemRun = log.find(r => r.trigger !== 'entity' && r.trigger !== 'retry' && r.mode !== 'targeted') || null;
   const lastValidation = log.find(r => r.mode === 'full_refresh' && r.validation) || null;
   return {
     entities,
@@ -873,14 +964,22 @@ function _scheduleIST(hourIST, minuteIST) {
   schedule();
 }
 
-// One scheduled tick: normal incremental Sync Data (main org only)
-// POCM NT org has its own dedicated 11PM IST scheduler in pocm-sync.js — not here.
+// One scheduled tick: incremental Sync Data. The first tick of each IST day runs Recheck Data
+// instead (incremental + ID check of each entity's window), so records deleted in Zoho leave the
+// cache within a day. POCM NT org has its own dedicated 11PM IST scheduler in pocm-sync.js.
 async function runScheduledTick() {
   try {
-    await syncRun({ mode: 'normal', trigger: 'scheduled' });
+    await syncRun({ mode: (await _recheckDoneToday()) ? 'normal' : 'recheck', trigger: 'scheduled' });
   } catch (e) {
     console.error('[sync] scheduled run error:', e.message);
   }
+}
+
+async function _recheckDoneToday() {
+  const istDay = t => new Date(new Date(t).getTime() + 330 * 60000).toISOString().slice(0, 10);
+  const today = istDay(Date.now());
+  const log = await _readRunLog();
+  return log.some(r => r.mode === 'recheck' && (r.status === 'success' || r.status === 'partial') && r.started_at && istDay(r.started_at) === today);
 }
 
 // Optional POCM sync module — registered by index.js after initialisation.
@@ -896,6 +995,13 @@ let _schedulerStarted = false;
 function startScheduler() {
   if (_schedulerStarted) return; // never create duplicate timers
   _schedulerStarted = true;
+  if (CFG.company) {
+    // Company engine: same four times, a few minutes after the DevX run
+    const m = CFG.scheduleMinute || 0;
+    [13, 15, 18, 21].forEach(h => _scheduleIST(h, m));
+    console.log(`[sync:${CFG.company}] Scheduler active — 1:${String(m).padStart(2, '0')}, 3:${String(m).padStart(2, '0')}, 6:${String(m).padStart(2, '0')}, 9:${String(m).padStart(2, '0')} PM IST`);
+    return;
+  }
   [13, 15, 18, 21].forEach(h => _scheduleIST(h, 0));
   console.log('[sync] Scheduler active — 1 PM, 3 PM, 6 PM, 9 PM IST (main + POCM NT)');
 }
@@ -916,6 +1022,7 @@ module.exports = {
   registerEntity,
   syncRun,
   startRun,
+  removeDeletedRecords,
   syncEntity,
   syncAll,
   retryEntity,

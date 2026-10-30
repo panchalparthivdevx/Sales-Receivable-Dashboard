@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { RefreshCw, Lock, Unlock, Download, ChevronDown, ChevronRight,
          AlertTriangle, CheckCircle, X, Info, FileText } from 'lucide-react';
-import { api } from '../utils/api';
+import { useMsmeApi } from '../utils/msmeCompany';
 import { useAuth } from '../contexts/AuthContext';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -40,6 +40,163 @@ function fmtTs(iso) {
     day: '2-digit', month: 'short', year: 'numeric',
     hour: '2-digit', minute: '2-digit',
   });
+}
+
+function sumTotals(list) {
+  return list.reduce((s, r) => ({
+    paid_within45_count:  s.paid_within45_count  + r.paid_within45_count,
+    paid_within45_amount: s.paid_within45_amount + r.paid_within45_amount,
+    paid_after45_count:   s.paid_after45_count   + r.paid_after45_count,
+    paid_after45_amount:  s.paid_after45_amount  + r.paid_after45_amount,
+    out_within45_count:   s.out_within45_count   + r.out_within45_count,
+    out_within45_amount:  s.out_within45_amount  + r.out_within45_amount,
+    out_after45_count:    s.out_after45_count    + r.out_after45_count,
+    out_after45_amount:   s.out_after45_amount   + r.out_after45_amount,
+  }), { paid_within45_count:0, paid_within45_amount:0, paid_after45_count:0, paid_after45_amount:0,
+        out_within45_count:0, out_within45_amount:0, out_after45_count:0, out_after45_amount:0 });
+}
+
+// ─── MSME classification (Zoho vendor master: Enterprise Type × MSME Sector) ──
+// Shown as held in Zoho (Enterprise Type micro/small/medium; MSME Sector Manufacturer / Services /
+// Trader). Every row falls in exactly one filter bucket — a combination, or Not Updated when either
+// value is missing — so ticking all boxes shows the same vendors as no filter.
+const NOT_UPDATED = 'Not Updated';
+const CLASS_TYPES = ['Micro', 'Small', 'Medium'];
+const CLASS_ACTS  = ['Manufacturing', 'Trader', 'Service'];
+const CLASS_OPTIONS = [
+  ...CLASS_TYPES.flatMap(t => CLASS_ACTS.map(a => ({ key: `${t}|${a}`, label: `${t} — ${a}` }))),
+  { key: NOT_UPDATED, label: NOT_UPDATED },
+];
+
+function entTypeLabel(r) {
+  const t = String(r.msme_type || '').trim();
+  return t ? t.charAt(0).toUpperCase() + t.slice(1).toLowerCase() : NOT_UPDATED;
+}
+function activityLabel(r) {
+  return String(r.major_activity || '').trim() || NOT_UPDATED;
+}
+function classKey(r) {
+  const t = String(r.msme_type || '').toLowerCase(), a = String(r.major_activity || '').toLowerCase();
+  const type = CLASS_TYPES.find(x => t.includes(x.toLowerCase()));
+  const act  = /manufactur/.test(a) ? 'Manufacturing' : /trad/.test(a) ? 'Trader' : /servic/.test(a) ? 'Service' : null;
+  return type && act ? `${type}|${act}` : NOT_UPDATED;
+}
+
+// Zoho value of a classification field (rows frozen before manual overrides existed have no zoho_* copy)
+function zohoVal(r, field) {
+  return (`zoho_${field}` in r ? r[`zoho_${field}`] : r[field]) || '';
+}
+
+function ManualTag({ by, at }) {
+  return (
+    <span title={`Manually updated on the dashboard${by ? ` by ${by}` : ''}${at ? ` on ${fmtTs(at)}` : ''} — not from Zoho Books`}
+      style={{ marginLeft: 5, fontSize: '0.6rem', fontWeight: 600, color: '#1C4942', background: '#EAF4EF', border: '1px solid #A7C4BC', borderRadius: 3, padding: '0 4px', verticalAlign: 'middle' }}>
+      Manual
+    </span>
+  );
+}
+
+// Manual Enterprise Type / Major Activity for Form-1 — saved on the dashboard only, never in Zoho.
+// "Use Zoho value" clears that field's override; Reset to Zoho clears both.
+function ClassEditModal({ row, onSaved, onCancel }) {
+  const api = useMsmeApi();
+  const man = row.class_manual || {};
+  const curType = man.msme_type ? row.msme_type : '';
+  const curAct  = man.major_activity ? row.major_activity : '';
+  const [type, setType] = useState(curType);
+  const [act, setAct]   = useState(curAct);
+  const [saving, setSaving] = useState(false);
+  const [err, setErr]       = useState(null);
+  const zType = zohoVal(row, 'msme_type'), zAct = zohoVal(row, 'major_activity');
+  const changed = type !== curType || act !== curAct;
+
+  async function save(t, a) {
+    setSaving(true); setErr(null);
+    try {
+      const res = await api.msmeF1SetClass({ vendor_id: row.vendor_id, vendor_name: row.vendor_name, msme_type: t || null, major_activity: a || null });
+      onSaved(row.vendor_id, res.override);
+    } catch (e) { setErr(e.response?.data?.error || e.message); setSaving(false); }
+  }
+
+  const lbl = { fontSize: '0.78rem', color: '#5D6C7B', display: 'block', marginBottom: 4 };
+  const zoho = { fontSize: '0.7rem', color: '#9BA8B0', marginBottom: 5 };
+  const sel = { width: '100%', background: '#FFFFFF', border: '1px solid #DFE7E3', borderRadius: 6, color: '#18191B', fontSize: '0.82rem', padding: '0.45rem 0.6rem', marginBottom: '0.85rem' };
+  const btn = { padding: '6px 14px', borderRadius: 6, fontSize: '0.8rem', cursor: 'pointer', border: '1px solid' };
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,18,20,0.5)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={onCancel}>
+      <div style={{ background: '#FFFFFF', border: '1px solid #DFE7E3', borderRadius: 12, width: 400, maxWidth: 'calc(100vw - 32px)' }} onClick={e => e.stopPropagation()}>
+        <div style={{ padding: '1rem 1.25rem', borderBottom: '1px solid #DFE7E3' }}>
+          <div style={{ color: '#18191B', fontWeight: 700, fontSize: '0.9rem' }}>MSME Classification — Manual Update</div>
+          <div style={{ color: '#5D6C7B', fontSize: '0.75rem', marginTop: 3 }}>{row.vendor_name}</div>
+        </div>
+        <div style={{ padding: '1rem 1.25rem' }}>
+          <label style={lbl}>Enterprise Type</label>
+          <div style={zoho}>Zoho Books: {zType ? entTypeLabel({ msme_type: zType }) : NOT_UPDATED}</div>
+          <select value={type} onChange={e => setType(e.target.value)} style={sel}>
+            <option value="">Use Zoho value</option>
+            <option value="micro">Micro</option>
+            <option value="small">Small</option>
+            <option value="medium">Medium</option>
+          </select>
+          <label style={lbl}>Major Activity</label>
+          <div style={zoho}>Zoho Books: {zAct || NOT_UPDATED}</div>
+          <select value={act} onChange={e => setAct(e.target.value)} style={sel}>
+            <option value="">Use Zoho value</option>
+            {CLASS_ACTS.map(a => <option key={a} value={a}>{a}</option>)}
+          </select>
+          <div style={{ fontSize: '0.7rem', color: '#5D6C7B', marginBottom: '0.85rem' }}>
+            Saved on the dashboard for MSME Form-1 only. Zoho Books is not changed.
+          </div>
+          {err && <div style={{ fontSize: '0.75rem', color: '#DC2626', marginBottom: '0.75rem' }}>{err}</div>}
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            {(curType || curAct) && (
+              <button onClick={() => save('', '')} disabled={saving}
+                style={{ ...btn, background: '#FFFFFF', borderColor: '#DFE7E3', color: '#B45309' }}>Reset to Zoho</button>
+            )}
+            <div style={{ flex: 1 }} />
+            <button onClick={onCancel} disabled={saving} style={{ ...btn, background: '#F9F9F9', borderColor: '#DFE7E3', color: '#5D6C7B' }}>Cancel</button>
+            <button onClick={() => save(type, act)} disabled={!changed || saving}
+              style={{ ...btn, background: 'rgba(28,73,66,0.12)', borderColor: 'rgba(28,73,66,0.4)', color: '#1C4942', opacity: (!changed || saving) ? 0.5 : 1 }}>
+              {saving ? 'Saving…' : 'Save'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ClassFilter({ rows, selected, onChange }) {
+  const counts = {};
+  for (const r of rows) { const k = classKey(r); counts[k] = (counts[k] || 0) + 1; }
+  const toggle = k => onChange(selected.includes(k) ? selected.filter(x => x !== k) : [...selected, k]);
+  const box = o => (
+    <label key={o.key} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: '0.75rem', whiteSpace: 'nowrap', cursor: 'pointer',
+                                color: o.key === NOT_UPDATED ? '#B45309' : counts[o.key] ? '#18191B' : '#9BA8B0' }}>
+      <input type="checkbox" checked={selected.includes(o.key)} onChange={() => toggle(o.key)} style={{ accentColor: '#1C4942', margin: 0, cursor: 'pointer' }} />
+      {o.label} <span style={{ color: '#9BA8B0' }}>({counts[o.key] || 0})</span>
+    </label>
+  );
+  const linkBtn = { background: '#FFFFFF', border: '1px solid #DFE7E3', borderRadius: 5, color: '#1C4942', padding: '3px 10px', fontSize: '0.72rem', cursor: 'pointer' };
+  return (
+    <div style={{ padding: '10px 20px', borderBottom: '1px solid #DFE7E3', display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', gap: '10px 28px' }}>
+      <div style={{ color: '#5D6C7B', fontSize: '0.7rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', paddingTop: 2 }}>
+        MSME Classification
+      </div>
+      {CLASS_TYPES.map(t => (
+        <div key={t} style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+          {CLASS_OPTIONS.filter(o => o.key.startsWith(`${t}|`)).map(box)}
+        </div>
+      ))}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {box(CLASS_OPTIONS[CLASS_OPTIONS.length - 1])}
+        <div style={{ display: 'flex', gap: 6 }}>
+          <button onClick={() => onChange(CLASS_OPTIONS.map(o => o.key))} style={linkBtn}>Select All</button>
+          <button onClick={() => onChange([])} style={linkBtn}>Clear All</button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 // ─── Drill-Down Modal ─────────────────────────────────────────────────────────
@@ -143,6 +300,7 @@ function RecheckResult({ r }) {
 }
 
 function DrillDownModal({ vendor, onClose, fy, isAdmin, onRechecked }) {
+  const api = useMsmeApi();
   const [tab, setTab] = useState('paid');
   const [checking, setChecking] = useState(false);
   const [recheck, setRecheck]   = useState(null);
@@ -205,6 +363,12 @@ function DrillDownModal({ vendor, onClose, fy, isAdmin, onRechecked }) {
             {vendor.notes?.unapplied_knocked_off > 0 && (
               <div style={{ color: '#B45309', fontSize: '0.72rem', marginTop: 3 }}>
                 {fmtINR(vendor.notes.unapplied_knocked_off)} of unapplied payments / credits in Zoho knocked off against the oldest bills (as the Zoho vendor statement nets them).
+              </div>
+            )}
+            {vendor.notes?.tds_in_paid_within45 > 0 && (
+              <div style={{ color: '#5D6C7B', fontSize: '0.72rem', marginTop: 3 }}>
+                Paid within 45 days includes {fmtINR(vendor.notes.tds_in_paid_within45)} TDS deducted on bills dated in this half
+                {vendor.notes.tds_reversed_by_debit_notes > 0 && ` (${fmtINR(vendor.notes.tds_on_bills)} less ${fmtINR(vendor.notes.tds_reversed_by_debit_notes)} reversed by debit notes)`} — amount only, no bill count.
               </div>
             )}
           </div>
@@ -346,6 +510,7 @@ function UnfreezeDialog({ fy, half, halfLabel, onConfirm, onCancel, loading }) {
 // ─── Reason Cell (editable) ───────────────────────────────────────────────────
 
 function ReasonCell({ fy, half, vendorId, initialValue, onSaved }) {
+  const api = useMsmeApi();
   const [value, setValue] = useState(initialValue || '');
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -392,6 +557,7 @@ function ReasonCell({ fy, half, vendorId, initialValue, onSaved }) {
 // ─── Half-Year Panel ──────────────────────────────────────────────────────────
 
 function HalfYearPanel({ fy, half, halfConfig, reloadKey, onRechecked }) {
+  const api = useMsmeApi();
   const { user } = useAuth();
   const isAdmin = user?.role === 'admin' || user?.isAdmin;
 
@@ -405,6 +571,27 @@ function HalfYearPanel({ fy, half, halfConfig, reloadKey, onRechecked }) {
   const [showUnfreeze, setShowUnfreeze] = useState(false);
   const [actionLoading, setActLoad]     = useState(false);
   const [search, setSearch]       = useState('');
+  const [classSel, setClassSel]   = useState([]);   // MSME classification filter keys (OR); empty = all
+  const [classEdit, setClassEdit] = useState(null); // row whose classification is being edited
+
+  // Saved manual classification: update this half at once, then reload both halves (same vendor)
+  function onClassSaved(vid, o) {
+    setData(prev => prev ? {
+      ...prev,
+      rows: prev.rows.map(r => {
+        if (r.vendor_id !== vid) return r;
+        const zt = zohoVal(r, 'msme_type'), za = zohoVal(r, 'major_activity');
+        const { class_manual, ...rest } = r;
+        return {
+          ...rest, zoho_msme_type: zt, zoho_major_activity: za,
+          msme_type: o?.msme_type || zt, major_activity: o?.major_activity || za,
+          ...(o ? { class_manual: { msme_type: !!o.msme_type, major_activity: !!o.major_activity, updated_at: o.updated_at, updated_by: o.updated_by } } : {}),
+        };
+      }),
+    } : prev);
+    setClassEdit(null);
+    if (onRechecked) onRechecked();
+  }
 
   const load = useCallback(async (bust = false) => {
     setLoading(true); setError(null);
@@ -414,7 +601,7 @@ function HalfYearPanel({ fy, half, halfConfig, reloadKey, onRechecked }) {
     } catch (e) {
       setError(e.response?.data?.error || e.message);
     } finally { setLoading(false); }
-  }, [fy, half]);
+  }, [fy, half, api]);
 
   useEffect(() => { load(); }, [load]);
   // A vendor recheck changes both halves — reload this one too
@@ -448,13 +635,16 @@ function HalfYearPanel({ fy, half, halfConfig, reloadKey, onRechecked }) {
   async function exportExcel() {
     if (!data) return;
     try {
+      // Classification filter applies to the export; with no filter it is exactly the full report
+      const expRows = classSel.length ? (data.rows || []).filter(r => classSel.includes(classKey(r))) : data.rows;
       const resp = await api.msmeF1Export({
         fy, half,
         half_label: data.half_label,
         cutoff_date: data.cutoff_date,
-        rows: data.rows,
-        totals: data.totals,
+        rows: expRows,
+        totals: classSel.length ? sumTotals(expRows) : data.totals,
         status: data.status,
+        filter_label: classSel.length ? CLASS_OPTIONS.filter(o => classSel.includes(o.key)).map(o => o.label).join(', ') : '',
       });
       const url = URL.createObjectURL(new Blob([resp.data]));
       const a = document.createElement('a');
@@ -469,21 +659,13 @@ function HalfYearPanel({ fy, half, halfConfig, reloadKey, onRechecked }) {
   const rows    = data?.rows || [];
   const totals  = data?.totals || {};
 
+  // MSME classification filter (any selected combination), then search; KPI cards and totals follow
+  const classRows = classSel.length ? rows.filter(r => classSel.includes(classKey(r))) : rows;
   const filtered = search
-    ? rows.filter(r => r.vendor_name.toLowerCase().includes(search.toLowerCase()) || (r.pan || '').toLowerCase().includes(search.toLowerCase()))
-    : rows;
+    ? classRows.filter(r => r.vendor_name.toLowerCase().includes(search.toLowerCase()) || (r.pan || '').toLowerCase().includes(search.toLowerCase()))
+    : classRows;
 
-  const fTotals = filtered.reduce((s, r) => ({
-    paid_within45_count:  s.paid_within45_count  + r.paid_within45_count,
-    paid_within45_amount: s.paid_within45_amount + r.paid_within45_amount,
-    paid_after45_count:   s.paid_after45_count   + r.paid_after45_count,
-    paid_after45_amount:  s.paid_after45_amount  + r.paid_after45_amount,
-    out_within45_count:   s.out_within45_count   + r.out_within45_count,
-    out_within45_amount:  s.out_within45_amount  + r.out_within45_amount,
-    out_after45_count:    s.out_after45_count    + r.out_after45_count,
-    out_after45_amount:   s.out_after45_amount   + r.out_after45_amount,
-  }), { paid_within45_count:0, paid_within45_amount:0, paid_after45_count:0, paid_after45_amount:0,
-        out_within45_count:0, out_within45_amount:0, out_after45_count:0, out_after45_amount:0 });
+  const fTotals = sumTotals(filtered);
 
   // ── KPI summary cards ──
   function KpiCard({ label, count, amount, accent }) {
@@ -623,20 +805,23 @@ function HalfYearPanel({ fy, half, halfConfig, reloadKey, onRechecked }) {
               placeholder="Search by vendor name or PAN…"
               style={{ background: '#FFFFFF', border: '1px solid #DFE7E3', borderRadius: 6, color: '#18191B', padding: '6px 12px', fontSize: '0.8rem', width: 280, outline: 'none' }}
             />
-            {search && (
+            {(search || classSel.length > 0) && (
               <span style={{ marginLeft: 8, color: '#5D6C7B', fontSize: '0.75rem' }}>
                 Showing {filtered.length} of {rows.length} vendors
               </span>
             )}
           </div>
 
+          {/* MSME classification filter */}
+          <ClassFilter rows={rows} selected={classSel} onChange={setClassSel} />
+
           {/* Table */}
           <div style={{ overflowX: 'auto' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 1000 }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 1200 }}>
               <thead>
                 {/* Column group headers */}
                 <tr>
-                  <th colSpan={3} style={{ ...th('left'), borderRight: '1px solid #DFE7E3' }}></th>
+                  <th colSpan={5} style={{ ...th('left'), borderRight: '1px solid #DFE7E3' }}></th>
                   <th colSpan={2} style={{ ...th(), borderRight: '1px solid #DFE7E3', background: '#14532d22', color: '#4ade80' }}>
                     (d) Paid within 45 Days
                   </th>
@@ -657,7 +842,9 @@ function HalfYearPanel({ fy, half, halfConfig, reloadKey, onRechecked }) {
                   <th style={{ ...th('left'), minWidth: 200 }}>
                     <span style={{ color: '#1C4942' }}>↗</span> (b) Name of MSE Supplier
                   </th>
-                  <th style={{ ...th('left'), borderRight: '1px solid #DFE7E3', minWidth: 120 }}>(c) PAN</th>
+                  <th style={{ ...th('left'), minWidth: 120 }}>(c) PAN</th>
+                  <th style={th('left')}>MSME / Enterprise Type</th>
+                  <th style={{ ...th('left'), borderRight: '1px solid #DFE7E3' }}>Major Activity</th>
                   <th style={th()}>No.</th>
                   <th style={{ ...th(), borderRight: '1px solid #DFE7E3' }}>Amount (Rs.)</th>
                   <th style={th()}>No.</th>
@@ -672,13 +859,15 @@ function HalfYearPanel({ fy, half, halfConfig, reloadKey, onRechecked }) {
               <tbody>
                 {filtered.length === 0 ? (
                   <tr>
-                    <td colSpan={12} style={{ ...td(), textAlign: 'center', padding: '32px', color: '#5D6C7B' }}>
+                    <td colSpan={14} style={{ ...td(), textAlign: 'center', padding: '32px', color: '#5D6C7B' }}>
                       <Info size={16} style={{ display: 'inline', marginRight: 6 }} />
                       {upcoming
                         ? `This half-year period starts on ${data?.half_start}. No data to show yet.`
                         : rows.length === 0
                           ? 'No MSE vendor transactions found for this period.'
-                          : 'No vendors match the search filter.'}
+                          : classSel.length && !search
+                            ? 'No vendors match the selected MSME classification.'
+                            : 'No vendors match the search filter.'}
                     </td>
                   </tr>
                 ) : filtered.map((r, idx) => {
@@ -703,8 +892,22 @@ function HalfYearPanel({ fy, half, halfConfig, reloadKey, onRechecked }) {
                           <div style={{ color: '#B45309', fontSize: '0.68rem' }}>Advance only — {fmtINR(r.notes.advance_only_in_half)} paid in this half, no bills yet</div>
                         )}
                       </td>
-                      <td style={{ ...td('left'), borderRight: '1px solid #DFE7E3', fontFamily: 'monospace', letterSpacing: '0.05em', color: r.pan ? '#9BA8B0' : '#B45309' }}>
+                      <td style={{ ...td('left'), fontFamily: 'monospace', letterSpacing: '0.05em', color: r.pan ? '#9BA8B0' : '#B45309' }}>
                         {r.pan || '⚠ Missing'}
+                      </td>
+                      <td style={{ ...td('left'), whiteSpace: 'nowrap', color: r.msme_type ? '#18191B' : '#B45309' }}>
+                        {entTypeLabel(r)}
+                        {r.class_manual?.msme_type && <ManualTag by={r.class_manual.updated_by} at={r.class_manual.updated_at} />}
+                      </td>
+                      <td style={{ ...td('left'), whiteSpace: 'nowrap', borderRight: '1px solid #DFE7E3', color: r.major_activity ? '#18191B' : '#B45309' }}>
+                        {activityLabel(r)}
+                        {r.class_manual?.major_activity && <ManualTag by={r.class_manual.updated_by} at={r.class_manual.updated_at} />}
+                        {isAdmin && !frozen && (!zohoVal(r, 'msme_type') || !zohoVal(r, 'major_activity') || r.class_manual) && (
+                          <button onClick={() => setClassEdit(r)} title="Manually update Enterprise Type / Major Activity"
+                            style={{ marginLeft: 6, fontSize: '0.65rem', color: '#1C4942', background: 'none', border: '1px solid rgba(28,73,66,0.3)', borderRadius: 4, padding: '0 5px', cursor: 'pointer', verticalAlign: 'middle' }}>
+                            Edit
+                          </button>
+                        )}
                       </td>
                       <td style={{ ...td(), color: r.paid_within45_count > 0 ? '#4ade80' : '#9BA8B0', cursor: r.paid_within45_count > 0 ? 'pointer' : 'default' }}
                           onClick={() => r.paid_within45_count > 0 && setDrill({ ...r, _defaultTab: 'paid' })}>
@@ -754,7 +957,7 @@ function HalfYearPanel({ fy, half, halfConfig, reloadKey, onRechecked }) {
               {filtered.length > 0 && (
                 <tfoot>
                   <tr style={{ background: '#F9F9F9', borderTop: '2px solid #DFE7E3' }}>
-                    <td colSpan={3} style={{ ...td('left'), fontWeight: 700, color: '#9BA8B0', borderRight: '1px solid #DFE7E3' }}>
+                    <td colSpan={5} style={{ ...td('left'), fontWeight: 700, color: '#9BA8B0', borderRight: '1px solid #DFE7E3' }}>
                       TOTAL ({filtered.length} vendor{filtered.length !== 1 ? 's' : ''})
                     </td>
                     <td style={{ ...td(), fontWeight: 700, color: '#4ade80' }}>{fmtNum(fTotals.paid_within45_count)}</td>
@@ -784,6 +987,9 @@ function HalfYearPanel({ fy, half, halfConfig, reloadKey, onRechecked }) {
 
       {/* Drill-down modal */}
       {drillVendor && <DrillDownModal vendor={drillVendor} onClose={() => setDrill(null)} fy={fy} isAdmin={isAdmin} onRechecked={onRechecked} />}
+
+      {/* Manual classification */}
+      {classEdit && <ClassEditModal row={classEdit} onSaved={onClassSaved} onCancel={() => setClassEdit(null)} />}
 
       </>}
 

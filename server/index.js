@@ -15,15 +15,22 @@ const bcrypt = require('bcryptjs');
 const NodeCache = require('node-cache');
 const XLSX = require('xlsx');
 const pdfParse = require('pdf-parse');
-const { zohoGet, zohoGetAll, zohoPost, zohoPut } = require('./zoho');
+// MSME multi-company: zoho / db / cache / syncEngine below follow the running company context and
+// pass straight through for DevX (no context) — see company-context.js
+const companyCtx = require('./company-context');
+const _zoho = require('./zoho');
+const { zohoGet, zohoGetAll, zohoPost, zohoPut } = companyCtx.contextZoho(_zoho);
 const multer = require('multer');
 const { MODULES, allPerms, loadUsers, saveUsers, signToken, authMiddleware, adminOnly } = require('./auth');
-const db         = require('./db');
+const _db        = require('./db');
+const db         = companyCtx.contextDb(_db);
 const workbooks  = require('./workbooks');
 const fileStore  = require('./file-store');
 const { background } = require('./background');
 const IS_VERCEL  = !!process.env.VERCEL;
-const syncEngine  = require('./sync-engine');
+const _devxSyncEngine = require('./sync-engine');
+const _companyEngines = {};   // company → its own sync engine (created after the MSME entities below)
+const syncEngine  = companyCtx.contextEngine(_devxSyncEngine, _companyEngines);
 const { attachAgreed: attachRentAgreed } = require('./rent-agreed');
 const pocmSync    = require('./pocm-sync');
 
@@ -77,7 +84,8 @@ function resolvedDate(explicit, startDate, term) {
 }
 
 const app = express();
-const cache = new NodeCache({ stdTTL: 300 });
+const _rawCache = new NodeCache({ stdTTL: 300 });
+const cache = companyCtx.contextCache(_rawCache);
 // Shared full-invoice detail cache — 24h TTL. Used by both sub_total enrichment and occupancy.
 // Prevents fetching the same invoice from Zoho more than once per day across ALL endpoints.
 const detailCache = new NodeCache({ stdTTL: 86400 });
@@ -86,10 +94,13 @@ const inFlight = new Map(); // deduplicates concurrent fetches for the same invo
 workbooks.onChange(() => cache.flushAll());
 
 app.use(cors());
-// The GST 180-day export posts the full report back (~300 KB+), so it skips the default
-// 100 KB parser here and uses its own larger limit on the route.
+// MSME multi-company: /api/c/<company>/<MSME route> runs that route in the company's context
+app.use(companyCtx.companyRouter);
+// Report exports post the full report back (GST 180-day, MSME Form-1 and Interest: 100–300 KB+),
+// so they skip the default 100 KB parser here and use their own larger limit on the route.
 const _jsonParser = express.json();
-app.use((req, res, next) => (req.path === '/api/gst/export' ? next() : _jsonParser(req, res, next)));
+const _largeJsonRoutes = new Set(['/api/gst/export', '/api/msme-form1/export', '/api/msme-interest/export']);
+app.use((req, res, next) => (_largeJsonRoutes.has(req.path) ? next() : _jsonParser(req, res, next)));
 
 // Requests wait for start-up (DB tables, sync + POCM modules). Locally the server only
 // listens after start-up, so this never waits; on Vercel a request can arrive sooner.
@@ -4379,8 +4390,18 @@ app.get('/api/purchase/msme-report', async (req, res) => {
       v.bills.sort((a, b) => b.days_since - a.days_since);
     }
 
-    // Vendor list for the Vendors tab (all MSME vendors found in bills)
-    const msme_vendors = Object.values(msmeMap);
+    // Vendor list for the Vendors tab: every MSME-registered vendor found in bills — Micro, Small and
+    // Medium — with its Enterprise Type and Udyam number as held from Zoho. Display only: the 45-day
+    // tracking above still uses msmeMap (Micro/Small + vendor_master stubs) unchanged.
+    const msme_vendors = Object.values(msmeMap).map(v => {
+      const c = rawCM[v.vendor_id];
+      return c?.vendor_name ? { ...v, vendor_name: c.vendor_name, msme_type: c.msme_type || v.msme_type, udyam_number: c.udyam_reg_no || v.udyam_number } : v;
+    });
+    for (const [cid, c] of Object.entries(rawCM)) {
+      if (!msmeMap[cid] && billVendorIds.includes(cid) && c.vendor_name && /medium/i.test(c.msme_type || '')) {
+        msme_vendors.push({ vendor_id: cid, vendor_name: c.vendor_name, msme_type: c.msme_type, udyam_number: c.udyam_reg_no || '', vm_confirmed: c.vm_confirmed });
+      }
+    }
 
     const result = {
       total_msme,
@@ -4438,9 +4459,11 @@ function _ensureSyncDir2() {
 // Returns { data, fetched_at } when the map is within TTL, else null
 // non_msme: { vendor_id: zoho last_modified_time } for bill vendors checked and found not MSME,
 // so they are not re-fetched from Zoho on every request.
+// The TTL runs from checked_at (last time the vendor sync confirmed the map against Zoho), not
+// fetched_at (last change): a day without MSME edits must not trigger a re-read of every vendor.
 async function readMsmeCMMeta({ ignoreTTL = false } = {}) {
   const c = await db.readJSON(_MSME_CM_KEY, _MSME_CM_FILE, null);
-  if (c && c.data && (ignoreTTL || syncEngine.isFresh(c.fetched_at, _MSME_CM_TTL_H))) {
+  if (c && c.data && (ignoreTTL || syncEngine.isFresh(c.checked_at || c.fetched_at, _MSME_CM_TTL_H))) {
     return { data: c.data, non_msme: c.non_msme || {}, fetched_at: c.fetched_at };
   }
   return null;
@@ -4461,8 +4484,27 @@ async function writeMsmeCM(data, fetchedAt, nonMsme = {}) {
     if (v && v.vendor_name) persistable[k] = v;
   }
   const stamp = fetchedAt || new Date().toISOString();
-  await db.writeJSON(_MSME_CM_KEY, _MSME_CM_FILE, { data: persistable, non_msme: nonMsme, fetched_at: stamp });
+  await db.writeJSON(_MSME_CM_KEY, _MSME_CM_FILE, { data: persistable, non_msme: nonMsme, fetched_at: stamp, checked_at: new Date().toISOString() });
   return stamp;
+}
+
+// The vendor sync found the map current: restart the TTL, keep fetched_at (quarter results stay valid)
+async function markMsmeCMChecked() {
+  const c = await db.readJSON(_MSME_CM_KEY, _MSME_CM_FILE, null);
+  if (!c?.data) return;
+  c.checked_at = new Date().toISOString();
+  await db.writeJSON(_MSME_CM_KEY, _MSME_CM_FILE, c);
+}
+
+// One vendor's MSME classification changed on the dashboard side (vendor_master edit): drop only
+// that vendor so the next report reads it again from Zoho — every other vendor stays cached.
+async function forgetMsmeCMVendor(vid) {
+  const c = await db.readJSON(_MSME_CM_KEY, _MSME_CM_FILE, null);
+  if (!c?.data) return;
+  delete c.data[vid];
+  if (c.non_msme) delete c.non_msme[vid];
+  c.fetched_at = new Date().toISOString();
+  await db.writeJSON(_MSME_CM_KEY, _MSME_CM_FILE, c);
 }
 
 // Load vendor MSME details for the given vendor IDs: one Zoho /contacts/{id} call per
@@ -4514,13 +4556,6 @@ async function loadMsmeContactMap(billVids, vmVids, cmMeta) {
     }
   }
   return { map, fetched_at: fetchedAt || 'none' };
-}
-
-async function invalidateMsmeCM() {
-  try {
-    _ensureSyncDir2();
-    await db.writeJSON(_MSME_CM_KEY, _MSME_CM_FILE, { data: {}, fetched_at: new Date(0).toISOString() });
-  } catch (_) {}
 }
 
 function _msmeQRKey(fy, q)  { return `msme_qr_${fy}_${q}`; }
@@ -4765,8 +4800,10 @@ app.put('/api/msme-interest/vendor-master/:vid', authMiddleware, adminOnly, asyn
     d.audit_trail = (d.audit_trail || []).concat({ action: 'vendor_master_update', vendor_id: vid, user, timestamp: new Date().toISOString(), prev, next: d.vendor_master[vid] });
     await writeMsmeIR(d);
     cache.keys().filter(k => k.startsWith('msme-ir-')).forEach(k => cache.del(k));
-    // vendor_master change affects MSME classification → invalidate contact map + all quarter results
-    background(invalidateMsmeCM().catch(() => {}));
+    // vendor_master change affects this vendor's MSME classification → re-read only this vendor
+    // from Zoho (not the whole contact map) + recompute all quarter results. Awaited so the page's
+    // reload right after this response can't write the old entry back.
+    await forgetMsmeCMVendor(vid).catch(() => {});
     background(invalidateMsmeQR().catch(() => {}));
     res.json({ ok: true, vid, data: d.vendor_master[vid] });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -4884,6 +4921,7 @@ async function resyncMsmeVendorMaster(trigger = 'manual', { full = false } = {})
     }
   }
   const { map, fetched_at } = await loadMsmeContactMap(billVids, vmVids, base);
+  await markMsmeCMChecked();
   cache.keys().filter(k => k.startsWith('msme-ir-') || k === 'pur-msme-report').forEach(k => cache.del(k));
   const entries = Object.values(map).filter(e => e.vendor_name);
   const summary = {
@@ -5067,7 +5105,7 @@ app.get('/api/msme-interest/audit', authMiddleware, adminOnly, async (req, res) 
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.post('/api/msme-interest/export', authMiddleware, async (req, res) => {
+app.post('/api/msme-interest/export', authMiddleware, express.json({ limit: '10mb' }), async (req, res) => {
   const { fy, quarter, bills = [], summary = {}, quarter_close_date, status } = req.body;
   try {
     const rows = bills.map((b, i) => ({
@@ -5208,6 +5246,7 @@ function msmeF1BillRec(b) {
     bill_id: b.bill_id, vendor_id: b.vendor_id, vendor_name: b.vendor_name || '',
     bill_number: b.bill_number || '', date: b.date || '', due_date: b.due_date || '',
     total: Number(b.total) || 0, balance: Number(b.balance) || 0, status: b.status || '',
+    tds: Number(b.tds_total ?? b.tds_amount) || 0, // TDS deducted on the bill (list: tds_total, detail: tds_amount)
     lmt: b.last_modified_time || '',
   };
 }
@@ -5231,16 +5270,20 @@ function msmeF1CreditAlloc(c) {
 // /journals/{id} → the vendor's Accounts Payable lines. credit = payable (like a bill), debit =
 // reduces the payable (like an advance). journal_credits = credits applied to this journal;
 // bills_credited = this journal's debit applied to bills. null when no AP line for the vendor.
+// Bump when the parsed journal record changes — stored records of an older version are re-read.
+// v2: bills_credited amount is Zoho's `credited_amount` (v1 read a non-existent `amount` → 0).
+const MSME_F1_JOURNAL_V = 2;
 function msmeF1JournalRec(j, vid) {
   const ap = (j.line_items || []).filter(l => l.customer_id === vid && /^accounts payable$/i.test((l.account_name || '').trim()));
   if (!ap.length || MSME_F1_SKIP.has(j.status)) return null;
   const amt = l => Number(l.bcy_amount ?? l.amount) || 0;
   return {
+    _v: MSME_F1_JOURNAL_V,
     journal_id: j.journal_id, entry_number: j.entry_number || '', date: j.journal_date || '', lmt: j.last_modified_time || '',
     credit: f1r2(ap.filter(l => l.debit_or_credit === 'credit').reduce((s, l) => s + amt(l), 0)),
     debit:  f1r2(ap.filter(l => l.debit_or_credit === 'debit').reduce((s, l) => s + amt(l), 0)),
     journal_credits: (j.journal_credits || []).map(c => ({ date: c.date || '', amount: Number(c.amount) || 0, ref: c.credit_number || c.payment_number || c.entry_number || '' })),
-    bills_credited: (j.bills_credited || []).map(b => ({ bill_id: b.bill_id, amount: Number(b.amount) || 0 })),
+    bills_credited: (j.bills_credited || []).map(b => ({ bill_id: b.bill_id, amount: Number(b.credited_amount ?? b.amount) || 0 })),
   };
 }
 
@@ -5391,12 +5434,15 @@ async function runMsmeF1Settlements({ mode = 'normal', isInitial = false, ctx = 
         vendor_id: c.vendor_id, number: c.vendor_credit_number || '', date: c.date || '',
         total: Number(c.total) || 0, balance: Number(c.balance) || 0, status: c.status || '', lmt,
         alloc: old?.alloc ?? null, detail_lmt: old?.detail_lmt ?? null,
+        tds: old?.tds ?? null, tds_lmt: old?.tds_lmt ?? null, // TDS reversed by the debit note (detail only)
       };
       if (rec.total - rec.balance <= MSME_F1_EPS) { rec.alloc = []; rec.detail_lmt = lmt; }
-      else if (full || rec.detail_lmt !== lmt || !Array.isArray(rec.alloc)) {
+      const needAlloc = rec.total - rec.balance > MSME_F1_EPS && (full || rec.detail_lmt !== lmt || !Array.isArray(rec.alloc));
+      if (needAlloc || full || rec.tds_lmt !== lmt) {
         try {
-          rec.alloc = msmeF1CreditAlloc((await rptZohoGet(`/vendorcredits/${c.vendor_credit_id}`)).vendor_credit || {});
-          rec.detail_lmt = lmt;
+          const vc = (await rptZohoGet(`/vendorcredits/${c.vendor_credit_id}`)).vendor_credit || {};
+          if (needAlloc) { rec.alloc = msmeF1CreditAlloc(vc); rec.detail_lmt = lmt; }
+          rec.tds = Number(vc.tds_amount) || 0; rec.tds_lmt = lmt;
           store.credits[c.vendor_credit_id] = rec;
           await fetched();
         } catch (e) { if (msmeF1Fatal(e)) throw e; stats.failed++; }
@@ -5442,7 +5488,7 @@ async function runMsmeF1Settlements({ mode = 'normal', isInitial = false, ctx = 
         const items = [];
         for (const j of list) {
           const old = prevJ.get(j.journal_id);
-          if (old && !full && old.lmt === (j.last_modified_time || '')) { items.push(old); continue; }
+          if (old && !full && old.lmt === (j.last_modified_time || '') && old._v === MSME_F1_JOURNAL_V) { items.push(old); continue; }
           const det = (await rptZohoGet(`/journals/${j.journal_id}`)).journal || {};
           await fetched();
           const rec = msmeF1JournalRec(det, vid);
@@ -5535,9 +5581,26 @@ syncEngine.registerEntity('msme_form1_settlements', {
   description: 'Micro/Small vendors: bill allocation of each vendor payment and vendor credit, older unapplied payments, and the bill snapshot MSME Form-1 H1/H2 is rebuilt from.',
   run: ({ mode, isInitial, ctx }) => runMsmeF1Settlements({ mode, isInitial, ctx }),
 });
-for (const k of ['vendor_payments_fy', 'vendor_credits_all']) {
+// vendor_msme_master too: a vendor-only sync (Vendors — All → Sync Now) must also refresh the
+// Form-1 vendor register, which re-reads only vendors whose last_modified_time changed.
+// bills_fy: the Form-1 store keeps its own MSE bill snapshot; a bill deleted in Zoho leaves it
+// only when the settlements entity runs after the bill cache changed.
+for (const k of ['bills_fy', 'vendor_payments_fy', 'vendor_credits_all', 'vendor_msme_master']) {
   const def = syncEngine.ENTITY_DEFS[k];
   if (def) def.dependents = [...new Set([...(def.dependents || []), 'msme_form1_settlements'])];
+}
+
+// ── MSME companies: one sync engine each ──────────────────────────────────────
+// Same list entities the MSME reports read, the same two derived MSME entities (same run code,
+// executed in the company context) and the same dependency chain as DevX.
+const MSME_COMPANY_ENTITIES = ['vendors_all', 'bills_fy', 'vendor_credits_all', 'vendor_payments_fy', 'bills_open', 'bills_overdue'];
+for (const co of Object.keys(companyCtx.COMPANIES)) {
+  const eng = companyCtx.loadCompanyEngine(co, { baseDb: _db, entities: MSME_COMPANY_ENTITIES });
+  for (const k of ['vendor_msme_master', 'msme_form1_settlements']) eng.registerEntity(k, { ..._devxSyncEngine.ENTITY_DEFS[k] });
+  for (const [k, def] of Object.entries(eng.ENTITY_DEFS)) {
+    def.dependents = (_devxSyncEngine.ENTITY_DEFS[k]?.dependents || []).filter(d => eng.ENTITY_DEFS[d]);
+  }
+  _companyEngines[co] = eng;
 }
 
 // ── Form-1 dataset & calculation ──────────────────────────────────────────────
@@ -5596,7 +5659,7 @@ function msmeF1Dataset({ central, store, cm, vmSet, useOverlay = true }) {
     const total = Number(c.total) || 0, balance = Number(c.balance) || 0, lmt = c.last_modified_time || '';
     const alloc = total - balance <= MSME_F1_EPS ? []
       : (s && s.detail_lmt === lmt && Array.isArray(s.alloc) ? s.alloc : null);
-    vget(c.vendor_id).credits.push({ id: c.vendor_credit_id, ref: c.vendor_credit_number || '', date: c.date || '', total, balance, alloc });
+    vget(c.vendor_id).credits.push({ id: c.vendor_credit_id, ref: c.vendor_credit_number || '', date: c.date || '', total, balance, alloc, tds: s?.tds ?? null });
   }
 
   // Accounts Payable journals tagged to the vendor
@@ -5629,13 +5692,14 @@ function msmeF1VendorSettle(v, cutoffStr, coverageFrom) {
   // a debit applied to bills settles them on the journal date, its unapplied rest nets like an advance
   const bills = new Map(v.bills);
   const jPool = [];
+  const payRefs = new Set([...v.pays, ...v.prior].map(p => p.ref).filter(Boolean));
   for (const j of v.journals || []) {
     if (j.credit > MSME_F1_EPS) {
       const id = `JR:${j.journal_id}`;
       const applied = (j.journal_credits || []).reduce((s, c) => s + c.amount, 0);
       bills.set(id, { bill_id: id, bill_number: j.entry_number, date: j.date, due_date: '', total: j.credit,
                       balance: Math.max(0, j.credit - applied), source: 'journal' });
-      for (const c of j.journal_credits || []) add(id, { date: c.date || j.date, amount: c.amount, kind: 'credit', ref: c.ref || j.entry_number });
+      for (const c of j.journal_credits || []) add(id, { date: c.date || j.date, amount: c.amount, kind: payRefs.has(c.ref) ? 'payment' : 'credit', ref: c.ref || j.entry_number });
     }
     if (j.debit > MSME_F1_EPS) {
       let used = 0;
@@ -5697,6 +5761,10 @@ function msmeF1VendorSettle(v, cutoffStr, coverageFrom) {
 // Form-1 classification is unchanged: paid = settled inside the half (one entry per bill,
 // days = bill date → last settlement in the half); outstanding = unsettled at the cut-off
 // (days = bill date → cut-off). ≤45 / >45 days as before.
+// Debit notes (vendor credits) and AP journal adjustments are not payments: they reduce the bill
+// (user decision 2026-10-27), so they are left out of paid and of the payment date. Outstanding
+// is unchanged — they still settle the bill.
+const MSME_F1_BILL_REDUCTION = new Set(['credit', 'unapplied_credit', 'journal', 'unapplied_journal']);
 function computeForm1HalfYear(ds, ctxInfo, halfStart, cutoffStr, reasons, halfKey) {
   const { cm, vendorsById } = ctxInfo;
   const rows = [];
@@ -5712,6 +5780,8 @@ function computeForm1HalfYear(ds, ctxInfo, halfStart, cutoffStr, reasons, halfKe
       vendor_id: vid,
       vendor_name: vrec?.contact_name || msme.vendor_name || r.inScope[0]?.vendor_name || '',
       pan, msme_type: msme.msme_type || '', udyam_number: msme.udyam_reg_no || '',
+      // Zoho vendor custom field "MSME Sector" as entered (Manufacturer / Services / Trader)
+      major_activity: msme.msme_sector_raw || msme.major_activity_zoho || '',
       reason: reasons[`${halfKey}:${vid}`] || '',
       paid_within45_count: 0, paid_within45_amount: 0,
       paid_after45_count:  0, paid_after45_amount:  0,
@@ -5721,9 +5791,14 @@ function computeForm1HalfYear(ds, ctxInfo, halfStart, cutoffStr, reasons, halfKe
     };
     for (const b of r.inScope) {
       const ss = r.sets.get(b.bill_id) || [];
-      const inH = ss.filter(s => { const e = r.eff(s, b); return e >= halfStart && e <= cutoffStr; });
+      const inH = ss.filter(s => { const e = r.eff(s, b); return e >= halfStart && e <= cutoffStr && !MSME_F1_BILL_REDUCTION.has(s.kind); });
       const paid = inH.reduce((s, x) => s + x.amount, 0);
       const out = r.outC.get(b.bill_id);
+      // Debit notes / journal adjustments on this bill up to the cut-off (reduce the bill, not paid)
+      const reducedBy = ss.filter(s => MSME_F1_BILL_REDUCTION.has(s.kind) && r.eff(s, b) <= cutoffStr);
+      const reduction = reducedBy.reduce((s, x) => s + x.amount, 0);
+      const reductionInfo = reduction > MSME_F1_EPS
+        ? { reduced_by: f1r2(reduction), reductions: reducedBy.map(s => ({ kind: s.kind, ref: s.ref, date: r.eff(s, b), amount: f1r2(s.amount) })) } : {};
       if (paid > MSME_F1_EPS) {
         const payDate = inH.reduce((m, s) => (r.eff(s, b) > m ? r.eff(s, b) : m), '');
         const days = daysBetweenDates(b.date, payDate);
@@ -5733,6 +5808,7 @@ function computeForm1HalfYear(ds, ctxInfo, halfStart, cutoffStr, reasons, halfKe
           original_amount: b.total, paid_amount: f1r2(paid), outstanding_amount: f1r2(Math.max(0, out)),
           payment_date: payDate, days, classification: within ? 'paid_within45' : 'paid_after45',
           settled_via: inH.map(s => ({ kind: s.kind, ref: s.ref, date: r.eff(s, b), amount: f1r2(s.amount) })),
+          ...reductionInfo,
         });
         if (within) { row.paid_within45_count++; row.paid_within45_amount += paid; }
         else        { row.paid_after45_count++;  row.paid_after45_amount  += paid; }
@@ -5743,19 +5819,34 @@ function computeForm1HalfYear(ds, ctxInfo, halfStart, cutoffStr, reasons, halfKe
         const last = ss.filter(s => r.eff(s, b) <= cutoffStr).reduce((m, s) => (r.eff(s, b) > m ? r.eff(s, b) : m), '');
         row.bills_outstanding.push({
           bill_id: b.bill_id, bill_number: b.bill_number, bill_date: b.date, due_date: b.due_date || '', ...(b.source ? { source: b.source } : {}),
-          original_amount: b.total, paid_amount: f1r2(b.total - out), outstanding_amount: f1r2(out),
+          original_amount: b.total, paid_amount: f1r2(b.total - out - reduction), outstanding_amount: f1r2(out),
           payment_date: last, days, classification: within ? 'out_within45' : 'out_after45',
+          ...reductionInfo,
         });
         if (within) { row.out_within45_count++; row.out_within45_amount += out; }
         else        { row.out_after45_count++;  row.out_after45_amount  += out; }
       }
     }
-    if (!row.bills_paid.length && !row.bills_outstanding.length) {
+    // TDS deducted on the vendor's bills dated in the half, less TDS reversed by its debit notes dated
+    // in the half, counts as paid within 45 days — amount only, no bill count (user decision
+    // 2026-10-27). Bill amounts and outstanding are unchanged (Zoho bill totals are net of TDS).
+    const inHalfDate = x => x.date && x.date >= halfStart && x.date <= cutoffStr;
+    const tdsBills = [...v.bills.values()].filter(b => inHalfDate(b) && b.total > 0).reduce((s, b) => s + (b.tds || 0), 0);
+    const halfCredits = v.credits.filter(inHalfDate);
+    const tdsReversed = halfCredits.reduce((s, c) => s + (c.tds || 0), 0);
+    if (halfCredits.some(c => c.tds == null)) r.warn.add('tds_pending');
+    const tdsPaid = Math.max(0, tdsBills - tdsReversed);
+    if (tdsPaid > MSME_F1_EPS) {
+      row.paid_within45_amount += tdsPaid;
+      row.notes.tds_in_paid_within45 = f1r2(tdsPaid);
+      if (tdsReversed > MSME_F1_EPS) Object.assign(row.notes, { tds_on_bills: f1r2(tdsBills), tds_reversed_by_debit_notes: f1r2(tdsReversed) });
+    }
+    if (!row.bills_paid.length && !row.bills_outstanding.length && tdsPaid <= MSME_F1_EPS) {
       // Paid in the half but no bill on or before the cut-off (advance) — listed with nil amounts
       // so every MSE vendor active in the half appears; nothing is due, so all columns stay zero.
+      // Debit notes are not payments (they reduce bills), so only payments count here.
       const inHalf = x => x.date && x.date >= halfStart && x.date <= cutoffStr;
-      const adv = [...v.pays, ...v.prior].filter(inHalf).reduce((s, p) => s + (p.amount || 0), 0) +
-                  v.credits.filter(inHalf).reduce((s, c) => s + (c.total || 0), 0);
+      const adv = [...v.pays, ...v.prior].filter(inHalf).reduce((s, p) => s + (p.amount || 0), 0);
       if (adv <= MSME_F1_EPS) continue;
       row.notes.advance_only_in_half = f1r2(adv);
     }
@@ -5868,6 +5959,24 @@ async function msmeF1Inputs() {
   return { central, store, cmMeta, vmSet: new Set(Object.keys(ir.vendor_master || {})) };
 }
 
+// ── Form-1 manual classification (dashboard-side only — never written to Zoho) ─────────────
+// Stored in msme_form1_data.class_overrides[vendor_id] = { msme_type?, major_activity?, … }, which
+// no sync touches. Applied per field after the Form-1 calculation, for display and filtering only:
+// final = manual ?? Zoho ?? "Not Updated". MSE eligibility, bills and totals are not affected.
+const MSME_F1_CLASS_TYPES = ['micro', 'small', 'medium'];
+const MSME_F1_CLASS_ACTS  = ['Manufacturing', 'Trader', 'Service'];
+function msmeF1ApplyClassOverrides(rows, overrides = {}) {
+  for (const r of rows || []) {
+    r.zoho_msme_type = r.msme_type;
+    r.zoho_major_activity = r.major_activity;
+    const o = overrides[r.vendor_id];
+    if (!o) continue;
+    if (o.msme_type) r.msme_type = o.msme_type;
+    if (o.major_activity) r.major_activity = o.major_activity;
+    r.class_manual = { msme_type: !!o.msme_type, major_activity: !!o.major_activity, updated_at: o.updated_at, updated_by: o.updated_by };
+  }
+}
+
 app.get('/api/msme-form1/half-year', authMiddleware, async (req, res) => {
   const { fy = '2026-27', half = 'H1', refresh } = req.query;
   const halfKey = `${fy}:${half}`;
@@ -5884,6 +5993,7 @@ app.get('/api/msme-form1/half-year', authMiddleware, async (req, res) => {
     if (hit) return res.json(hit);
 
     const result = await msmeF1Build(fy, half, d);
+    msmeF1ApplyClassOverrides(result.rows, d.class_overrides);
     if (result.status === 'live') {
       console.log(`[MSME-F1] ${fy} ${half} — vendors:${result.vendor_count} mse:${result.debug.mse_eligible_vendors} knocked-off:${result.debug.unapplied_knocked_off} pending:${result.debug.allocation_pending}`);
       cache.set(cacheKey, result, 300);
@@ -5927,18 +6037,22 @@ async function msmeF1LiveVendor(vid, store, { deep = false } = {}) {
   for (const c of credits) {
     if (MSME_F1_SKIP.has(c.status)) continue;
     const total = Number(c.total) || 0, balance = Number(c.balance) || 0, lmt = c.last_modified_time || '';
-    let alloc = [];
-    if (total - balance > MSME_F1_EPS) {
-      const s = store.credits?.[c.vendor_credit_id];
-      if (!deep && s && s.detail_lmt === lmt && Array.isArray(s.alloc)) alloc = s.alloc;
-      else { alloc = msmeF1CreditAlloc((await rptZohoGet(`/vendorcredits/${c.vendor_credit_id}`)).vendor_credit || {}); detailCalls++; }
+    const s = store.credits?.[c.vendor_credit_id];
+    let alloc = [], tds = !deep && s && s.tds_lmt === lmt ? s.tds : null;
+    const needAlloc = total - balance > MSME_F1_EPS && !(!deep && s && s.detail_lmt === lmt && Array.isArray(s.alloc));
+    if (total - balance > MSME_F1_EPS && !needAlloc) alloc = s.alloc;
+    if (needAlloc || tds == null) {
+      const vc = (await rptZohoGet(`/vendorcredits/${c.vendor_credit_id}`)).vendor_credit || {};
+      detailCalls++;
+      if (needAlloc) alloc = msmeF1CreditAlloc(vc);
+      tds = Number(vc.tds_amount) || 0;
     }
-    creditRecs.push({ id: c.vendor_credit_id, ref: c.vendor_credit_number || '', date: c.date || '', total, balance, alloc, lmt, status: c.status || '' });
+    creditRecs.push({ id: c.vendor_credit_id, ref: c.vendor_credit_number || '', date: c.date || '', total, balance, alloc, lmt, status: c.status || '', tds });
   }
   const journals = [];
   for (const j of (await msmeF1PageAll('/journals', 'journals', { vendor_id: vid })).filter(x => x.status !== 'draft')) {
     const s = (store.journals?.[vid]?.items || []).find(x => x.journal_id === j.journal_id);
-    if (!deep && s && s.lmt === (j.last_modified_time || '')) { journals.push(s); continue; }
+    if (!deep && s && s.lmt === (j.last_modified_time || '') && s._v === MSME_F1_JOURNAL_V) { journals.push(s); continue; }
     const rec = msmeF1JournalRec((await rptZohoGet(`/journals/${j.journal_id}`)).journal || {}, vid);
     detailCalls++;
     if (rec) journals.push(rec);
@@ -6056,7 +6170,7 @@ app.post('/api/msme-form1/recheck-vendor', authMiddleware, adminOnly, async (req
         if (store.payments[p.id]) Object.assign(store.payments[p.id], { alloc: p.alloc, detail_lmt: p.lmt });
       }
       for (const c of live.overlay.credits) {
-        if (store.credits[c.id]) Object.assign(store.credits[c.id], { alloc: c.alloc, detail_lmt: c.lmt });
+        if (store.credits[c.id]) Object.assign(store.credits[c.id], { alloc: c.alloc, detail_lmt: c.lmt, tds: c.tds, tds_lmt: c.lmt });
       }
       await writeMsmeF1Settle(store);
       cache.keys().filter(k => k.startsWith('msme-f1-')).forEach(k => cache.del(k));
@@ -6402,6 +6516,36 @@ app.put('/api/msme-form1/reason', authMiddleware, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Set / change / remove a vendor's manual Enterprise Type and Major Activity for Form-1.
+// Per field: a value sets the override, empty clears it (Zoho value applies again); both empty =
+// Reset to Zoho. Applies to every live half; frozen snapshots are not changed.
+app.put('/api/msme-form1/classification', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const { vendor_id, vendor_name } = req.body || {};
+    if (!vendor_id) return res.status(400).json({ error: 'vendor_id required' });
+    const type = req.body.msme_type ? String(req.body.msme_type).trim().toLowerCase() : null;
+    const act  = req.body.major_activity ? String(req.body.major_activity).trim() : null;
+    if (type && !MSME_F1_CLASS_TYPES.includes(type)) return res.status(400).json({ error: `Enterprise Type must be one of: ${MSME_F1_CLASS_TYPES.join(', ')}` });
+    if (act && !MSME_F1_CLASS_ACTS.includes(act)) return res.status(400).json({ error: `Major Activity must be one of: ${MSME_F1_CLASS_ACTS.join(', ')}` });
+    const d = await readMsmeF1();
+    d.class_overrides = d.class_overrides || {};
+    const prev = d.class_overrides[vendor_id] || null;
+    const user = req.user?.username || req.user?.name || 'admin';
+    const now = new Date().toISOString();
+    if (type || act) {
+      d.class_overrides[vendor_id] = {
+        ...(type ? { msme_type: type } : {}), ...(act ? { major_activity: act } : {}),
+        vendor_name: vendor_name || prev?.vendor_name || '', updated_at: now, updated_by: user,
+      };
+    } else delete d.class_overrides[vendor_id];
+    const next = d.class_overrides[vendor_id] || null;
+    d.audit_trail = (d.audit_trail || []).concat({ action: next ? 'classification_update' : 'classification_reset', vendor_id, user, timestamp: now, prev, next });
+    await writeMsmeF1(d);
+    cache.keys().filter(k => k.startsWith('msme-f1-')).forEach(k => cache.del(k));
+    res.json({ ok: true, vendor_id, override: next });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.post('/api/msme-form1/freeze', authMiddleware, adminOnly, async (req, res) => {
   const { fy, half, frozen_by, half_data } = req.body;
   if (!fy || !half || !half_data) return res.status(400).json({ error: 'fy, half, and half_data required' });
@@ -6445,16 +6589,20 @@ app.get('/api/msme-form1/audit', authMiddleware, adminOnly, async (req, res) => 
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.post('/api/msme-form1/export', authMiddleware, async (req, res) => {
-  const { fy, half, half_label, rows = [], totals = {}, status, cutoff_date } = req.body;
+app.post('/api/msme-form1/export', authMiddleware, express.json({ limit: '10mb' }), async (req, res) => {
+  const { fy, half, half_label, rows = [], totals = {}, status, cutoff_date, filter_label } = req.body;
+  // Zoho vendor master values as shown in the report (Enterprise Type capitalised as in Zoho's UI)
+  const entType = t => { const s = String(t || '').trim(); return s ? s.charAt(0).toUpperCase() + s.slice(1).toLowerCase() : 'Not Updated'; };
   try {
     const wb = XLSX.utils.book_new();
     const sheetData = [
-      [`MSME Form-1 Report — ${half} FY ${fy} (${half_label || ''}) — Status: ${status || 'Live'} — Cut-off: ${cutoff_date || ''}`],
+      [`MSME Form-1 Report — ${half} FY ${fy} (${half_label || ''}) — Status: ${status || 'Live'} — Cut-off: ${cutoff_date || ''}` +
+       (filter_label ? ` — MSME classification filter: ${filter_label}` : '')],
       [],
-      ['', '', '', 'Payment', '', '', '', 'Outstanding', '', '', '', ''],
+      ['', '', '', '', '', 'Payment', '', '', '', 'Outstanding', '', '', '', ''],
       [
         '(a) S.No.', '(b) Name of MSE Supplier', '(c) PAN of the Supplier',
+        'MSME / Enterprise Type', 'Major Activity',
         '(d) Paid within 45 days — No.', '(d) Paid within 45 days — Amount (Rs.)',
         '(e) Paid after 45 days — No.',  '(e) Paid after 45 days — Amount (Rs.)',
         '(f) Outstanding ≤45 days — No.', '(f) Outstanding ≤45 days — Amount (Rs.)',
@@ -6463,6 +6611,7 @@ app.post('/api/msme-form1/export', authMiddleware, async (req, res) => {
       ],
       ...rows.map((r, i) => [
         i + 1, r.vendor_name, r.pan || '—',
+        entType(r.msme_type), String(r.major_activity || '').trim() || 'Not Updated',
         r.paid_within45_count, r.paid_within45_amount,
         r.paid_after45_count,  r.paid_after45_amount,
         r.out_within45_count,  r.out_within45_amount,
@@ -6471,7 +6620,7 @@ app.post('/api/msme-form1/export', authMiddleware, async (req, res) => {
       ]),
       [],
       [
-        'TOTAL', '', '',
+        'TOTAL', '', '', '', '',
         totals.paid_within45_count, totals.paid_within45_amount,
         totals.paid_after45_count,  totals.paid_after45_amount,
         totals.out_within45_count,  totals.out_within45_amount,
@@ -6482,7 +6631,7 @@ app.post('/api/msme-form1/export', authMiddleware, async (req, res) => {
 
     const ws = XLSX.utils.aoa_to_sheet(sheetData);
     ws['!cols'] = [
-      { wch: 6 }, { wch: 38 }, { wch: 14 },
+      { wch: 6 }, { wch: 38 }, { wch: 14 }, { wch: 14 }, { wch: 16 },
       { wch: 10 }, { wch: 20 }, { wch: 10 }, { wch: 20 },
       { wch: 10 }, { wch: 20 }, { wch: 10 }, { wch: 20 },
       { wch: 35 },
@@ -7099,6 +7248,165 @@ app.get('/api/purchase/vendor-credits-aging', async (req, res) => {
   } catch (e) {
     console.error('[vendor-credits-aging]', e.message);
     res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── Vendor Payment Report ────────────────────────────────────────────────────
+// Payments against bills vs advances against POs, with PO, project and categories. Synced by the
+// stage-4 entity below (server/vendor-payment-report.js): its own copy of payments, POs and the
+// previous FY's bills, read once and then kept up to date with only what changed in Zoho. The
+// endpoints only read what it built — viewing the report or changing its period never calls Zoho.
+const vprLib = require('./vendor-payment-report');
+const vendorPaymentReport = vprLib.create({
+  db, syncEngine, pacedGet: rptZohoGet, isFatal: msmeF1Fatal, ensureDir: _ensureSyncDir2, isVercel: IS_VERCEL,
+});
+syncEngine.registerEntity('vendor_payment_report', {
+  label: 'Vendor Payment Report', stage: 4, kind: 'derived',
+  path: '/vendorpayments, /purchaseorders, /bills (+ details)',
+  description: 'Vendor payments of the previous and current FY: against bill or advance (with / without PO), PO, Project_Details, Sub-Category, Project Sub Category. Own copy of payments, POs and previous-FY bills: read once, then only changes (last_modified_time), checked against Zoho record counts and vendor balances.',
+  run: args => vendorPaymentReport.run(args),
+});
+for (const k of ['vendors_all', 'bills_fy', 'vendor_payments_fy']) {
+  const def = syncEngine.ENTITY_DEFS[k];
+  if (def) def.dependents = [...new Set([...(def.dependents || []), 'vendor_payment_report'])];
+}
+
+// ?from=YYYY-MM-DD&to=YYYY-MM-DD (payment date). ready:false until the first build has published rows.
+// A year of rows is ~2 MB of JSON, so it is sent gzipped when the browser accepts it.
+app.get('/api/purchase/vendor-payment-report', async (req, res) => {
+  try {
+    const d = syncEngine.getCurrentDates();
+    const [store, status] = await Promise.all([vendorPaymentReport.current(), vendorPaymentReport.status()]);
+    if (!store) return res.json({ ready: false, today: d.today, status });
+    const ymd = s => (/^\d{4}-\d{2}-\d{2}$/.test(String(s || '')) ? String(s) : null);
+    const from = ymd(req.query.from) || d.fyStart;
+    const to   = ymd(req.query.to) || d.today;
+    // rows before complete_from wait for the previous FY's bills (first build only)
+    const rows = store.rows.filter(r => r.date >= from && r.date <= to && r.date >= (store.complete_from || ''));
+    const [notes, u] = await Promise.all([vendorPaymentReport.notesOf(rows), vprUser(req)]);
+    const body = JSON.stringify({
+      ready: true, from, to, today: d.today,
+      window_from: store.window_from, window_to: store.window_to, complete_from: store.complete_from,
+      built_at: store.built_at, pending: store.pending || {}, status,
+      rows, notes,   // notes: bill uploads and remarks, by payment
+      rights: { user_id: u?.id || null, admin: !!u?.admin, purchase: !!u?.purchase, accounts: !!u?.accounts },
+    });
+    if (/\bgzip\b/.test(req.headers['accept-encoding'] || '')) {
+      res.set({ 'Content-Type': 'application/json; charset=utf-8', 'Content-Encoding': 'gzip', Vary: 'Accept-Encoding' });
+      return res.send(require('zlib').gzipSync(body));
+    }
+    res.type('json').send(body);
+  } catch (e) {
+    console.error('[vendor-payment-report]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+// Sync state for the report's status line (polled while it builds or refreshes)
+app.get('/api/purchase/vendor-payment-report/status', async (req, res) => {
+  try {
+    res.json(await vendorPaymentReport.status());
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+// Refresh button: a sync run of this report — checks Zoho only for what changed since the last sync
+app.post('/api/purchase/vendor-payment-report/refresh', async (req, res) => {
+  try {
+    res.json(await vendorPaymentReport.refresh());
+  } catch (e) {
+    console.error('[vendor-payment-report] refresh:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Bill uploads and remarks. Who may change them is set per user in User Settings → Purchase &
+// Payables ("Vendor Payment Report – Purchase Team / – Accounts Team"); unlike the view rights, a
+// right not ticked is not granted. Admins have both.
+async function vprUser(req) {
+  const u = (await loadUsers()).find(x => String(x.id) === String(req.user?.id));
+  if (!u || u.active === false) return null;
+  const admin = u.role === 'admin';
+  const p = u.permissions?.purchase;
+  const on = k => admin || !!(p?.enabled && p.sections?.[k] === true);
+  return { id: String(u.id), name: u.name || u.username, admin, purchase: on('vpr_purchase_team'), accounts: on('vpr_accounts_team') };
+}
+const VPR_UPLOADS = path.join(__dirname, 'vpr-bill-uploads');
+const VPR_MAX_MB = IS_VERCEL ? 4 : 20;   // Vercel takes at most ~4.5 MB per request
+const vprBillUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: VPR_MAX_MB * 1024 * 1024, files: 1 } });
+const vprPaymentId = s => (/^\d{5,25}$/.test(String(s || '')) ? String(s) : null);   // Zoho IDs only (used in paths)
+const vprTeamName = t => (t === 'purchase' ? 'Purchase' : 'Accounts');
+
+app.post('/api/purchase/vendor-payment-report/bills/:id', (req, res, next) => {
+  vprBillUpload.single('file')(req, res, err => {
+    if (err) return res.status(400).json({ error: err.code === 'LIMIT_FILE_SIZE' ? `The file must be under ${VPR_MAX_MB} MB` : err.message });
+    next();
+  });
+}, async (req, res) => {
+  try {
+    const u = await vprUser(req);
+    if (!u?.purchase) return res.status(403).json({ error: 'Uploading bills needs "Vendor Payment Report – Purchase Team" in User Settings' });
+    const id = vprPaymentId(req.params.id);
+    if (!id || !(await vendorPaymentReport.hasPayment(id))) return res.status(404).json({ error: 'Payment not found in the report' });
+    if (!req.file) return res.status(400).json({ error: 'No file received' });
+    const ext = path.extname(req.file.originalname).toLowerCase();
+    const type = vprLib.BILL_TYPES[ext];
+    if (!type) return res.status(400).json({ error: 'Upload the bill as a PDF, an image (JPG, PNG …), Excel or Word file' });
+    const base = path.basename(req.file.originalname, path.extname(req.file.originalname)).replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 60) || 'bill';
+    const fileId = `${Date.now()}-${base}${ext}`;
+    if (fileStore.enabled) await fileStore.save(`vpr-bill-uploads/${id}/${fileId}`, req.file.buffer, type);
+    else {
+      fs.mkdirSync(path.join(VPR_UPLOADS, id), { recursive: true });
+      fs.writeFileSync(path.join(VPR_UPLOADS, id, fileId), req.file.buffer);
+    }
+    res.json({ note: await vendorPaymentReport.addBill(id, { id: fileId, name: req.file.originalname, size: req.file.size, type }, u) });
+  } catch (e) {
+    console.error('[vendor-payment-report] bill upload:', e.message);
+    res.status(e.status || 500).json({ error: e.message });
+  }
+});
+app.delete('/api/purchase/vendor-payment-report/bills/:id/:fileId', async (req, res) => {
+  try {
+    const u = await vprUser(req);
+    const id = vprPaymentId(req.params.id);
+    if (!u || !id) return res.status(403).json({ error: 'Not allowed' });
+    res.json({ note: await vendorPaymentReport.removeBill(id, String(req.params.fileId), u) });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message });
+  }
+});
+app.put('/api/purchase/vendor-payment-report/remarks/:id', async (req, res) => {
+  try {
+    const team = req.body?.team;
+    if (!['purchase', 'accounts'].includes(team)) return res.status(400).json({ error: 'Unknown remark column' });
+    const u = await vprUser(req);
+    if (!u?.[team]) return res.status(403).json({ error: `${vprTeamName(team)} Team Remarks need "Vendor Payment Report – ${vprTeamName(team)} Team" in User Settings` });
+    const id = vprPaymentId(req.params.id);
+    if (!id || !(await vendorPaymentReport.hasPayment(id))) return res.status(404).json({ error: 'Payment not found in the report' });
+    res.json({ note: await vendorPaymentReport.setRemark(id, team, req.body?.text, u) });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message });
+  }
+});
+// Opens an uploaded bill (…/file/… links carry the login token in the query string)
+app.get('/api/purchase/vendor-payment-report/file/:id/:fileId', async (req, res) => {
+  try {
+    const id = vprPaymentId(req.params.id);
+    const f = id && await vendorPaymentReport.billFile(id, String(req.params.fileId));
+    if (!f) return res.status(404).send('Not found');
+    const inline = /^(application\/pdf|image\/)/.test(f.type);
+    res.setHeader('Content-Disposition', `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(f.name)}`);
+    if (fileStore.enabled) {
+      if (!(await fileStore.send(res, `vpr-bill-uploads/${id}/${f.id}`))) res.status(404).send('Not found');
+      return;
+    }
+    const fp = path.join(VPR_UPLOADS, id, f.id);
+    if (!path.resolve(fp).startsWith(path.resolve(VPR_UPLOADS) + path.sep) || !fs.existsSync(fp)) return res.status(404).send('Not found');
+    res.setHeader('Content-Type', f.type);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.sendFile(fp);
+  } catch (e) {
+    res.status(500).send(e.message);
   }
 });
 
@@ -15441,6 +15749,11 @@ function cronAuth(req, res, next) {
 app.get('/api/cron/sync', cronAuth, async (req, res) => {
   await syncEngine.runScheduledTick(); // logs its own errors
   cache.flushAll();
+  // MSME companies after DevX, each on its own engine (a failure stays in that company's status)
+  for (const [co, eng] of Object.entries(_companyEngines)) {
+    await eng.runScheduledTick();
+    companyCtx.run(co, () => cache.flushAll());
+  }
   res.json({ ok: true });
 });
 app.get('/api/cron/pl', cronAuth, async (req, res) => {
@@ -15566,6 +15879,40 @@ app.post('/api/admin/sync/run', authMiddleware, adminOnly, async (req, res) => {
     : syncEngine.startRun({ mode, trigger: 'manual', onComplete });
   if (r.status === 'busy') return res.status(409).json({ error: 'A sync is already running', run_id: r.run_id });
   res.status(202).json(r);
+});
+
+// ── Admin: remove records deleted in Zoho (targeted correction) ───────────────
+// Body: { records: { bills_fy: [ids], vendor_payments_fy: [ids], vendor_credits_all: [ids], … } }.
+// Each record is re-checked by ID and removed only when Zoho reports it does not exist; the
+// derived entities built from those caches (e.g. MSME Form-1 settlements) are then rebuilt.
+app.post('/api/admin/sync/remove-deleted', authMiddleware, adminOnly, async (req, res) => {
+  const records = req.body?.records;
+  if (!records || typeof records !== 'object' || !Object.keys(records).length) {
+    return res.status(400).json({ error: 'records required: { entity: [record ids] }' });
+  }
+  for (const [k, ids] of Object.entries(records)) {
+    const def = syncEngine.ENTITY_DEFS[k];
+    if (!def || def.run || !def.idField) return res.status(400).json({ error: `Not a Zoho list entity: ${k}` });
+    if (!Array.isArray(ids) || !ids.length || ids.length > 300) return res.status(400).json({ error: `${k}: 1–300 record IDs required` });
+  }
+  const elsewhere = await syncEngine.sharedRunning();
+  if (elsewhere) return res.status(409).json({ error: 'A sync is already running', run_id: elsewhere.run_id });
+  try {
+    const entry = await syncEngine.removeDeletedRecords(records, { trigger: 'manual' });
+    cache.flushAll();
+    const changed = Object.values(entry.entities).filter(r => r.removed > 0).map(r => r.entity);
+    // Only derived entities already built: one never synced has nothing stale (and its first build is a full one)
+    const st = (await syncEngine.getSyncStatus()).entities;
+    const derived = [...new Set(changed.flatMap(k => syncEngine.withDependents(k)))]
+      .filter(k => syncEngine.ENTITY_DEFS[k]?.run && st[k]?.last_synced_at);
+    const rebuild = derived.length
+      ? { entities: derived, ...syncEngine.startRun({ mode: 'normal', trigger: 'entity', entities: derived, onComplete: () => cache.flushAll() }) }
+      : null;
+    res.json({ ...entry, rebuild });
+  } catch (e) {
+    console.error('[sync] remove-deleted:', e.message);
+    res.status(e.busy ? 409 : e.response?.status === 429 ? 429 : 500).json({ error: e.response?.data?.message || e.message });
+  }
 });
 
 // ── Admin: retry a failed entity (same mode it failed in) ─────────────────────
@@ -15771,9 +16118,14 @@ db.initDB()
     await workbooks.preload(); // Neon mode: stored Excel copies (office PC reads the files)
 
     // Initialise POCM sync module — injects dependencies and pre-loads disk cache into node-cache
-    pocmSync.init(cache, zohoGet, zohoGetAll);
+    pocmSync.init(_rawCache, _zoho.zohoGet, _zoho.zohoGetAll);
     pocmSync.preloadAtStartup();
-    syncEngine.init(zohoGetAll, zohoGet);
+    _devxSyncEngine.init(_zoho.zohoGetAll, _zoho.zohoGet);
+    // MSME companies: their engines read only their own Zoho organisation
+    for (const [co, eng] of Object.entries(_companyEngines)) {
+      const z = companyCtx.companyZoho(_zoho, co);
+      eng.init(z.zohoGetAll, z.zohoGet);
+    }
     _markReady();
 
     // Vercel runs the app as a function: no port, no timers, no start-up sync.
@@ -15793,6 +16145,18 @@ db.initDB()
         .then(r => { if (r && r.run_id) cache.flushAll(); })
         .catch(e => console.error('[sync] initial sync error:', e.message));
     }, 60000);
+    // Vendor Payment Report: continue a first-build backlog the previous process left (it waits for any sync run)
+    setTimeout(() => vendorPaymentReport.resume().catch(e => console.error('[vendor-payment-report] resume:', e.message)), 120000);
+    // MSME companies: own scheduler (a few minutes after DevX) and own first full sync. A failure
+    // there is logged and stays in that company's sync status — DevX is not affected.
+    for (const [co, eng] of Object.entries(_companyEngines)) {
+      eng.startScheduler();
+      setTimeout(() => {
+        eng.ensureInitialSync()
+          .then(r => { if (r && r.run_id) companyCtx.run(co, () => cache.flushAll()); })
+          .catch(e => console.error(`[sync:${co}] initial sync error:`, e.message));
+      }, 90000);
+    }
   })
   .catch(err => {
     console.error('[db] initDB failed:', err.message);

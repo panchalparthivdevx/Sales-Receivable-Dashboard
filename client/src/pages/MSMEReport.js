@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { RefreshCw, ExternalLink, ChevronDown, ChevronRight } from 'lucide-react';
-import { api } from '../utils/api';
+import { useMsmeApi } from '../utils/msmeCompany';
 import { formatINR } from '../utils/format';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -129,6 +129,7 @@ function VendorList({ vendors }) {
 
 // ─── Main component ───────────────────────────────────────────────────────────
 export default function MSMEReport() {
+  const api = useMsmeApi();
   const [tab,     setTab]     = useState('report');
   const [data,    setData]    = useState(null);
   const [loading, setLoading] = useState(true);
@@ -142,7 +143,7 @@ export default function MSMEReport() {
       .then(d => setData(d))
       .catch(e => setError(e.response?.data?.error || e.message || 'Failed to load'))
       .finally(() => setLoading(false));
-  }, []);
+  }, [api]);
 
   useEffect(() => { load(); }, [load]);
 

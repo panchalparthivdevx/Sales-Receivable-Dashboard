@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import { RefreshCw, Lock, Unlock, Download, ChevronDown, ChevronRight, Settings, AlertTriangle, CheckCircle, Info } from 'lucide-react';
-import { api } from '../utils/api';
+import { useMsmeApi } from '../utils/msmeCompany';
 import DataFreshness from '../components/DataFreshness';
 import { formatINR, formatDate } from '../utils/format';
 import { useAuth } from '../contexts/AuthContext';
@@ -370,6 +370,7 @@ function SetActivityModal({ vendor, onSave, onCancel, saving }) {
 // ─── RateSettingsPanel ────────────────────────────────────────────────────────
 
 function RateSettingsPanel({ settings, onSave }) {
+  const api = useMsmeApi();
   const [form, setForm] = useState({ bank_rate: '', multiplier: '', credit_period_agreement: '', credit_period_no_agreement: '' });
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState('');
@@ -442,6 +443,7 @@ function RateSettingsPanel({ settings, onSave }) {
 // ─── QuarterPanel ─────────────────────────────────────────────────────────────
 
 function QuarterPanel({ fy, qConfig, user, isAdmin, onFreezeRequest, onUnfreezeRequest }) {
+  const api = useMsmeApi();
   const { id: q, label, range, start, end } = qConfig;
   const now     = new Date();
   const started = now >= start;
@@ -465,7 +467,7 @@ function QuarterPanel({ fy, qConfig, user, isAdmin, onFreezeRequest, onUnfreezeR
     } catch (e) {
       setError(e.response?.data?.error || e.message || 'Failed to load');
     } finally { setLoading(false); }
-  }, [fy, q, started]);
+  }, [fy, q, started, api]);
 
   useEffect(() => { if (started) load(); }, [load]);
 
@@ -724,6 +726,7 @@ function QuarterPanel({ fy, qConfig, user, isAdmin, onFreezeRequest, onUnfreezeR
 // ─── Main component ───────────────────────────────────────────────────────────
 
 export default function MSMEInterestReport() {
+  const api = useMsmeApi();
   const { user } = useAuth();
   const isAdmin  = user?.role === 'admin';
 
@@ -737,7 +740,7 @@ export default function MSMEInterestReport() {
 
   useEffect(() => {
     api.msmeIRSettings().then(setSettings).catch(() => {});
-  }, []);
+  }, [api]);
 
   const fyOptions = (() => {
     const cur = getCurrentFY();
@@ -788,7 +791,7 @@ export default function MSMEInterestReport() {
             <p style={{ color: '#5D6C7B', fontSize: '0.78rem', margin: '3px 0 0' }}>
               Quarterly MSME interest liability & ITR disallowance under the MSMED Act — 3× Bank Rate ({settings ? ((settings.bank_rate * settings.multiplier * 100).toFixed(1) + '%') : '16.5%'})
             </p>
-            <DataFreshness entities={['bills_open', 'bills_overdue', 'vendor_msme_master']} />
+            <DataFreshness entities={['bills_open', 'bills_overdue', 'vendor_msme_master']} load={api.syncFreshness} />
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.8rem', color: '#5D6C7B' }}>

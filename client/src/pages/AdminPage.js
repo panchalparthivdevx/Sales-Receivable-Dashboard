@@ -42,7 +42,10 @@ const MODULES = {
       report_rent:        'Month-wise Rent Report',
       report_vendor_cat:  'Vendor Category Report',
       report_po:          'Project-wise PO Report',
+      report_vendor_payments: 'Vendor Payment Report',
       report_msme:        'MSME Vendor Payment Report',
+      vpr_purchase_team:  'Vendor Payment Report – Purchase Team (upload bills, Purchase Team Remarks)',
+      vpr_accounts_team:  'Vendor Payment Report – Accounts Team (Accounts Team Remarks)',
     },
   },
   vendor_regs:  { label: 'Vendor Registrations',     sections: {} },
@@ -67,11 +70,14 @@ function emptyPerms() {
   return p;
 }
 
+// Edit rights (not just viewing): ticked one by one — never by "All" or a new user's default access
+const GRANT_ONLY = new Set(['vpr_purchase_team', 'vpr_accounts_team']);
+
 function fullPerms() {
   const p = {};
   for (const [mod, def] of Object.entries(MODULES)) {
     p[mod] = { enabled: true, sections: {} };
-    for (const sk of Object.keys(def.sections)) p[mod].sections[sk] = true;
+    for (const sk of Object.keys(def.sections)) p[mod].sections[sk] = !GRANT_ONLY.has(sk);
   }
   return p;
 }
@@ -131,7 +137,10 @@ function PermMatrix({ perms, onChange, isAdmin }) {
   const selectAll = (mod, val) => {
     const next = JSON.parse(JSON.stringify(perms));
     next[mod].enabled = val;
-    for (const sk of Object.keys(next[mod].sections)) next[mod].sections[sk] = val;
+    next[mod].sections = next[mod].sections || {};
+    for (const sk of new Set([...Object.keys(next[mod].sections), ...Object.keys(MODULES[mod].sections)])) {
+      next[mod].sections[sk] = GRANT_ONLY.has(sk) ? (val && !!next[mod].sections[sk]) : val;
+    }
     onChange(next);
   };
 

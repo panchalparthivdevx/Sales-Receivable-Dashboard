@@ -48,7 +48,11 @@ const MODULES = {
       report_rent:        'Month-wise Rent Report',
       report_vendor_cat:  'Vendor Category Report',
       report_po:          'Project-wise PO Report',
+      report_vendor_payments: 'Vendor Payment Report',
       report_msme:        'MSME Vendor Payment Report',
+      // Edit rights on the Vendor Payment Report: only when ticked (see vprUser in index.js)
+      vpr_purchase_team:  'Vendor Payment Report – Purchase Team (upload bills, Purchase Team Remarks)',
+      vpr_accounts_team:  'Vendor Payment Report – Accounts Team (Accounts Team Remarks)',
     },
   },
   msme_compliance: { label: 'MSME Compliance', sections: {} },

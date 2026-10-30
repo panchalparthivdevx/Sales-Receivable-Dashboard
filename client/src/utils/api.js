@@ -12,6 +12,47 @@ const rptJson = r => {
   return r.data;
 };
 
+// MSME Compliance API for one company: DevX uses /api (the original URLs); another company uses
+// /api/c/<company>, which runs the same server routes on that company's Zoho organisation and data.
+export function msmeApiFor(BASE) {
+  return {
+    purMSMEReport:   ()          => axios.get(`${BASE}/purchase/msme-report`).then(r => r.data),
+
+    // ── MSME Form-1 Report ───────────────────────────────────────────────────────
+    msmeF1HalfYear:  (fy, half, refresh = false)  => axios.get(`${BASE}/msme-form1/half-year`, { params: { fy, half, ...(refresh ? { refresh: 1 } : {}) }, timeout: 300000 }).then(r => r.data),
+    msmeF1SetReason: (body)      => axios.put(`${BASE}/msme-form1/reason`, body).then(r => r.data),
+    msmeF1SetClass:  (body)      => axios.put(`${BASE}/msme-form1/classification`, body).then(r => r.data),
+    msmeF1Freeze:    (body)      => axios.post(`${BASE}/msme-form1/freeze`, body).then(r => r.data),
+    msmeF1Unfreeze:  (body)      => axios.post(`${BASE}/msme-form1/unfreeze`, body).then(r => r.data),
+    msmeF1Audit:     ()          => axios.get(`${BASE}/msme-form1/audit`).then(r => r.data),
+    msmeF1Export:    (body)      => axios.post(`${BASE}/msme-form1/export`, body, { responseType: 'blob', timeout: 60000 }),
+    msmeF1RecheckVendor: (body)  => axios.post(`${BASE}/msme-form1/recheck-vendor`, body, { timeout: 600000 }).then(r => r.data),
+    msmeF1Reconcile: (fy, half, live = false) => axios.get(`${BASE}/msme-form1/reconcile`, { params: { fy, half, ...(live ? { live: 1 } : {}) }, timeout: 600000 }).then(r => r.data),
+
+    // ── MSME Interest Report ──────────────────────────────────────────────────────
+    msmeIRSettings:      ()          => axios.get(`${BASE}/msme-interest/settings`).then(r => r.data),
+    msmeIRSetSettings:   (data)      => axios.put(`${BASE}/msme-interest/settings`, data).then(r => r.data),
+    msmeIRVendorMaster:  ()          => axios.get(`${BASE}/msme-interest/vendor-master`).then(r => r.data),
+    msmeIRSetVendorAct:  (vid, data) => axios.put(`${BASE}/msme-interest/vendor-master/${vid}`, data).then(r => r.data),
+    msmeIRQuarter:       (fy, q)     => axios.get(`${BASE}/msme-interest/quarter`, { params: { fy, q }, timeout: 120000 }).then(r => r.data),
+    msmeIRFreeze:        (body)      => axios.post(`${BASE}/msme-interest/freeze`, body).then(r => r.data),
+    msmeIRUnfreeze:      (body)      => axios.post(`${BASE}/msme-interest/unfreeze`, body).then(r => r.data),
+    msmeIRAudit:         ()          => axios.get(`${BASE}/msme-interest/audit`).then(r => r.data),
+    msmeIRExport:        (body)      => axios.post(`${BASE}/msme-interest/export`, body, { responseType: 'blob', timeout: 60000 }),
+  };
+}
+
+// Other MSME companies: their MSME API plus their own sync controls (own engine, own timestamps)
+export const companyApis = {
+  neddle: {
+    ...msmeApiFor(`${BASE}/c/neddle`),
+    syncStatus:   () => axios.get(`${BASE}/c/neddle/admin/sync/status`).then(r => r.data),
+    syncRun:      (mode = 'normal') => axios.post(`${BASE}/c/neddle/admin/sync/run`, { mode }).then(r => r.data),
+    syncProgress: () => axios.get(`${BASE}/c/neddle/admin/sync/progress`).then(r => r.data),
+    syncFreshness: () => axios.get(`${BASE}/c/neddle/sync/freshness`).then(r => r.data),
+  },
+};
+
 export const api = {
   // ── Sales & Receivables ──────────────────────────────────────────────────────
   avgDelay:           () => axios.get(`${BASE}/kpi/avg-payment-delay`).then(r => r.data),
@@ -58,7 +99,6 @@ export const api = {
   purRecurExpenseReport:    (fy) => axios.get(`${BASE}/purchase/charts/recurring-expense-report${fy ? `?fy=${fy}` : ''}`, { timeout: 300000 }).then(r => r.data),
   purVendorCategoryReport: ()  => axios.get(`${BASE}/purchase/charts/vendor-category-report`).then(r => r.data),
   purPOReport:             ()  => axios.get(`${BASE}/purchase/po-report`).then(r => r.data),
-  purMSMEReport:           ()  => axios.get(`${BASE}/purchase/msme-report`).then(r => r.data),
   purMSMEVendors:          ()  => axios.get(`${BASE}/purchase/msme-vendors`).then(r => r.data),
   purMSMESyncStatus:       ()  => axios.get(`${BASE}/purchase/msme-vendors/sync-status`).then(r => r.data),
   purMSMESync:             ()  => axios.post(`${BASE}/purchase/msme-vendors/sync`, {}, { timeout: 600000 }).then(r => r.data),
@@ -71,26 +111,8 @@ export const api = {
   gst180Report: ()     => axios.get(`${BASE}/gst/180-report`, { timeout: 60000 }).then(r => r.data),
   gst180Export: (body) => axios.post(`${BASE}/gst/export`, body, { responseType: 'blob', timeout: 60000 }),
 
-  // ── MSME Form-1 Report ───────────────────────────────────────────────────────
-  msmeF1HalfYear:  (fy, half, refresh = false)  => axios.get(`${BASE}/msme-form1/half-year`, { params: { fy, half, ...(refresh ? { refresh: 1 } : {}) }, timeout: 300000 }).then(r => r.data),
-  msmeF1SetReason: (body)      => axios.put(`${BASE}/msme-form1/reason`, body).then(r => r.data),
-  msmeF1Freeze:    (body)      => axios.post(`${BASE}/msme-form1/freeze`, body).then(r => r.data),
-  msmeF1Unfreeze:  (body)      => axios.post(`${BASE}/msme-form1/unfreeze`, body).then(r => r.data),
-  msmeF1Audit:     ()          => axios.get(`${BASE}/msme-form1/audit`).then(r => r.data),
-  msmeF1Export:    (body)      => axios.post(`${BASE}/msme-form1/export`, body, { responseType: 'blob', timeout: 60000 }),
-  msmeF1RecheckVendor: (body)  => axios.post(`${BASE}/msme-form1/recheck-vendor`, body, { timeout: 600000 }).then(r => r.data),
-  msmeF1Reconcile: (fy, half, live = false) => axios.get(`${BASE}/msme-form1/reconcile`, { params: { fy, half, ...(live ? { live: 1 } : {}) }, timeout: 600000 }).then(r => r.data),
-
-  // ── MSME Interest Report ──────────────────────────────────────────────────────
-  msmeIRSettings:      ()          => axios.get(`${BASE}/msme-interest/settings`).then(r => r.data),
-  msmeIRSetSettings:   (data)      => axios.put(`${BASE}/msme-interest/settings`, data).then(r => r.data),
-  msmeIRVendorMaster:  ()          => axios.get(`${BASE}/msme-interest/vendor-master`).then(r => r.data),
-  msmeIRSetVendorAct:  (vid, data) => axios.put(`${BASE}/msme-interest/vendor-master/${vid}`, data).then(r => r.data),
-  msmeIRQuarter:       (fy, q)     => axios.get(`${BASE}/msme-interest/quarter`, { params: { fy, q }, timeout: 120000 }).then(r => r.data),
-  msmeIRFreeze:        (body)      => axios.post(`${BASE}/msme-interest/freeze`, body).then(r => r.data),
-  msmeIRUnfreeze:      (body)      => axios.post(`${BASE}/msme-interest/unfreeze`, body).then(r => r.data),
-  msmeIRAudit:         ()          => axios.get(`${BASE}/msme-interest/audit`).then(r => r.data),
-  msmeIRExport:        (body)      => axios.post(`${BASE}/msme-interest/export`, body, { responseType: 'blob', timeout: 60000 }),
+  // ── MSME Compliance (Vendor Payment, Form-1, Interest) — DevX at /api, see msmeApiFor ──
+  ...msmeApiFor(BASE),
 
   // ── Foreign Exchange ─────────────────────────────────────────────────────────
   forexLive:           () => axios.get(`${BASE}/forex/live`).then(r => r.data),
@@ -100,6 +122,16 @@ export const api = {
   loanData:            () => axios.get(`${BASE}/loans/data`).then(r => r.data),
   purVendorCreditsAging:     () => axios.get(`${BASE}/purchase/vendor-credits-aging`, { timeout: 120000 }).then(r => r.data),
   purBillsMissingAttachment: () => axios.get(`${BASE}/purchase/bills-missing-attachment`).then(r => r.data),
+  purVendorPaymentReport:    (from, to) => axios.get(`${BASE}/purchase/vendor-payment-report`, { params: { from, to }, timeout: 120000 }).then(r => r.data),
+  purVendorPaymentReportStatus:  () => axios.get(`${BASE}/purchase/vendor-payment-report/status`, { timeout: 30000 }).then(r => r.data),
+  purVendorPaymentReportRefresh: () => axios.post(`${BASE}/purchase/vendor-payment-report/refresh`, {}, { timeout: 30000 }).then(r => r.data),
+  purVendorPaymentReportUploadBill: (id, file) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    return axios.post(`${BASE}/purchase/vendor-payment-report/bills/${id}`, fd, { timeout: 180000 }).then(r => r.data);
+  },
+  purVendorPaymentReportRemoveBill: (id, fileId) => axios.delete(`${BASE}/purchase/vendor-payment-report/bills/${id}/${encodeURIComponent(fileId)}`, { timeout: 30000 }).then(r => r.data),
+  purVendorPaymentReportRemark: (id, team, text) => axios.put(`${BASE}/purchase/vendor-payment-report/remarks/${id}`, { team, text }, { timeout: 30000 }).then(r => r.data),
 
   // ── Related Party Transactions ───────────────────────────────────────────────
   rptParties:  () => axios.get(`${BASE}/rpt/parties`).then(r => r.data),

@@ -4,12 +4,13 @@ import { api } from '../utils/api';
 // "Data as of …" line for dashboards backed by the central sync cache.
 // Shows the OLDEST last-synced time among the given entities (the report is only as
 // fresh as its stalest input). Renders nothing if freshness can't be loaded.
-export default function DataFreshness({ entities, style }) {
+// `load`: another company's freshness (MSME multi-company); default = the main sync.
+export default function DataFreshness({ entities, style, load = api.syncFreshness }) {
   const [info, setInfo] = useState(null);
 
   useEffect(() => {
     let alive = true;
-    api.syncFreshness()
+    load()
       .then(r => {
         if (!alive) return;
         const rows = entities.map(k => r.entities?.[k]).filter(Boolean);

@@ -15,6 +15,7 @@ import ChartCard from '../components/ChartCard';
 import Modal from '../components/Modal';
 import { useAuth } from '../contexts/AuthContext';
 import POReport from './POReport';
+import VendorPaymentReport from './VendorPaymentReport';
 
 const COLORS = ['#3b82f6', '#8b5cf6', '#10b981', '#f59e0b', '#ef4444', '#06b6d4', '#84cc16', '#f97316'];
 
@@ -553,6 +554,9 @@ export default function PurchaseDashboard() {
         onCatFilter={setVcAgingCatFilter}
         onLoad={loadVcAging}
       />
+
+      {/* ── Vendor Payment Report (against bills vs advances against POs) ─── */}
+      {p('report_vendor_payments') && <VendorPaymentReport />}
 
       {/* ── Bills Missing Attachment ─────────────────────────────────────── */}
       <div style={NA.wrap}>

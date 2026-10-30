@@ -13,6 +13,7 @@ const MODE_LABELS = {
   recheck:      'Recheck Data',
   full:         'Full Sync Data',
   full_refresh: 'Full Data Refresh',
+  targeted:     'Remove Deleted Records',
 };
 
 const TRIGGER_LABELS = {
@@ -482,7 +483,7 @@ export default function SyncMonitor() {
               {busy && progress?.mode === 'normal' ? 'Syncing…' : 'Sync Data'}
             </button>
             <button style={btn(S.btnAmber)} onClick={() => start('recheck')} disabled={busy}
-              title="Incremental + ID reconciliation of the last 90 days — finds records present in Zoho but missing here.">
+              title="Incremental + ID reconciliation of the whole sync period — finds records missing here and removes records deleted in Zoho. Runs automatically with the first sync of each day.">
               {busy && progress?.mode === 'recheck' ? 'Rechecking…' : 'Recheck Data'}
             </button>
           </div>
