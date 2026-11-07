@@ -56,6 +56,16 @@ const MODULES = {
     },
   },
   msme_compliance: { label: 'MSME Compliance', sections: {} },
+  // Bill Collection & Booking: the module is seen only when ticked; each right is ticked one by one
+  // (see server/bill-booking/index.js `rights`)
+  bill_booking: {
+    label: 'Bill Collection & Booking',
+    sections: {
+      bb_review:       'Review & correct bills (details, category, accounts, ERP upload, mappings)',
+      bb_create_draft: 'Create Zoho draft bills',
+      bb_config:       'Configure (team & mailboxes, categories & fields, settings)',
+    },
+  },
   vendor_regs: { label: 'Vendor Registrations', sections: {} },
   rpt:         { label: 'Related Party Transactions', sections: {} },
   gst:         { label: 'GST Dashboard', sections: {} },

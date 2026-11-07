@@ -122,6 +122,8 @@ const PUBLIC_API = new Set([
   'GET /api/cron/sync',
   'GET /api/cron/pocm',
   'GET /api/cron/pl',
+  // Mailbox sign-in returns here from Microsoft / Google; it checks its own signed state
+  'GET /api/bill-booking/oauth/callback',
 ]);
 // The CRM team's standalone form (/crm-form) has no dashboard login: its calls stay open as
 // before, unless CRM_FORM_KEY is set — then the form link must carry ?key=<CRM_FORM_KEY>.
@@ -16088,6 +16090,18 @@ app.get('/api/pocm/quarters/snapshot', authMiddleware, async (req, res) => {
 // Self-contained module — see server/compliance/ and "Compliance Dashboard/FILE_MAP.md"
 app.use('/api/compliance', require('./compliance'));
 
+// ─── Bill Collection & Booking (mailboxes + ERP uploads → Zoho draft bills) ───
+// Self-contained module — see server/bill-booking/README.md. It reads each company's central
+// sync data (vendors, bills) through its own engine: DevX's, or the MSME company engine (Neddle).
+const billBooking = require('./bill-booking');
+billBooking.init({
+  readSynced: async (company, entity) => {
+    if (company === 'devx') return _devxSyncEngine.readSyncedData(entity);
+    return _companyEngines[company] ? _companyEngines[company].readSyncedData(entity) : null;
+  },
+});
+app.use('/api/bill-booking', billBooking);
+
 // ─── Serve React build (must be after all API routes) ─────────────────────────
 
 const buildPath = path.join(__dirname, '..', 'client', 'build');
@@ -16147,6 +16161,8 @@ db.initDB()
     }, 60000);
     // Vendor Payment Report: continue a first-build backlog the previous process left (it waits for any sync run)
     setTimeout(() => vendorPaymentReport.resume().catch(e => console.error('[vendor-payment-report] resume:', e.message)), 120000);
+    // Bill Collection & Booking: mailbox checks + Zoho draft review status (only does work once set up)
+    setTimeout(() => billBooking.startScheduler(), 150000);
     // MSME companies: own scheduler (a few minutes after DevX) and own first full sync. A failure
     // there is logged and stays in that company's sync status — DevX is not affected.
     for (const [co, eng] of Object.entries(_companyEngines)) {

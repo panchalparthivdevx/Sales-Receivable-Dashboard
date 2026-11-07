@@ -26,6 +26,7 @@ import Step15GWorkspace from './pages/Step15GWorkspace';
 import Step15HWorkspace from './pages/Step15HWorkspace';
 import FinanceOverview from './pages/FinanceOverview';
 import ComplianceDashboard from './pages/ComplianceDashboard';
+import BillBooking from './pages/BillBooking';
 
 class ErrorBoundary extends React.Component {
   constructor(props) { super(props); this.state = { error: null }; }
@@ -84,6 +85,8 @@ function AppInner() {
           {page === 'finance-overview' && (hasModule('sales') || hasModule('purchase')) && <FinanceOverview />}
           {page === 'sales'        && hasModule('sales')        && <Dashboard />}
           {page === 'purchase'     && hasModule('purchase')     && <PurchaseDashboard />}
+          {/* Granted explicitly (the server checks the same) */}
+          {page === 'bill-booking' && (user.role === 'admin' || user.permissions?.bill_booking?.enabled === true) && <BillBooking />}
           {(page === 'msme' || page === 'msme-neddle') && hasModule('msme_compliance') && <MSMECompanies active={page === 'msme-neddle' ? 'neddle' : 'devx'} />}
           {page === 'vendor-regs'  && hasModule('vendor_regs')  && <VendorRegistrations />}
           {page === 'rpt'          && hasModule('rpt')          && <RPTDashboard />}

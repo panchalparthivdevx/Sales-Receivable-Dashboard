@@ -152,4 +152,6 @@ async function zohoPut(apiPath, data, retries = 3) {
   }
 }
 
-module.exports = { zohoGet, zohoGetAll, zohoPost, zohoPut };
+// getAccessToken: for callers that need their own request shape (Bill Collection & Booking:
+// another organisation's id, file uploads, DELETE) — see server/bill-booking/lib/zohoClient.js
+module.exports = { zohoGet, zohoGetAll, zohoPost, zohoPut, getAccessToken };

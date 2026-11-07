@@ -48,6 +48,14 @@ const MODULES = {
       vpr_accounts_team:  'Vendor Payment Report – Accounts Team (Accounts Team Remarks)',
     },
   },
+  bill_booking: {
+    label: 'Bill Collection & Booking',
+    sections: {
+      bb_review:       'Review & correct bills (details, category, accounts, ERP upload, mappings)',
+      bb_create_draft: 'Create Zoho draft bills',
+      bb_config:       'Configure (team & mailboxes, categories & fields, settings)',
+    },
+  },
   vendor_regs:  { label: 'Vendor Registrations',     sections: {} },
   rpt:          { label: 'Related Party Transactions', sections: {} },
   gst:          { label: 'GST Dashboard',              sections: {} },
@@ -71,7 +79,7 @@ function emptyPerms() {
 }
 
 // Edit rights (not just viewing): ticked one by one — never by "All" or a new user's default access
-const GRANT_ONLY = new Set(['vpr_purchase_team', 'vpr_accounts_team']);
+const GRANT_ONLY = new Set(['vpr_purchase_team', 'vpr_accounts_team', 'bb_review', 'bb_create_draft', 'bb_config']);
 
 function fullPerms() {
   const p = {};
@@ -122,6 +130,9 @@ function Modal({ title, onClose, children }) {
 function PermMatrix({ perms, onChange, isAdmin }) {
   const toggle = (mod, section, val) => {
     const next = JSON.parse(JSON.stringify(perms));
+    // Users saved before a module existed have no entry for it yet
+    next[mod] = next[mod] || { enabled: false, sections: {} };
+    next[mod].sections = next[mod].sections || {};
     if (section === '__module__') {
       next[mod].enabled = val;
       // if disabling module, uncheck all sections
@@ -136,6 +147,7 @@ function PermMatrix({ perms, onChange, isAdmin }) {
 
   const selectAll = (mod, val) => {
     const next = JSON.parse(JSON.stringify(perms));
+    next[mod] = next[mod] || { enabled: false, sections: {} };
     next[mod].enabled = val;
     next[mod].sections = next[mod].sections || {};
     for (const sk of new Set([...Object.keys(next[mod].sections), ...Object.keys(MODULES[mod].sections)])) {

@@ -23,6 +23,9 @@ server/pl_fy_cache/
 server/vendor-uploads/
 server/portal-uploads/
 server/vpr-bill-uploads/
+# Bill Collection & Booking: collected bills, its data (team, mappings, encrypted mailbox tokens)
+server/bill-booking/files/
+server/bill-booking/data/
 
 # Company documents and data — stay on this PC, never in git (deployed data lives in Neon)
 Client Agreements/

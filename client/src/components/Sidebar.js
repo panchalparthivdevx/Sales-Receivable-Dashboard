@@ -4,6 +4,7 @@ import {
   Landmark, Users, ShieldCheck, BarChart3,
   ChevronLeft, ChevronRight, ChevronDown, GitMerge, ClipboardList,
   Settings, LogOut, CreditCard, TrendingDown, Inbox, Activity, BookOpen, Target, BadgeCheck, RefreshCw, Layers, CheckSquare,
+  ScanText,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 
@@ -17,6 +18,8 @@ const NAV = [
   { id: 'finance-overview', label: 'Finance Overview',     icon: BarChart3,    live: true,  module: 'sales'       },
   { id: 'sales',        label: 'Sales & Receivables',  icon: TrendingUp,   live: true,  module: 'sales'       },
   { id: 'purchase',     label: 'Purchase & Payables',   icon: ShoppingCart, live: true,  module: 'purchase'        },
+  // grantOnly: shown only when ticked in User Settings (not to older users by default)
+  { id: 'bill-booking', label: 'Bill Collection & Booking', icon: ScanText, live: true, module: 'bill_booking', sub: true, grantOnly: true },
   { id: 'msme-group',   label: 'MSME Compliance',       icon: BadgeCheck,   live: true,  module: 'msme_compliance', sub: true,
     children: [{ id: 'msme', label: 'DevX' }, { id: 'msme-neddle', label: 'Neddle' }] },
   { id: 'vendor-regs',  label: 'Vendor Registrations',  icon: ClipboardList,live: true,  module: 'vendor_regs',    sub: true },
@@ -43,6 +46,7 @@ export default function Sidebar({ page, onNavigate, open, onToggle }) {
   const visibleNav = NAV.map(item => {
     if (!item) return null;
     if (!item.live) return item;
+    if (item.grantOnly && user?.role !== 'admin' && user?.permissions?.[item.module]?.enabled !== true) return null;
     if (item.module && !hasModule(item.module)) return null;
     return item;
   });

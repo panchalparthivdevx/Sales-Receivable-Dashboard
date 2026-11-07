@@ -20,6 +20,9 @@ data/
 server/portal-uploads/
 server/vendor-uploads/
 server/vpr-bill-uploads/
+server/bill-booking/files/
+server/bill-booking/data/
+server/bill-booking/tests/
 server/compliance/data/
 server/compliance/backups/
 compliance_storage/

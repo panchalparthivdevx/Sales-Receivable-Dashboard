@@ -5,12 +5,14 @@
         "start": "node server/index.js",
         "dev": "nodemon server/index.js",
         "build": "cd client && npm install && npm run build",
-        "test:compliance": "node --test --no-warnings --test-reporter=spec \"server/compliance/tests/*.test.js\""
+        "test:compliance": "node --test --no-warnings --test-reporter=spec \"server/compliance/tests/*.test.js\"",
+        "test:bill-booking": "node --test --no-warnings --test-concurrency=1 --test-reporter=spec \"server/bill-booking/tests/*.test.js\""
     },
     "devDependencies": {
         "nodemon": "^3.0.2"
     },
     "dependencies": {
+        "@anthropic-ai/sdk": "^1.6.0",
         "@napi-rs/canvas": "^1.0.0",
         "@vercel/blob": "^2.8.1",
         "@vercel/functions": "^3.9.11",

@@ -33,4 +33,11 @@ async function send(res, pathname) {
   return true;
 }
 
-module.exports = { enabled, save, exists, send };
+// The stored file's bytes (null when it does not exist) — Bill Collection & Booking re-reads bills
+async function read(pathname) {
+  const r = await sdk().get(pathname, { access: 'private' });
+  if (!r || r.statusCode !== 200 || !r.stream) return null;
+  return Buffer.from(await new Response(r.stream).arrayBuffer());
+}
+
+module.exports = { enabled, save, exists, send, read };
