@@ -1,13 +1,19 @@
 /**
  * The module as it runs ONLINE (Vercel): Neon instead of files, Blob instead of a folder, a read-only disk and no
- * timers. Neon and Blob are simulated in memory; any write to the module's data folders fails like Vercel's read-only
- * disk would. (Node runs each test file in its own process, so setting VERCEL here affects only this file.)
- * SYNTHETIC data.
+ * timers. Neon is simulated only at the CONNECTION: the project's real server/db.js (read, write, compression, cache — and
+ * its quirks, such as answering null for a record that does not exist and swallowing read errors) runs on an in-memory
+ * stand-in for `pg`. Blob is an in-memory stand-in for server/file-store.js (the same exists / save / read calls). Any
+ * write to the module's data folders fails like Vercel's read-only disk would. (Node runs each test file in its own
+ * process, so setting VERCEL here affects only this file.) SYNTHETIC data.
+ *
+ * An earlier version of this file replaced db.js itself with a simpler stand-in, which hid a real bug: db.js answers null
+ * for a record that does not exist, where the module needed an empty list or object.
  */
 
 'use strict';
 
 process.env.VERCEL = '1';
+process.env.DATABASE_URL = 'postgres://stand-in/db';                                   // makes db.js use "Neon" (USE_DB), as on Vercel
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret-for-gstr2b';
 const os = require('os');
 const path = require('path');
@@ -23,17 +29,31 @@ for (const fn of ['mkdirSync', 'writeFileSync', 'renameSync', 'appendFileSync', 
   fs[fn] = function (p, ...rest) { if (String(p).includes(SENTINEL)) { touched.push(`${fn} ${p}`); const e = new Error(`EROFS: read-only file system, ${fn} '${p}'`); e.code = 'EROFS'; throw e; } return real.call(this, p, ...rest); };
 }
 
-// Neon, in memory: values are stored as JSON text and parsed on every read, like the real db.js
-const mem = new Map();
-const fakeDb = {
-  USE_DB: true,
-  async readJSON(key, localPath, def) { return mem.has(key) ? JSON.parse(mem.get(key)) : def; },
-  async writeJSON(key, localPath, data) { mem.set(key, JSON.stringify(data)); },
-  async deleteKey(key) { mem.delete(key); },
-  async listKeys(prefix) { return [...mem.keys()].filter(k => k.startsWith(prefix)).map(key => ({ key, updated_at: new Date().toISOString() })); },
-  async readZohoToken() { return null; }, async writeZohoToken() {},
-};
-require.cache[require.resolve('../../db')] = { id: require.resolve('../../db'), filename: require.resolve('../../db'), loaded: true, exports: fakeDb };
+// Neon at the connection level: an in-memory stand-in for `pg` that answers exactly the SQL server/db.js sends for kv_store
+const rows = new Map();                                                              // key → { value: the stored text, at: updated_at as text }
+const pgFail = { skip: 0, reads: 0 };                                                // let `skip` record reads through, then fail the next `reads` of them (a dropped connection)
+let tick = 0;
+class FakePool {
+  async query(sql, params = []) {
+    const s = sql.replace(/\s+/g, ' ').trim();
+    if (/^SELECT updated_at::text AS at, CASE WHEN/.test(s)) {                       // db.js reading one record (and checking its own cached copy)
+      if (pgFail.skip > 0) pgFail.skip--; else if (pgFail.reads > 0) { pgFail.reads--; throw new Error('Connection terminated unexpectedly'); }
+      const [key, cachedAt] = params; const r = rows.get(key);
+      return { rows: r ? [{ at: r.at, text: r.at === cachedAt ? null : r.value }] : [] };
+    }
+    if (/^INSERT INTO kv_store/.test(s)) { const [key, value] = params; const at = new Date(Date.now() + (++tick)).toISOString(); rows.set(key, { value, at }); return { rows: [{ at }] }; }
+    if (/^DELETE FROM kv_store/.test(s)) { rows.delete(params[0]); return { rowCount: 1 }; }
+    if (/^SELECT key, updated_at FROM kv_store WHERE key LIKE/.test(s)) {
+      const prefix = params[0].slice(0, -1).replace(/\\(.)/g, '$1');                 // db.js escapes \ % _ and appends %
+      return { rows: [...rows.keys()].filter(k => k.startsWith(prefix)).map(key => ({ key, updated_at: rows.get(key).at })) };
+    }
+    if (/^UPDATE kv_store SET value/.test(s)) { const [key, packed, at] = params; const r = rows.get(key); if (r && r.at === at) { r.value = packed; return { rowCount: 1 }; } return { rowCount: 0 }; }
+    throw new Error(`The stand-in for pg does not know this SQL: ${s.slice(0, 80)}`);
+  }
+}
+const pgPath = require.resolve('pg');
+require.cache[pgPath] = { id: pgPath, filename: pgPath, loaded: true, exports: { Pool: FakePool } };
+const mem = { clear: () => rows.clear(), keys: () => rows.keys(), values: () => [...rows.values()].map(r => r.value) };
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -47,7 +67,6 @@ const files = require('../lib/files');
 
 const blobs = new Map();
 files.configure({ blob: { async exists(p) { return blobs.has(p); }, async save(p, buf) { blobs.set(p, Buffer.from(buf)); }, async read(p) { return blobs.get(p) || null; } } });
-store.configure({ useDb: true });                                                    // the module's own switch is db().USE_DB; here it is forced the same way
 
 const USERS = [{ id: '1', username: 'cfo', name: 'CFO', role: 'admin', active: true, permissions: {} }];
 const COMPANY = { id: 'devx', name: 'Test Co', short: 'T', org_id: F.ORG, invoice_date_field: 'cf_vendor_bill_date', credit_date_field: 'cf_bill_date', credit_number_field: 'vendor_credit_number', registrations: [{ gstin: F.REC_A, label: 'GJ', branch_ids: ['br_a'] }, { gstin: F.REC_B, label: 'MH', branch_ids: ['br_b'] }] };
@@ -154,4 +173,51 @@ test('online: a Zoho sync slice that runs out of time stops cleanly and the next
   await store.update('sync_devx', {}, s => { s.lease = null; });
   assert.equal((await t.call('GET', '/sync/status?company=devx')).body.running, false);
   assert.deepEqual(touched, []);
+});
+
+test('online: first use — before anything is synced or uploaded every screen loads (a record that is not there yet reads as empty)', async tc => {
+  const t = await boot(tc);
+  assert.equal((await t.call('PUT', '/config/companies', { body: { companies: [COMPANY] } })).status, 200);   // the audit log writes its first entry into a database that has no log yet
+  for (const p of ['/meta', '/sync/status?company=devx', '/imports?company=devx', '/recon/summary?company=devx', '/recon/rows?company=devx', '/recon/vendors?company=devx',
+    '/recon/bridge?company=devx', '/recon/options?company=devx', '/coverage?company=devx', '/itc', '/audit', '/audit/verify']) {
+    const r = await t.call('GET', p);
+    assert.equal(r.status, 200, `${p} answered ${r.status}: ${JSON.stringify(r.body).slice(0, 160)}`);
+  }
+  const st = (await t.call('GET', '/sync/status?company=devx')).body;
+  assert.equal(st.running, false); assert.equal(st.stats.total, 0); assert.equal(st.last_ok_at, null);
+  assert.deepEqual((await t.call('GET', '/imports?company=devx')).body.statements, []);
+  const audit = (await t.call('GET', '/audit')).body.entries;
+  assert.ok(audit.length >= 1 && /^config\./.test(audit[0].action), 'saving the settings was recorded in the audit log');
+  assert.equal((await t.call('GET', '/audit/verify')).body.ok, true);
+  assert.equal((await t.call('GET', '/export/xlsx?company=devx', { raw: true })).status, 200);
+  assert.deepEqual(touched, []);
+});
+
+test('online: a failed database read stops the request — it is never taken for an empty record and written back over the real one', async tc => {
+  const t = await boot(tc);
+  assert.equal((await t.call('PUT', '/config/companies', { body: { companies: [COMPANY] } })).status, 200);
+  const logged = console.error; console.error = () => {};                              // db.js logs the failure it swallows; keep the report readable
+  try {
+    pgFail.skip = 1; pgFail.reads = 3;                                                 // a dropped connection exactly while a setting is saved (after the access check has read the settings)
+    const r = await t.call('PUT', '/config/sync', { body: { pace_ms: 700 } });
+    assert.equal(r.status, 500); assert.match(JSON.stringify(r.body), /could not be read just now — nothing was changed/);
+  } finally { console.error = logged; pgFail.skip = 0; pgFail.reads = 0; }
+  const meta = (await t.call('GET', '/meta')).body;
+  assert.equal(meta.companies.length, 1, 'the company set-up is still there');
+  assert.notEqual(meta.sync.pace_ms, 700, 'the failed save changed nothing');
+  assert.equal((await t.call('PUT', '/config/sync', { body: { pace_ms: 700 } })).status, 200);   // the same save works once the database answers again
+  assert.equal((await t.call('GET', '/meta')).body.sync.pace_ms, 700);
+  assert.equal((await t.call('GET', '/meta')).body.companies.length, 1);
+
+  // the same at the storage level, for a record the module changes and writes back
+  await store.write('probe', { keep: 'me' });
+  console.error = () => {};
+  try {
+    pgFail.reads = 1;
+    await assert.rejects(store.update('probe', {}, d => { d.extra = 1; }), /could not be read just now/);
+  } finally { console.error = logged; pgFail.reads = 0; }
+  assert.deepEqual(await store.read('probe', null), { keep: 'me' });
+  assert.deepEqual(await store.read('never_written', []), [], 'a record that really is not there is still the empty default');
+  assert.deepEqual(await store.read('never_written_obj', {}), {});
+  assert.equal(await store.read('never_written_null', null), null);
 });

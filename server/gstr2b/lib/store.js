@@ -30,9 +30,25 @@ const safeKey = k => { if (!/^[A-Za-z0-9_.-]+$/.test(k)) throw new Error(`Invali
 const fileOf = k => path.join(opts.dir, `${safeKey(k)}.json`);
 const clone = v => (v === undefined ? v : JSON.parse(JSON.stringify(v)));
 
+const NOT_READ = Object.freeze({ not_read: true });
+
+/**
+ * One record from Neon. db.readJSON answers its default (null — even when undefined is passed) both when the record does not
+ * exist AND when the read failed (it logs the error and swallows it). The two must be told apart here: a record that is not
+ * there yet is the caller's empty default, but a failed read taken for "empty" would be changed and written back over the real
+ * record, silently replacing it. listKeys does not swallow errors, so an unreachable database stops the request instead.
+ */
+async function readDb(key, def) {
+  const full = `g2b_${key}`;
+  const v = await db().readJSON(full, null, NOT_READ);
+  if (v !== NOT_READ) return v;
+  if ((await db().listKeys(full)).some(r => r.key === full)) throw new Error(`The stored record "${key}" could not be read just now — nothing was changed. Please try again.`);
+  return clone(def);
+}
+
 async function read(key, def = null) {
   safeKey(key);
-  if (useDb()) { const v = await db().readJSON(`g2b_${key}`, null, undefined); return v === undefined ? clone(def) : v; }
+  if (useDb()) return readDb(key, def);
   if (cache.has(key)) return cache.get(key);
   let v;
   try { v = JSON.parse(fs.readFileSync(fileOf(key), 'utf8').replace(/^﻿/, '')); }
