@@ -239,25 +239,30 @@ function jsonControl(out, cpsumm) {
 // ── Excel ─────────────────────────────────────────────────────────────────────
 const SHEET_KEYS = [
   [/^b2bcdnra$/, 'cdnra'], [/^b2bcdnr$/, 'cdnr'], [/^b2bdnra$|^b2bdnr$/, 'itcrev'], [/^b2ba$/, 'b2ba'], [/^b2b$/, 'b2b'],
-  [/^isda$/, 'isda'], [/^isd$/, 'isd'], [/^impgsezamendment$|^impgsezamendments$|^impgasez$/, 'impgasez'], [/^impgsez$/, 'impgsez'],
+  [/^isda$/, 'isda'], [/^isd$/, 'isd'], [/^impgsezamendment$|^impgsezamendments$|^impgasez$|^impgseza$/, 'impgasez'], [/^impgsez$/, 'impgsez'],
   [/^impgamendment$|^impgamendments$|^impga$/, 'impga'], [/^impg$/, 'impg'], [/^ecoa$/, 'ecoma'], [/^eco$/, 'ecom'],
 ];
 const sheetKey = name => { const k = String(name).toLowerCase().replace(/[^a-z0-9]/g, ''); for (const [re, v] of SHEET_KEYS) if (re.test(k)) return v; return null; };
 
-// header text (normalised, parents + leaf joined) → field. More specific patterns first.
+// header text (normalised, group headings + column heading joined) → field. More specific patterns first.
+// Checked against the portal's own workbook (GSTR-2B for September 2026, downloaded 12 Nov 2026): group headings such as
+// "Credit note/Debit note details" or "Revised Details" sit in front of every column of their group, so a pattern must never
+// match the group heading alone (that is how "credit.*debit" once swallowed all five note columns).
 const HEADERS = [
-  ['oinum',   /original.*(invoice|note|document).*(number|no)\b/], ['oidt', /original.*(invoice|note|document).*date/], ['onttyp', /original.*note type/],
-  ['ctin',    /gstin of (supplier|isd)|supplier gstin|^gstin$/], ['trdnm', /trade.*legal name|trade name|legal name|supplier name/],
+  ['oinum',   /original.*(invoice|note|document).*(number|no)\b/], ['oidt', /original.*(invoice|note|document).*date/], ['onttyp', /original.*(note type|isd document type)/],
+  ['ctin',    /gstin of (supplier|isd|eco)|supplier gstin|^gstin$/], ['trdnm', /trade.*legal name|trade name|legal name|supplier name/],
   ['supprd',  /gstr.*period/], ['supfildt', /gstr.*filing date/],
   ['irngendate', /irn date/], ['irn', /\birn\b/],
   ['diffprcnt', /applicable.*rate/], ['rsn', /\breason\b/], ['itcavl', /itc availability/], ['srctyp', /^source$|\bsource\b/],
-  ['ntyp',    /note type|credit.*debit/], ['suptyp', /note supply type|supply type/], ['invtyp', /invoice type/],
-  ['val',     /(invoice|note|document|bill of entry) value/], ['pos', /place of supply/], ['rev', /reverse charge/],
+  ['ntyp',    /\bnote type\b|type of note|isd document type/], ['suptyp', /note supply type|supply type/], ['invtyp', /invoice type/],
+  ['val',     /(invoice|note|document|bill of entry)( details)? value/], ['pos', /place of supply/], ['rev', /reverse charge/],
   ['rate',    /^rate|\brate\b.*%/], ['txval', /taxable value/],
-  ['igst',    /integrated tax/], ['cgst', /central tax/], ['sgst', /state.*tax|ut tax/], ['cess', /\bcess\b/],
-  ['dt',      /(invoice|note|document|bill of entry) date|^date$/], ['inum', /(invoice|note|document|bill of entry) (number|no)\b|^number$/],
+  ['igst',    /integrated tax/], ['cgst', /central tax/], ['sgst', /state.*tax|\but tax/], ['cess', /\bcess\b/],   // \but: "inp-ut tax" must not read as State/UT tax
+  ['dt',      /(invoice|note|document|bill of entry)( details)? date|^date$/], ['inum', /(invoice|note|document|bill of entry)( details)? (number|no)\b|^number$/],
   ['portcode', /port code/], ['boenum', /bill of entry (number|no)/],
 ];
+// Columns that are deliberately not read (the taxpayer's own IMS entries, portal remarks, port references, ISD wording): no notice about them
+const NOT_NEEDED = /whether itc to be reduced|amount declared by taxpayer|\bremarks\b|icegate reference|eligibility of itc/;
 const norm = s => String(s ?? '').toLowerCase().replace(/[₹()]/g, ' ').replace(/[^a-z0-9%/ ]+/g, ' ').replace(/\s+/g, ' ').trim();
 
 function parseExcel(buf, out) {
@@ -265,6 +270,7 @@ function parseExcel(buf, out) {
   try { wb = XLSX.read(buf, { type: 'buffer', cellDates: false }); } catch (e) { throw new Error(`The Excel file could not be read: ${e.message}`); }
   // statement identity: any sheet's first rows — "GSTIN", "Financial Year", "Tax Period", "Date of generation"
   for (const name of wb.SheetNames) metaFromSheet(rowsOf(wb.Sheets[name]).slice(0, 25), out);
+  let recognised = 0;
   for (const name of wb.SheetNames) {
     const k = String(name).toLowerCase().replace(/[^a-z0-9]/g, '');
     if (SUMMARY_SHEETS.has(k)) continue;
@@ -274,10 +280,11 @@ function parseExcel(buf, out) {
       if (rows.length > 6) out.unsupported.push({ section: name, label: name, count: rows.length, reason: 'Sheet not recognised by this version of the importer — nothing from it was imported' });
       continue;
     }
+    recognised++;
     excelSection(section, name, rowsOf(wb.Sheets[name]), out);
   }
   out.control.note = 'Excel downloads carry no machine-readable control totals; the preview lists the totals read per section for comparison with the portal summary.';
-  if (!out.docs.length && !out.unsupported.length) out.warnings.push('No document sheets (B2B, B2BA, B2B-CDNR …) were found in this workbook.');
+  if (!out.docs.length && !out.unsupported.length) out.warnings.push(recognised ? 'The workbook has the portal\'s document sheets but no document in any of them — every sheet holds only its headings.' : 'No document sheets (B2B, B2BA, B2B-CDNR …) were found in this workbook.');
 }
 
 const rowsOf = ws => XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: null, blankrows: false });
@@ -325,22 +332,26 @@ function buildLabels(rows, h, end, width) {
   return labels.map(norm);
 }
 
+/** A data row holds a number or a GSTIN somewhere; the title and heading rows of a sheet are all text */
+const isDataRow = r => !!r && r.some(c => typeof c === 'number' || (typeof c === 'string' && N.normGstin(c).length === 15 && N.GSTIN_LIKE.test(N.normGstin(c))));
+/** A heading row that names groups of columns ("Original Details" / "Revised Details", "Bill of Entry Details" …) rather than being a one-cell title */
+const isGroupRow = r => !!r && !isDataRow(r) && r.filter(c => c !== null && c !== '').length >= 2;
+
 function excelSection(section, sheetName, rows, out) {
-  // header block = from the first row that names ≥ 2 known columns until the first data row (a GSTIN, or a number in column 0)
+  // Most sheets have no document at all in most months: nothing to read, so nothing to report (no error, no notice)
+  if (!rows.some(isDataRow)) return;
+  // header block = from the first row that names ≥ 2 known columns until the first data row
   let h = -1;
   for (let i = 0; i < Math.min(rows.length, 30); i++) {
     const hits = new Set(rows[i].map(c => HEADERS.find(([, re]) => re.test(norm(c)))?.[0]).filter(Boolean));
     if (hits.size >= 2) { h = i; break; }
   }
   if (h < 0) { pushIssue(out.errors, section, `sheet "${sheetName}"`, 'header', 'Could not find the column headings on this sheet — nothing was imported from it'); out.unsupported.push({ section: sheetName, label: SECTIONS[section].label, count: rows.length, reason: 'Column headings not recognised' }); return; }
+  // Group headings directly above the column names are part of the heading — on amendment sheets they say which columns are the
+  // ORIGINAL document and which the REVISED one (the first match per field wins, so without them the original would be read as the revised)
+  for (let k = 0; k < 2 && h > 0 && isGroupRow(rows[h - 1]); k++) h--;
   let end = h;
-  while (end + 1 < rows.length && end - h < 4) {
-    const next = rows[end + 1];
-    const first = next.find(c => c !== null && c !== '');
-    if (typeof first === 'string' && N.GSTIN_LIKE.test(N.normGstin(first)) && N.normGstin(first).length === 15) break;
-    if (typeof first === 'number') break;
-    end++;
-  }
+  while (end + 1 < rows.length && end - h < 4 && !isDataRow(rows[end + 1])) end++;     // the first data row ends the heading (on amendment sheets its first cell is a plain invoice number)
   const width = Math.max(...rows.slice(h, end + 1).map(r => r.length));
   const labels = buildLabels(rows, h, end, width);
   const col = {};
@@ -352,7 +363,7 @@ function excelSection(section, sheetName, rows, out) {
     out.unsupported.push({ section: sheetName, label: SECTIONS[section].label, count: rows.length - end - 1, reason: `Required columns not found: ${missing.join(', ')}` });
     return;
   }
-  const unmapped = labels.map((l, c) => (l && !Object.values(col).includes(c) ? l : null)).filter(Boolean);
+  const unmapped = [...new Set(labels.map((l, c) => (l && !Object.values(col).includes(c) && !NOT_NEEDED.test(l) ? l : null)).filter(Boolean))];
   if (unmapped.length) out.warnings.push(`Sheet "${sheetName}": columns not used — ${unmapped.slice(0, 8).join('; ')}`);
 
   const groups = new Map();                                                   // one document may span several rate rows
