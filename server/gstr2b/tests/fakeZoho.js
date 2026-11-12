@@ -75,6 +75,17 @@ function expense(o) {
   return { row, detail };
 }
 
+// What live Zoho accepts as sort_column on each list. Checked against the real organisation on 12 Nov 2026: bills and vendor credits accept
+// last_modified_time, EXPENSES REFUSE IT (HTTP 400, code 2 "Invalid value passed for sort_column"). The first version of this fake accepted any
+// column, so the module's change feed (sorted by last_modified_time) passed every test and then failed on the real expenses list.
+const SORT_COLUMNS = {
+  '/bills': ['date', 'created_time', 'last_modified_time', 'due_date', 'total', 'balance', 'bill_number', 'vendor_name'],
+  '/vendorcredits': ['date', 'created_time', 'last_modified_time', 'total', 'balance', 'vendor_name', 'vendor_credit_number'],
+  '/expenses': ['date', 'created_time', 'account_name', 'total', 'bcy_total', 'reference_number', 'customer_name'],
+};
+const zohoError = (status, code, message) => Object.assign(new Error(`Zoho: ${message}`), { response: { status, data: { code, message } } });
+const lmtOf = s => Date.parse(String(s).replace(/([+-]\d\d)(\d\d)$/, '$1:$2'));
+
 /** Fake read-only Zoho client with the same interface as lib/zohoRead.js */
 function makeFake({ pageSize = 3 } = {}) {
   const store = { bills: new Map(), credits: new Map(), expenses: new Map() };
@@ -82,7 +93,7 @@ function makeFake({ pageSize = 3 } = {}) {
   const state = { branches: BRANCHES, failDetail: new Set() };
   const gone = id => Object.assign(new Error('The bill does not exist.'), { gone: true, response: { status: 404, data: { code: 1002 } } });
   const zr = {
-    calls: { total: 0 }, log, store, state,
+    calls: { total: 0 }, log, store, state, queries: [],
     identity: () => 'fake credentials', errText: e => e.message, isGone: e => !!(e && e.gone), dedicated: () => false,
     async listBranches() { zr.calls.total++; log.push('GET /branches'); return state.branches; },
     async get(org, path, params = {}, opts = {}) {
@@ -98,9 +109,14 @@ function makeFake({ pageSize = 3 } = {}) {
     },
     async list(org, path, key, params = {}, opts = {}) {
       const coll = store[{ '/bills': 'bills', '/vendorcredits': 'credits', '/expenses': 'expenses' }[path]];
+      zr.queries.push({ path, params: { ...params } });
+      // refuse what live Zoho refuses (see SORT_COLUMNS); the "modified since" filter needs ISO 8601 with an offset, never "YYYY-MM-DD HH:MM:SS"
+      if (params.sort_column && !(SORT_COLUMNS[path] || []).includes(params.sort_column)) throw zohoError(400, 2, 'Invalid value passed for sort_column');
+      if (params.last_modified_time !== undefined && !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+-]\d{4}$/.test(String(params.last_modified_time))) throw zohoError(400, 2, 'Invalid value passed for last_modified_time');
       let rows = [...coll.values()].map(e => e.row);
       if (params.date_start) rows = rows.filter(r => r.date >= params.date_start);
       if (params.date_end) rows = rows.filter(r => r.date <= params.date_end);
+      if (params.last_modified_time) { const since = lmtOf(params.last_modified_time); rows = rows.filter(r => lmtOf(r.last_modified_time) >= since); }       // only documents modified since
       const sortCol = params.sort_column || 'date';
       rows.sort((a, b) => (String(a[sortCol]) < String(b[sortCol]) ? -1 : 1) * (params.sort_order === 'D' ? -1 : 1));
       const all = [];

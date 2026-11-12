@@ -152,23 +152,47 @@ test('a time slice ends a run cleanly ("partial") and the next run carries on', 
   rm(dir);
 });
 
-test('change feed: an edited bill is refreshed, a voided bill is excluded without a detail call, a new bill is added', async () => {
+test('change feed: an edited bill, expense and credit are refreshed, a voided bill is excluded without a detail call, a new bill is added', async () => {
   const { dir, zr, sync } = setup();
   await sync.run({ company: 'devx', mode: 'period', from: '2026-08', to: '2026-10' });
-  const callsBefore = detailCalls(zr).length;
+  const callsBefore = detailCalls(zr).length, queriesBefore = zr.queries.length;
   const later = s => new Date(Date.now() + s * 1000).toISOString().replace(/\.\d+Z$/, '+0000');            // modified AFTER the first sync
   zr.put('bills', F.bill({ id: 'b1', no: 'INV/1', date: '2026-10-12', taxable: 1200, lmt: later(5) }));                                       // edited amount
   zr.put('bills', F.bill({ id: 'b2', no: 'INV/2', date: '2026-10-14', taxable: 2000, tax: 'inter', gst: F.SUP_MH, branch: 'br_b', dest: 'MH', status: 'void', lmt: later(6) }));
   zr.put('bills', F.bill({ id: 'b8', no: 'INV/8', date: '2026-11-10', taxable: 300, lmt: later(7) }));
+  zr.put('expenses', F.expense({ id: 'e1', ref: 'SUP/7', date: '2026-10-21', taxable: 300, lmt: later(8) }));                                 // an edited expense: its list refuses sort_column=last_modified_time
+  zr.put('credits', F.credit({ id: 'c1', no: 'CN/1', date: '2026-10-18', taxable: 700, lmt: later(9) }));
   const r = await sync.run({ company: 'devx', mode: 'incremental' });
   assert.equal(r.status, 'completed', r.message || r.error);
   const fetched = detailCalls(zr).slice(callsBefore).map(l => l.split('/').pop()).sort();
-  assert.deepEqual(fetched, ['b1', 'b8'], 'only the edited and the new bill are fetched; the voided one needs no detail');
-  const [b1] = await byZohoId('b1'), [b2] = await byZohoId('b2'), [b8] = await byZohoId('b8');
+  assert.deepEqual(fetched, ['b1', 'b8', 'c1', 'e1'], 'only the edited and the new documents are fetched; the voided bill needs no detail');
+  const [b1] = await byZohoId('b1'), [b2] = await byZohoId('b2'), [b8] = await byZohoId('b8'), [e1] = await byZohoId('e1'), [c1] = await byZohoId('c1');
   assert.equal(b1.amounts.taxable, 120000); assert.equal(b1.revisions.length, 1); assert.equal(b1.revisions[0].lmt, '2026-10-15T10:00:00+0530'); assert.equal(b1.stale, undefined);
   assert.equal(b2.excluded, 'void'); assert.equal(b2.detail_pending, false);
-  assert.equal(b8.amounts.taxable, 30000);
+  assert.equal(b8.amounts.taxable, 30000); assert.equal(e1.amounts.taxable, 30000); assert.equal(c1.amounts.taxable, 70000);
+  // what the feed asked Zoho: its own "modified since" filter in the form Zoho accepts, one list per kind, and never a sort on last_modified_time
+  const asked = zr.queries.slice(queriesBefore);
+  assert.deepEqual([...new Set(asked.map(q => q.path))].sort(), ['/bills', '/expenses', '/vendorcredits']);
+  for (const q of asked) {
+    assert.match(q.params.last_modified_time, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+0000$/, `${q.path}: the modified-since filter`);
+    assert.equal(q.params.sort_column, undefined, `${q.path}: no sort_column (Zoho refuses last_modified_time on expenses)`);
+  }
   rm(dir);
+});
+
+test('the Zoho test double refuses what live Zoho refused (so such a request can never pass the tests again)', async () => {
+  const zr = F.makeFake();
+  const refused = (path, key, params) => zr.list(F.ORG, path, key, params, {});
+  await assert.rejects(refused('/expenses', 'expenses', { sort_column: 'last_modified_time', sort_order: 'D' }), e => e.response.status === 400 && e.response.data.code === 2 && /sort_column/.test(e.response.data.message));
+  await assert.doesNotReject(refused('/bills', 'bills', { sort_column: 'last_modified_time', sort_order: 'D' }));          // accepted live
+  await assert.doesNotReject(refused('/vendorcredits', 'vendor_credits', { sort_column: 'last_modified_time' }));            // accepted live
+  await assert.doesNotReject(refused('/expenses', 'expenses', { sort_column: 'created_time' }));
+  await assert.rejects(refused('/bills', 'bills', { last_modified_time: '2026-11-12 10:00:00' }), e => e.response.data.code === 2 && /last_modified_time/.test(e.response.data.message));   // Zoho wants ISO 8601 with an offset
+  zr.put('expenses', F.expense({ id: 'x1', lmt: '2026-11-10T10:00:00+0530' })); zr.put('expenses', F.expense({ id: 'x2', lmt: '2026-11-12T10:00:00+0530' }));
+  const got = await zr.list(F.ORG, '/expenses', 'expenses', { last_modified_time: '2026-11-11T00:00:00+0000' }, { onPage: async () => true });
+  assert.equal(got.complete, true);
+  const seen = []; await zr.list(F.ORG, '/expenses', 'expenses', { last_modified_time: '2026-11-11T00:00:00+0000' }, { onPage: async p => { seen.push(...p.map(r => r.expense_id)); return true; } });
+  assert.deepEqual(seen, ['x2'], 'only the document modified since is listed');
 });
 
 test('incremental before any initial sync does nothing, says so, and is not recorded as a successful sync', async () => {

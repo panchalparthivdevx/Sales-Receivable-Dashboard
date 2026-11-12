@@ -39,6 +39,10 @@ const monthsBetween = (from, to) => {                               // ["2026-11
   while (y > fy || (y === fy && m >= fm)) { out.push(`${y}-${String(m).padStart(2, '0')}`); if (--m === 0) { m = 12; y--; } }
   return out;
 };
+/** Zoho timestamps look like 2026-11-12T17:07:57+0530 (milliseconds since the epoch; 0 when empty or unreadable) */
+const lmtMs = s => { if (!s) return 0; const t = Date.parse(String(s).replace(/([+-]\d\d)(\d\d)$/, '$1:$2')); return Number.isNaN(t) ? 0 : t; };
+/** The form Zoho accepts for the "modified since" filter: ISO 8601 with an offset (it refuses "YYYY-MM-DD HH:MM:SS") */
+const lmtParam = ms => `${new Date(ms).toISOString().slice(0, 19)}+0000`;
 const lastDay = ym => { const d = new Date(Date.UTC(+ym.slice(0, 4), +ym.slice(5, 7), 0)); return `${ym}-${String(d.getUTCDate()).padStart(2, '0')}`; };
 
 /** What a list row changes on a stored document: a void applies at once; an edit marks the old details stale */
@@ -126,25 +130,29 @@ function create({ zr, cfgNow, readSynced = async () => null, audit = { log: asyn
     if (gone.length) { await books.upsertMany(co.id, gone); summary.details.deleted += gone.length; }
   }
 
-  /** Documents modified since the high-water mark, newest first, until older than the mark (minus the margin) */
+  /**
+   * Documents modified since the high-water mark (minus the margin), asked of Zoho with its own "modified since" filter.
+   * The list is FILTERED by last_modified_time, not SORTED by it: Zoho accepts sort_column=last_modified_time for bills and vendor
+   * credits but refuses it for expenses ("Invalid value passed for sort_column", code 2 — seen live on 12 Nov 2026, and the first
+   * "Sync changes now" after a first sync failed on it), whereas the filter works on all three lists (verified live the same day).
+   */
   async function feed(co, ctx, kind, st, g, summary, runStart) {
     const hwm = st.hwm[kind];
     if (!hwm) { summary.warnings.push(`No initial sync yet for ${KINDS[kind].label} — run "Sync a period" first.`); return false; }
-    const cutoff = Date.parse(hwm) - MARGIN_MS;
+    const cutoff = lmtMs(hwm) - MARGIN_MS;
     const K = KINDS[kind];
-    await zr.list(co.org_id, K.path, K.key, { sort_column: 'last_modified_time', sort_order: 'D' }, {
+    await zr.list(co.org_id, K.path, K.key, { last_modified_time: lmtParam(cutoff) }, {
       ...g, maxPages: 60, onPage: async page => {
         const docs = [];
         for (const r of page) {
           summary.lists[kind].rows++;
-          if (Date.parse(r.last_modified_time) < cutoff) continue;
+          if (lmtMs(r.last_modified_time) < cutoff) continue;                      // Zoho's filter already says so; kept as a safety net
           if (kind === 'expense' && C.listExclusion(r, ctx, kind)) continue;
           docs.push(C.fromList(r, ctx, kind));
         }
         const s = await books.upsertMany(co.id, docs, mergeList);
         summary.lists[kind].added += s.added; summary.lists[kind].changed += s.changed;
-        const oldest = page.length ? Date.parse(page[page.length - 1].last_modified_time) : 0;
-        return oldest >= cutoff;                                                 // false = stop paging
+        return true;                                                             // the filter leaves only changed documents: read every page
       },
     });
     st.hwm[kind] = runStart;
