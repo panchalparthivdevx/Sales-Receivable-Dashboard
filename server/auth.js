@@ -66,6 +66,17 @@ const MODULES = {
       bb_config:       'Configure (team & mailboxes, categories & fields, settings)',
     },
   },
+  // GSTR-2B Reco: the module is seen only when ticked; each right is ticked one by one
+  // (see server/gstr2b/index.js `rights`)
+  gstr2b: {
+    label: 'GSTR-2B Reco',
+    sections: {
+      g2b_prepare: 'Prepare (Zoho sync, upload GSTR-2B statements, run reconciliation, notes)',
+      g2b_review:  'Review (link / unlink, approve suggested matches, exclude documents)',
+      g2b_approve: 'Approve / lock (ITC claim decisions, period locks — Phase 2)',
+      g2b_config:  'Configure (companies, GSTINs, branches, tolerances, schedule)',
+    },
+  },
   vendor_regs: { label: 'Vendor Registrations', sections: {} },
   rpt:         { label: 'Related Party Transactions', sections: {} },
   gst:         { label: 'GST Dashboard', sections: {} },

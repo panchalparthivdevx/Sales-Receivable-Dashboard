@@ -6,7 +6,8 @@
         "dev": "nodemon server/index.js",
         "build": "cd client && npm install && npm run build",
         "test:compliance": "node --test --no-warnings --test-reporter=spec \"server/compliance/tests/*.test.js\"",
-        "test:bill-booking": "node --test --no-warnings --test-concurrency=1 --test-reporter=spec \"server/bill-booking/tests/*.test.js\""
+        "test:bill-booking": "node --test --no-warnings --test-concurrency=1 --test-reporter=spec \"server/bill-booking/tests/*.test.js\"",
+        "test:gstr2b": "node --test --no-warnings --test-concurrency=1 --test-reporter=spec \"server/gstr2b/tests/*.test.js\""
     },
     "devDependencies": {
         "nodemon": "^3.0.2"

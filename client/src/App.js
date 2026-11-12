@@ -27,6 +27,7 @@ import Step15HWorkspace from './pages/Step15HWorkspace';
 import FinanceOverview from './pages/FinanceOverview';
 import ComplianceDashboard from './pages/ComplianceDashboard';
 import BillBooking from './pages/BillBooking';
+import Gstr2bReco from './pages/Gstr2bReco';
 
 class ErrorBoundary extends React.Component {
   constructor(props) { super(props); this.state = { error: null }; }
@@ -91,6 +92,8 @@ function AppInner() {
           {page === 'vendor-regs'  && hasModule('vendor_regs')  && <VendorRegistrations />}
           {page === 'rpt'          && hasModule('rpt')          && <RPTDashboard />}
           {page === 'gst'          && hasModule('gst')          && <GSTDashboard />}
+          {/* Granted explicitly (the server checks the same) */}
+          {page === 'gstr2b' && (user.role === 'admin' || user.permissions?.gstr2b?.enabled === true) && <Gstr2bReco />}
           {page === 'tds'          && hasModule('tds')          && <TDSDashboard />}
           {page === 'payroll'      && hasModule('payroll')      && <PayrollDashboard />}
           {page === 'compliance'   && hasModule('compliance')   && <ComplianceDashboard />}

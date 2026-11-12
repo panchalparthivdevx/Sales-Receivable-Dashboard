@@ -26,6 +26,9 @@ server/vpr-bill-uploads/
 # Bill Collection & Booking: collected bills, its data (team, mappings, encrypted mailbox tokens)
 server/bill-booking/files/
 server/bill-booking/data/
+# GSTR-2B Reco: Books documents synced from Zoho, uploaded GSTR-2B statements (originals), reconciliation results, audit trail
+server/gstr2b/files/
+server/gstr2b/data/
 
 # Company documents and data — stay on this PC, never in git (deployed data lives in Neon)
 Client Agreements/

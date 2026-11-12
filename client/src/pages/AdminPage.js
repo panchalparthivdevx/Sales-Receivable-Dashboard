@@ -56,6 +56,15 @@ const MODULES = {
       bb_config:       'Configure (team & mailboxes, categories & fields, settings)',
     },
   },
+  gstr2b: {
+    label: 'GSTR-2B Reco',
+    sections: {
+      g2b_prepare: 'Prepare (Zoho sync, upload GSTR-2B statements, run reconciliation, notes)',
+      g2b_review:  'Review (link / unlink, approve suggested matches, exclude documents)',
+      g2b_approve: 'Approve / lock (ITC claim decisions, period locks — Phase 2)',
+      g2b_config:  'Configure (companies, GSTINs, branches, tolerances, schedule)',
+    },
+  },
   vendor_regs:  { label: 'Vendor Registrations',     sections: {} },
   rpt:          { label: 'Related Party Transactions', sections: {} },
   gst:          { label: 'GST Dashboard',              sections: {} },
@@ -79,7 +88,7 @@ function emptyPerms() {
 }
 
 // Edit rights (not just viewing): ticked one by one — never by "All" or a new user's default access
-const GRANT_ONLY = new Set(['vpr_purchase_team', 'vpr_accounts_team', 'bb_review', 'bb_create_draft', 'bb_config']);
+const GRANT_ONLY = new Set(['vpr_purchase_team', 'vpr_accounts_team', 'bb_review', 'bb_create_draft', 'bb_config', 'g2b_prepare', 'g2b_review', 'g2b_approve', 'g2b_config']);
 
 function fullPerms() {
   const p = {};

@@ -16102,6 +16102,18 @@ billBooking.init({
 });
 app.use('/api/bill-booking', billBooking);
 
+// ─── GSTR-2B Reco (Zoho read-only sync + GSTR-2B statements → reconciliation) ─
+// Self-contained module — see server/gstr2b/README.md and DESIGN.md. It only READS from Zoho Books and keeps its own
+// data; vendors are read from each company's central sync data when that exists (same company ids as the MSME engines).
+const gstr2b = require('./gstr2b');
+gstr2b.init({
+  readSynced: async (company, entity) => {
+    if (company === 'devx') return _devxSyncEngine.readSyncedData(entity);
+    return _companyEngines[company] ? _companyEngines[company].readSyncedData(entity) : null;
+  },
+});
+app.use('/api/gstr2b', gstr2b);
+
 // ─── Serve React build (must be after all API routes) ─────────────────────────
 
 const buildPath = path.join(__dirname, '..', 'client', 'build');
@@ -16163,6 +16175,8 @@ db.initDB()
     setTimeout(() => vendorPaymentReport.resume().catch(e => console.error('[vendor-payment-report] resume:', e.message)), 120000);
     // Bill Collection & Booking: mailbox checks + Zoho draft review status (only does work once set up)
     setTimeout(() => billBooking.startScheduler(), 150000);
+    // GSTR-2B Reco: its own Zoho sync at the hours set in its Settings (default 1:20, 3:20, 6:20, 9:20 PM IST; not the shared sync schedule)
+    setTimeout(() => gstr2b.startScheduler(), 170000);
     // MSME companies: own scheduler (a few minutes after DevX) and own first full sync. A failure
     // there is logged and stays in that company's sync status — DevX is not affected.
     for (const [co, eng] of Object.entries(_companyEngines)) {

@@ -4,7 +4,7 @@ import {
   Landmark, Users, ShieldCheck, BarChart3,
   ChevronLeft, ChevronRight, ChevronDown, GitMerge, ClipboardList,
   Settings, LogOut, CreditCard, TrendingDown, Inbox, Activity, BookOpen, Target, BadgeCheck, RefreshCw, Layers, CheckSquare,
-  ScanText,
+  ScanText, GitCompareArrows,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 
@@ -26,6 +26,8 @@ const NAV = [
   { id: 'rpt',          label: 'Related Party Txns',    icon: GitMerge,     live: true,  module: 'rpt'         },
   null,
   { id: 'gst',          label: 'GST Dashboard',         icon: Receipt,      live: true,  module: 'gst' },
+  // grantOnly: shown only to admins and to users ticked for it in User Settings
+  { id: 'gstr2b',       label: 'GSTR-2B Reco',          icon: GitCompareArrows, live: true, module: 'gstr2b', grantOnly: true },
   { id: 'tds',          label: 'TDS Dashboard',         icon: Percent,      live: true,  module: 'tds' },
   { id: 'banking',      label: 'Banking Dashboard',     icon: Landmark,     live: false },
   { id: 'payroll',      label: 'Payroll Dashboard',     icon: Users,        live: true,  module: 'payroll' },

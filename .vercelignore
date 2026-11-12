@@ -23,6 +23,9 @@ server/vpr-bill-uploads/
 server/bill-booking/files/
 server/bill-booking/data/
 server/bill-booking/tests/
+server/gstr2b/files/
+server/gstr2b/data/
+server/gstr2b/tests/
 server/compliance/data/
 server/compliance/backups/
 compliance_storage/
