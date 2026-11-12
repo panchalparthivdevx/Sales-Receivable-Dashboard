@@ -580,6 +580,37 @@ router.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
   bad(res, 500, `Something went wrong: ${err.message}`);
 });
 
+// ── Scheduled sync online: a GitHub schedule calls GET /api/cron/gstr2b (wired in server/index.js, Bearer CRON_SECRET) ──────────
+/**
+ * One scheduled step for every set-up company that has had its first sync: the change feed ("incremental": new, edited and voided
+ * documents, then the amounts of whatever is waiting) or, at night, a "recheck" that also finds documents deleted in Zoho. A step ends
+ * at its time slice, the daily budget or the end of the work; `more` tells the caller (the GitHub job) that another step would continue,
+ * which is how a first fill proceeds without anyone keeping a page open. Nothing is written to Zoho.
+ */
+router.cronTick = async ({ mode = 'incremental', maxMs = 170000 } = {}) => {
+  const cfg = await cfgNow();
+  const companies = cfg.companies.filter(c => c.active && !c.demo && c.registrations.some(r => r.active !== false));
+  const results = [];
+  for (const co of companies) {
+    try {
+      const sync = need().sync;
+      if (sync.isRunning(co.id)) { results.push({ company: co.id, status: 'busy' }); continue; }
+      const st = await sync.loadState(co.id);
+      if (!Object.keys(st.hwm || {}).length) { results.push({ company: co.id, status: 'needs_first_sync' }); continue; }      // the first sync needs the months chosen on the page
+      const r = await sync.run({ company: co.id, mode, by: 'schedule', maxMs: Math.floor(maxMs / companies.length) });                 // the companies share one function call
+      if (r.busy) { results.push({ company: co.id, status: 'busy' }); continue; }
+      if (r.status !== 'partial' && !r.quiet) await reconAfter(co.id, 'schedule');                  // reconcile when something changed and the work is done (a partial step is followed by another)
+      results.push({ company: co.id, status: r.status, mode, fetched: r.details.fetched, queued: r.details.queued, calls: r.calls, ...(r.message ? { message: r.message } : {}), ...(r.error ? { error: r.error } : {}) });
+    } catch (e) { results.push({ company: co.id, status: 'failed', error: e.message }); console.error(`[gstr2b] scheduled ${mode} sync of ${co.id}: ${e.message}`); }
+  }
+  return { ok: true, mode, more: results.some(x => x.status === 'partial'), results };
+};
+router.cron = async (req, res) => {
+  const mode = req.query && req.query.mode === 'recheck' ? 'recheck' : 'incremental';
+  try { res.json(await router.cronTick({ mode })); }
+  catch (e) { console.error('[gstr2b] cron:', e.message); res.status(500).json({ ok: false, error: e.message }); }
+};
+
 // ── Scheduled sync on the office PC (hours from Settings, India time) ─────────
 let timer = null;
 router.startScheduler = () => {

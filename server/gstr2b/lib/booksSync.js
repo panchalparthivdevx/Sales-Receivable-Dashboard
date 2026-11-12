@@ -227,6 +227,7 @@ function create({ zr, cfgNow, readSynced = async () => null, audit = { log: asyn
     };
     if (st.budget.day !== N.todayIST()) st.budget = { day: N.todayIST(), used: 0 };      // new IST day → fresh budget
     const startCalls = st.budget.used;
+    let quiet = false;
     const g = guard(co, st, cfg, runInfo, deadline);
     const kinds = o.kinds || Object.keys(KINDS);
     try {
@@ -281,12 +282,18 @@ function create({ zr, cfgNow, readSynced = async () => null, audit = { log: asyn
     } finally {
       summary.finished_at = nowIso();
       summary.calls = Math.max(0, st.budget.used - startCalls);
-      st.runs = [summary, ...st.runs].slice(0, 30);
+      // A scheduled run that found nothing to do is not worth a line in the history or the audit trail: a run every 15 minutes would bury
+      // everything else. The page still shows when the last automatic run happened (last_auto).
+      quiet = summary.by === 'schedule' && summary.status === 'completed' && !summary.warnings.length && summary.details.fetched === 0 && summary.details.deleted === 0
+        && summary.details.failed === 0 && Object.values(summary.lists).every(l => l.added === 0 && l.changed === 0);
+      summary.quiet = quiet;
+      if (summary.by === 'schedule') st.last_auto = { at: summary.finished_at, status: summary.status, mode, calls: summary.calls, quiet };
+      if (!quiet) st.runs = [summary, ...st.runs].slice(0, 30);
       st.lease = null;
       try { await saveState(co.id, st); } catch (e) { log.error && log.error(`[gstr2b:${co.id}] could not save sync state: ${e.message}`); }
       running.delete(co.id);
     }
-    await audit.log({ by: summary.by, action: `sync.${mode}`, company: co.id, detail: `${summary.status}: ${summary.details.fetched} detail(s), ${Object.values(summary.lists).reduce((a, l) => a + l.added + l.changed, 0)} list change(s), ${summary.calls} Zoho call(s)${summary.windows_skipped ? `, ${summary.windows_skipped} recently listed month(s) skipped` : ''}${summary.message ? ` — ${summary.message}` : ''}` });
+    if (!quiet) await audit.log({ by: summary.by, action: `sync.${mode}`, company: co.id, detail: `${summary.status}: ${summary.details.fetched} detail(s), ${Object.values(summary.lists).reduce((a, l) => a + l.added + l.changed, 0)} list change(s), ${summary.calls} Zoho call(s)${summary.windows_skipped ? `, ${summary.windows_skipped} recently listed month(s) skipped` : ''}${summary.message ? ` — ${summary.message}` : ''}` });
     return summary;
   }
 
@@ -348,7 +355,7 @@ function create({ zr, cfgNow, readSynced = async () => null, audit = { log: asyn
     const fails = (await books.all(co.id)).filter(d => (d.detail_fail || 0) >= 3).length;
     return {
       company: co.id, running: !!ri || leased, run_id: ri ? ri.run_id : leased ? st.lease.run_id : null, last_ok_at: st.last_ok_at, last_error: st.last_error,
-      hwm: st.hwm, runs: st.runs.slice(0, 10), stats, failing_documents: fails,
+      hwm: st.hwm, runs: st.runs.slice(0, 10), auto_last: st.last_auto || null, stats, failing_documents: fails,
       budget: { day: today, used, limit: cfg.sync.daily_budget, remaining: Math.max(0, cfg.sync.daily_budget - used) },
       eta_days: stats.pending ? Math.ceil(stats.pending / Math.max(1, cfg.sync.daily_budget - 60)) : 0,
       branches: Object.values(st.branches || {}).length, branches_at: st.branches_at,

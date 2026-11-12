@@ -113,7 +113,10 @@ function SyncPanel({ meta, company, setCompany, companies, onChanged }) {
           </div>
         )}
         {Object.keys(stats.excluded || {}).length > 0 && <div style={{ ...S.muted, marginBottom: 8 }}>Kept out of matching (with reasons): {Object.entries(stats.excluded).map(([k, n]) => `${REASON[k] || k}: ${n}`).join(' · ')}</div>}
-        <div style={{ ...S.muted, marginBottom: 10 }}>Credentials: {st.credentials}. Branch list read {st.branches_at ? dtm(st.branches_at) : '—'} ({st.branches} branches). Scheduled: {st.scheduled.enabled ? `${st.scheduled.times.join(', ')} IST` : 'off'}{st.scheduled.last && st.scheduled.last.last_tick_at ? ` · last scheduled run ${dtm(st.scheduled.last.last_tick_at)} (${st.scheduled.last.last_mode}: ${st.scheduled.last.last_result})` : ''}{!meta.integrations.scheduler ? ' · scheduled syncs run only on the office PC; here use the buttons.' : ''}</div>
+        <div style={{ ...S.muted, marginBottom: 10 }}>Credentials: {st.credentials}. Branch list read {st.branches_at ? dtm(st.branches_at) : '—'} ({st.branches} branches).{' '}
+          {meta.integrations.scheduler
+            ? <>Scheduled: {st.scheduled.enabled ? `${st.scheduled.times.join(', ')} IST` : 'off'}{st.scheduled.last && st.scheduled.last.last_tick_at ? ` · last scheduled run ${dtm(st.scheduled.last.last_tick_at)} (${st.scheduled.last.last_mode}: ${st.scheduled.last.last_result})` : ''}</>
+            : <>Automatic sync: {st.auto_last ? `last run ${dtm(st.auto_last.at)} (${st.auto_last.mode === 'recheck' ? 'with the check for deleted documents' : st.auto_last.quiet ? 'nothing new' : (RUN_TEXT[st.auto_last.status] || st.auto_last.status).toLowerCase()})` : 'not seen yet'} — a GitHub schedule checks Zoho about every 15 minutes (8:37 AM–11:22 PM IST) and for deleted documents at 1 AM{st.auto_last ? '' : '; it starts once the first sync is done and the repository secrets APP_URL and CRON_SECRET are set'}. The buttons below sync now.</>}</div>
 
         {never && (
           <div style={S.notice}>
