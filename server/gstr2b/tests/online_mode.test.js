@@ -186,8 +186,14 @@ test('online: first use — before anything is synced or uploaded every screen l
   const st = (await t.call('GET', '/sync/status?company=devx')).body;
   assert.equal(st.running, false); assert.equal(st.stats.total, 0); assert.equal(st.last_ok_at, null);
   assert.deepEqual((await t.call('GET', '/imports?company=devx')).body.statements, []);
+  assert.deepEqual(st.hwm, {}, 'no first sync yet');
+  // "Sync changes now" before the first sync reads nothing, says so, and does not count as a successful sync
+  const early = (await t.call('POST', '/sync/run', { body: { company: 'devx', mode: 'incremental' } })).body;
+  assert.equal(early.summary.status, 'needs_first_sync');
+  const after = (await t.call('GET', '/sync/status?company=devx')).body;
+  assert.equal(after.last_ok_at, null); assert.deepEqual(after.hwm, {}); assert.equal(after.running, false);
   const audit = (await t.call('GET', '/audit')).body.entries;
-  assert.ok(audit.length >= 1 && /^config\./.test(audit[0].action), 'saving the settings was recorded in the audit log');
+  assert.ok(audit.some(e => /^config\./.test(e.action)) && audit.some(e => e.action === 'sync.incremental'), 'saving the settings and the early sync click were both recorded in the audit log');
   assert.equal((await t.call('GET', '/audit/verify')).body.ok, true);
   assert.equal((await t.call('GET', '/export/xlsx?company=devx', { raw: true })).status, 200);
   assert.deepEqual(touched, []);

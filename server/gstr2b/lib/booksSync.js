@@ -236,11 +236,18 @@ function create({ zr, cfgNow, readSynced = async () => null, audit = { log: asyn
         }
         if (kinds.includes('vendor_credit')) await listAllCredits(co, ctx, g, summary, mode === 'recheck');
       } else {
-        for (const kind of kinds) await feed(co, ctx, kind, st, g, summary, runInfo.started_at);
+        let fed = 0;
+        for (const kind of kinds) if (await feed(co, ctx, kind, st, g, summary, runInfo.started_at)) fed++;
+        if (!fed) {                                                               // no first sync yet: nothing was read, so this is not a successful sync
+          summary.status = 'needs_first_sync';
+          summary.message = 'There is no first sync yet — start with "Start the first sync…" (Sync a period) and choose the months to bring in.';
+        }
       }
-      await fetchDetails(co, ctx, g, summary, st);
-      summary.status = 'completed';
-      st.last_ok_at = nowIso(); st.last_error = null;
+      if (summary.status !== 'needs_first_sync') {
+        await fetchDetails(co, ctx, g, summary, st);
+        summary.status = 'completed';
+        st.last_ok_at = nowIso(); st.last_error = null;
+      }
     } catch (e) {
       if (e instanceof Stop) { summary.status = e.stop === 'cancel' ? 'cancelled' : e.stop === 'budget' ? 'paused_budget' : 'partial'; summary.message = e.message; }
       else if (e instanceof ZohoLimit) { summary.status = 'paused_limit'; summary.message = e.message; }

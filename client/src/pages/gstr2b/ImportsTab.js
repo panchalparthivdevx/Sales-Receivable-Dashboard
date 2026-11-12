@@ -2,11 +2,14 @@ import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { g, errMsg, download } from './gApi';
 import { S, Tag, Field, Msg, inr, dt, dtm, monthName } from './ui';
 
-const RUN_TONE = { completed: 'green', partial: 'amber', paused_budget: 'amber', paused_limit: 'amber', failed: 'red', cancelled: 'grey', running: 'blue' };
-const RUN_TEXT = { completed: 'Completed', partial: 'Partly done (continues next run)', paused_budget: 'Paused — daily budget used', paused_limit: 'Paused — Zoho limit', failed: 'Failed', cancelled: 'Stopped', running: 'Running' };
+const RUN_TONE = { completed: 'green', partial: 'amber', paused_budget: 'amber', paused_limit: 'amber', needs_first_sync: 'amber', failed: 'red', cancelled: 'grey', running: 'blue' };
+const RUN_TEXT = { completed: 'Completed', partial: 'Partly done (continues next run)', paused_budget: 'Paused — daily budget used', paused_limit: 'Paused — Zoho limit', needs_first_sync: 'First sync needed', failed: 'Failed', cancelled: 'Stopped', running: 'Running' };
 const REASON = { no_supplier_gstin: 'No supplier GSTIN', void: 'Void', draft: 'Draft', deleted: 'Deleted in Zoho', opening_balance: 'Opening balance', composition_supplier: 'Composition supplier', recipient_unmapped: 'Branch without GSTIN', foreign_currency: 'Not in INR', no_gst: 'No GST', incomplete: 'Incomplete' };
 const MAX_STEPS = 40;                                            // online: one click never goes on for more than about 2 hours
-const fyStart = () => { const d = new Date(Date.now() + 330 * 60000); return (d.getUTCMonth() >= 3 ? d.getUTCFullYear() : d.getUTCFullYear() - 1); };
+const thisMonth = () => new Date(Date.now() + 330 * 60000).toISOString().slice(0, 7);          // India time
+const monthsBack = (ym, n) => { let y = +ym.slice(0, 4), m = +ym.slice(5, 7) - n; while (m < 1) { m += 12; y--; } return `${y}-${String(m).padStart(2, '0')}`; };
+/** A first sync has been started: the change feed has a starting point. ("Sync changes now" can only follow one.) */
+const firstDone = s => !!(s && s.hwm && (s.hwm.bill || s.hwm.expense || s.hwm.vendor_credit));
 
 export default function ImportsTab({ meta, filters, stamp, onChanged }) {
   const real = meta.companies.filter(c => !c.demo);
@@ -26,13 +29,15 @@ function SyncPanel({ meta, company, setCompany, companies, onChanged }) {
   const [st, setSt] = useState(null);
   const [error, setError] = useState('');
   const [note, setNote] = useState('');
-  const [period, setPeriod] = useState(() => { const y = fyStart(), t = new Date(Date.now() + 330 * 60000).toISOString().slice(0, 7); return { from: `${y - 1}-04`, to: t }; });
+  const [period, setPeriod] = useState(() => ({ from: monthsBack(thisMonth(), 2), to: thisMonth() }));      // the latest three months: a first sync that finishes in a day
   const [showPeriod, setShowPeriod] = useState(false);
   const [stepping, setStepping] = useState(false);               // online: this page is asking for the next step
   const stopAsked = useRef(false);
+  const autoOpened = useRef(false);
   const timer = useRef(null);
   const load = useCallback(() => (company ? g.syncStatus(company).then(s => { setSt(s); setError(''); return s; }).catch(e => { setError(errMsg(e)); return null; }) : Promise.resolve(null)), [company]);
-  useEffect(() => { setSt(null); load(); }, [load]);
+  useEffect(() => { autoOpened.current = false; setSt(null); load(); }, [load]);
+  useEffect(() => { if (st && !autoOpened.current) { autoOpened.current = true; if (!firstDone(st)) setShowPeriod(true); } }, [st]);   // before the first sync, the month boxes are already open
   useEffect(() => { clearInterval(timer.current); timer.current = setInterval(() => { if (stepping) load(); else if (st && st.running) load().then(s => { if (s && !s.running) onChanged(); }); }, stepping ? 8000 : 3000); return () => clearInterval(timer.current); }, [st, load, stepping]); // eslint-disable-line
   useEffect(() => () => { stopAsked.current = true; }, []);   // leaving this page ends the steps after the one in progress
 
@@ -62,7 +67,8 @@ function SyncPanel({ meta, company, setCompany, companies, onChanged }) {
         const where = `${read.toLocaleString('en-IN')} amount(s) read in ${step} step(s); ${left.toLocaleString('en-IN')} still waiting.`;
         if (sm.status === 'failed') setError(`${sm.error || 'The sync failed'} (${where})`);
         else if (sm.status === 'completed') setNote(`Sync finished — ${where}`);
-        else if (sm.status === 'partial') setNote(`${stopAsked.current ? 'Stopped' : 'Paused after many steps'} — ${where} Click the button again to continue.`);
+        else if (sm.status === 'needs_first_sync') setNote(sm.message);
+        else if (sm.status === 'partial') setNote(`${stopAsked.current ? 'Stopped' : 'Paused after many steps'} — ${where} ${mode === 'period' ? 'Start the same period again to continue.' : 'Click the same button again to continue.'}`);
         else setNote(`${sm.message || RUN_TEXT[sm.status] || sm.status} — ${where}`);
         break;
       }
@@ -76,7 +82,7 @@ function SyncPanel({ meta, company, setCompany, companies, onChanged }) {
   };
   if (!st) return <div style={S.card}><div style={S.cardBody}>{error ? <span style={{ color: '#B91C1C' }}>{error}</span> : 'Loading sync status…'}</div></div>;
   const stats = st.stats || {}, b = st.budget || {};
-  const never = !st.last_ok_at && !(st.runs || []).length;
+  const never = !firstDone(st);                                 // no first sync yet (a "Sync changes now" that found nothing to build on does not count)
   const pend = stats.pending || 0;
   const busy = st.running || stepping;
 
@@ -103,10 +109,18 @@ function SyncPanel({ meta, company, setCompany, companies, onChanged }) {
         {Object.keys(stats.excluded || {}).length > 0 && <div style={{ ...S.muted, marginBottom: 8 }}>Kept out of matching (with reasons): {Object.entries(stats.excluded).map(([k, n]) => `${REASON[k] || k}: ${n}`).join(' · ')}</div>}
         <div style={{ ...S.muted, marginBottom: 10 }}>Credentials: {st.credentials}. Branch list read {st.branches_at ? dtm(st.branches_at) : '—'} ({st.branches} branches). Scheduled: {st.scheduled.enabled ? `${st.scheduled.times.join(', ')} IST` : 'off'}{st.scheduled.last && st.scheduled.last.last_tick_at ? ` · last scheduled run ${dtm(st.scheduled.last.last_tick_at)} (${st.scheduled.last.last_mode}: ${st.scheduled.last.last_result})` : ''}{!meta.integrations.scheduler ? ' · scheduled syncs run only on the office PC; here use the buttons.' : ''}</div>
 
+        {never && (
+          <div style={S.notice}>
+            <b>Step 1 — bring in your Zoho Books documents.</b> Nothing has been read from Zoho Books yet.{' '}
+            {meta.rights.prepare
+              ? <>Choose the months below (the latest three are filled in) and click <b>Start syncing this period</b>, then keep this page open until it says "Sync finished". <b>Sync changes now</b> becomes available after that — it only picks up changes made after a first sync.</>
+              : <>Someone with the "Prepare" right needs to run the first sync.</>}
+          </div>
+        )}
         {meta.rights.prepare && (
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-            <button style={S.primary} disabled={busy} onClick={() => start('incremental')} title="Reads only what changed in Zoho since the last sync, then fetches amounts for new and edited documents">Sync changes now</button>
-            <button style={S.btn} disabled={busy} onClick={() => setShowPeriod(v => !v)}>{never ? 'Start the first sync…' : 'Sync a period…'}</button>
+            <button style={never ? S.btn : S.primary} disabled={busy || never} onClick={() => start('incremental')} title={never ? 'Available after the first sync — it reads only what changed in Zoho since then' : 'Reads only what changed in Zoho since the last sync, then fetches amounts for new and edited documents'}>Sync changes now</button>
+            <button style={never ? S.primary : S.btn} disabled={busy} onClick={() => setShowPeriod(v => !v)}>{never ? 'Start the first sync…' : 'Sync a period…'}</button>
             <button style={S.ghost} disabled={busy} onClick={() => start('recheck')} title="Re-reads the whole period and removes documents Zoho no longer has (deleted ones never show up as changes)">Check for deleted documents</button>
             {busy && <button style={S.danger} onClick={stop}>Stop</button>}
             <button style={S.ghost} onClick={load}>Refresh</button>
@@ -119,7 +133,7 @@ function SyncPanel({ meta, company, setCompany, companies, onChanged }) {
               <Field label="To month"><input type="month" style={S.input} value={period.to} onChange={e => setPeriod({ ...period, to: e.target.value })} /></Field>
               <button style={S.primary} disabled={busy || !period.from || !period.to} onClick={() => { start('period'); setShowPeriod(false); }}>Start syncing this period</button>
             </div>
-            <p style={{ ...S.muted, margin: '8px 0 0', lineHeight: 1.5 }}>Zoho's list has no GST amounts, so each bill that can be matched needs one extra call to read its detail. A long period therefore takes several days at the daily budget ({b.limit} calls){meta.integrations.scheduler ? ' — it keeps going on its own at each scheduled run' : ' — online, click the button again on the next day (or when it pauses) and it carries on'} and can be stopped and resumed safely. Start with the periods you need first (the invoices of the last financial year are the most time-critical: see the deadline notice on Overview).</p>
+            <p style={{ ...S.muted, margin: '8px 0 0', lineHeight: 1.5 }}>Zoho's list has no GST amounts, so each bill that can be matched needs one extra call to read its detail. A long period therefore takes several days at the daily budget ({b.limit} calls){meta.integrations.scheduler ? ' — it keeps going on its own at each scheduled run' : ' — online, start the same period again on the next day (or when it pauses) and it carries on where it stopped'} and can be stopped and resumed safely. The latest three months are filled in so that the first sync finishes quickly; go further back afterwards, a few months at a time (the invoices of the last financial year are the most time-critical: see the deadline notice on Overview).</p>
           </div>
         )}
         {(st.runs || []).length > 0 && (

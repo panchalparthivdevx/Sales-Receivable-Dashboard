@@ -171,11 +171,23 @@ test('change feed: an edited bill is refreshed, a voided bill is excluded withou
   rm(dir);
 });
 
-test('incremental before any initial sync does nothing and says so', async () => {
-  const { dir, sync } = setup();
+test('incremental before any initial sync does nothing, says so, and is not recorded as a successful sync', async () => {
+  const { dir, zr, sync } = setup();
   const r = await sync.run({ company: 'devx', mode: 'incremental' });
+  assert.equal(r.status, 'needs_first_sync'); assert.match(r.message, /no first sync yet/i);
   assert.ok(r.warnings.some(w => /No initial sync yet/.test(w)));
   assert.equal((await books.all('devx')).length, 0);
+  assert.equal(zr.log.filter(l => /^LIST /.test(l)).length, 0, 'nothing was listed in Zoho');
+  const st = await sync.loadState('devx');
+  assert.equal(st.last_ok_at, null, 'nothing was synced, so there is no "last successful sync"');
+  assert.deepEqual(st.hwm, {}, 'and the change feed has no starting point yet');
+  assert.equal((await sync.status('devx')).last_ok_at, null);
+  assert.equal(st.runs.length, 1); assert.equal(st.runs[0].status, 'needs_first_sync');
+  // the first period sync then works, sets the starting point, and the change feed runs normally afterwards
+  assert.equal((await sync.run({ company: 'devx', mode: 'period', from: '2026-10', to: '2026-10' })).status, 'completed');
+  assert.ok((await sync.loadState('devx')).hwm.bill);
+  assert.equal((await sync.run({ company: 'devx', mode: 'incremental' })).status, 'completed');
+  assert.ok((await sync.loadState('devx')).last_ok_at);
   rm(dir);
 });
 
