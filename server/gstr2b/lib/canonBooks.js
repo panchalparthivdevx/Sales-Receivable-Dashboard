@@ -26,6 +26,8 @@ const EXCLUSIONS = {
   no_supplier_gstin: 'No supplier GSTIN (unregistered, consumer or overseas supplier) — cannot appear in GSTR-2B',
   composition_supplier: 'Supplier is under the composition scheme — no ITC, not in GSTR-2B',
   recipient_unmapped: 'The document\'s branch has no GSTIN in Zoho — cannot be placed in a GSTIN reconciliation',
+  gstin_off: 'The document\'s GSTIN is switched off (Settings → Companies & GSTINs) — its amounts are read from Zoho once the GSTIN is switched on',
+  outside_period: 'Dated before the first month synced — its amounts are read when a period that includes it is synced',
   foreign_currency: 'Not in INR — GSTR-2B documents are in INR',
   no_gst: 'No GST on the document',
   incomplete: 'Incomplete data — see the data-quality notes',
@@ -94,6 +96,18 @@ function supplierExclusion(gstinRaw, treatment) {
   return null;
 }
 
+/**
+ * Scope: a document that COULD be matched but whose amounts are not worth a Zoho call yet (one call per document is what a sync costs).
+ * 'gstin_off'      its recipient GSTIN is switched off, so nothing is reconciled for it (ctx.activeGstins is null when no GSTIN is set up)
+ * 'outside_period' it is dated before the first month synced (a vendor credit list, or a changed old bill, reaches back years)
+ * Both are read later, when the GSTIN is switched on or an earlier period is synced.
+ */
+function scopeExclusion(recipientGstin, postingDate, ctx) {
+  if (recipientGstin && ctx.activeGstins && !ctx.activeGstins.has(recipientGstin)) return 'gstin_off';
+  if (ctx.periodFrom && postingDate && postingDate < ctx.periodFrom) return 'outside_period';
+  return null;
+}
+
 /** Light document from a bill / vendor-credit / expense LIST row */
 function fromList(row, ctx, kind) {
   const co = ctx.company;
@@ -118,7 +132,10 @@ function fromList(row, ctx, kind) {
   };
   if (reason) { doc.excluded = reason; doc.excluded_text = EXCLUSIONS[reason]; }
   else if (!recipient.gstin) { doc.excluded = 'recipient_unmapped'; doc.excluded_text = EXCLUSIONS.recipient_unmapped; }
-  else doc.detail_pending = true;
+  else {
+    const scope = scopeExclusion(recipient.gstin, posting, ctx);
+    if (scope) { doc.excluded = scope; doc.excluded_text = EXCLUSIONS[scope]; } else doc.detail_pending = true;
+  }
   doc.hash = hashOf([doc.id, doc.excluded, doc.status, doc.source.lmt]);
   return doc;
 }
@@ -250,4 +267,4 @@ function pickListFields(d, kind) {
   return o;
 }
 
-module.exports = { EXCLUSIONS, classifyTax, fromList, fromDetail, listExclusion, supplierExclusion, customDate, zohoUrl };
+module.exports = { EXCLUSIONS, classifyTax, fromList, fromDetail, listExclusion, supplierExclusion, scopeExclusion, customDate, zohoUrl };

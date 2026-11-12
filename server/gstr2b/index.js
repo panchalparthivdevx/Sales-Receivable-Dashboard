@@ -279,8 +279,9 @@ router.post('/sync/run', gate('prepare'), wrap(async (req, res) => {
   if (co.demo) return bad(res, 400, 'The demo company has no Zoho organisation to sync');
   const mode = ['period', 'incremental', 'recheck'].includes(req.body?.mode) ? req.body.mode : 'incremental';
   if (need().sync.isRunning(co.id)) return res.json({ busy: true, message: `A sync of ${co.name} is already running` });
-  const run = need().sync.run({ company: co.id, mode, from: req.body?.from, to: req.body?.to, by: byName(req), maxMs: IS_VERCEL ? undefined : 50 * 60 * 1000 })
-    .then(async r => { if (!r.busy) await reconAfter(co.id, byName(req)); return r; })
+  // Online a request may run 5 minutes, so a step is at most 3 minutes of Zoho calls and leaves time to save (and, in the last step, to reconcile)
+  const run = need().sync.run({ company: co.id, mode, from: req.body?.from, to: req.body?.to, by: byName(req), maxMs: IS_VERCEL ? Math.min(req.cfg.sync.slice_seconds, 180) * 1000 : 50 * 60 * 1000 })
+    .then(async r => { if (!r.busy && !(IS_VERCEL && r.status === 'partial')) await reconAfter(co.id, byName(req)); return r; })       // online a partial step is followed by another: reconcile once, at the end
     .catch(e => console.error(`[gstr2b] sync ${co.id}: ${e.message}`));
   if (IS_VERCEL) {                                                                // one slice per request on Vercel
     const r = await background(run);

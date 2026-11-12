@@ -68,7 +68,7 @@ function Companies({ meta, reloadMeta }) {
               <Field label="Reconcile this company"><label style={{ fontSize: '0.8rem', display: 'flex', gap: 6 }}><input type="checkbox" disabled={!canEdit} checked={c.active} onChange={e => upd(i, { active: e.target.checked })} /> Active (synced and reconciled)</label></Field>
             </div>
             <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: 12 }}>
-              <thead><tr><th style={S.th}>Recipient GSTIN</th><th style={S.th}>Label</th><th style={S.th}>Branches in Zoho</th><th style={S.th}>Verified</th><th style={S.th}>Active</th>{fys.map(f => <th key={f} style={S.th} title="Once the annual return for the year is filed, ITC on that year's invoices can no longer be claimed after that date (Section 16(4))">GSTR-9 filed — {f}</th>)}</tr></thead>
+              <thead><tr><th style={S.th}>Recipient GSTIN</th><th style={S.th}>Label</th><th style={S.th}>Branches in Zoho</th><th style={S.th}>Verified</th><th style={S.th} title="Switched on: this GSTIN is reconciled and its Books amounts are read from Zoho at each sync. Switch off the GSTINs you are not reconciling yet — the sync reads one Zoho call per document, so fewer GSTINs is much faster. A GSTIN switched on again is read at the next sync.">Active</th>{fys.map(f => <th key={f} style={S.th} title="Once the annual return for the year is filed, ITC on that year's invoices can no longer be claimed after that date (Section 16(4))">GSTR-9 filed — {f}</th>)}</tr></thead>
               <tbody>{c.registrations.map((r, j) => (
                 <tr key={r.gstin}>
                   <td style={{ ...S.td, fontWeight: 600 }}>{r.gstin}</td>
@@ -228,7 +228,7 @@ function Schedule({ meta, reloadMeta }) {
         <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginTop: 8 }}>
           <Field label="Pause between Zoho calls (ms)" hint="600–10000"><input type="number" style={{ ...S.input, width: 120 }} disabled={!canEdit} value={lim.pace_ms} onChange={e => setLim({ ...lim, pace_ms: e.target.value })} /></Field>
           <Field label="Zoho calls per day for this module" hint="100–9000; Zoho's limit is shared with every other module"><input type="number" style={{ ...S.input, width: 120 }} disabled={!canEdit} value={lim.daily_budget} onChange={e => setLim({ ...lim, daily_budget: e.target.value })} /></Field>
-          <Field label="Seconds per sync slice (online)" hint="30–250; online a sync runs in slices of this length"><input type="number" style={{ ...S.input, width: 120 }} disabled={!canEdit} value={lim.slice_seconds} onChange={e => setLim({ ...lim, slice_seconds: e.target.value })} /></Field>
+          <Field label="Seconds per sync slice (online)" hint="30–250; online a sync runs in steps of this length (never more than 180)"><input type="number" style={{ ...S.input, width: 120 }} disabled={!canEdit} value={lim.slice_seconds} onChange={e => setLim({ ...lim, slice_seconds: e.target.value })} /></Field>
         </div>
         {canEdit && <button style={{ ...S.primary, marginTop: 12 }} onClick={save}>Save</button>}
       </div>

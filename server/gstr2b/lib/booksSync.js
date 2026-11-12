@@ -43,6 +43,8 @@ const monthsBetween = (from, to) => {                               // ["2026-11
 const lmtMs = s => { if (!s) return 0; const t = Date.parse(String(s).replace(/([+-]\d\d)(\d\d)$/, '$1:$2')); return Number.isNaN(t) ? 0 : t; };
 /** The form Zoho accepts for the "modified since" filter: ISO 8601 with an offset (it refuses "YYYY-MM-DD HH:MM:SS") */
 const lmtParam = ms => `${new Date(ms).toISOString().slice(0, 19)}+0000`;
+/** The first month of Books documents synced so far: the earliest period asked for (older stored states: the earliest month listed) */
+const syncedFrom = st => st.synced_from || Object.keys(st.windows || {}).map(k => k.split(':')[1]).filter(Boolean).sort()[0] || null;
 const lastDay = ym => { const d = new Date(Date.UTC(+ym.slice(0, 4), +ym.slice(5, 7), 0)); return `${ym}-${String(d.getUTCDate()).padStart(2, '0')}`; };
 
 /** What a list row changes on a stored document: a void applies at once; an edit marks the old details stale */
@@ -78,7 +80,10 @@ function create({ zr, cfgNow, readSynced = async () => null, audit = { log: asyn
     st.branches = Object.fromEntries(list.map(b => [b.id, b])); st.branches_at = nowIso();
     const vendors = new Map();
     try { const v = await readSynced(co.id, 'vendors_all'); for (const x of (v && v.data) || []) vendors.set(String(x.contact_id), { gstin: x.gst_no, pan: x.pan_no, name: x.contact_name }); } catch (_) { /* optional enrichment */ }
-    return { company: co, branches: new Map(list.map(b => [b.id, { name: b.name, gstin: b.gstin, state: b.state_code }])), vendors };
+    // Only GSTINs that are switched on are worth a Zoho call per document (nothing is reconciled for the others); null = none set up yet
+    const regs = co.registrations || [];
+    const activeGstins = regs.length ? new Set(regs.filter(r => r.active !== false).map(r => N.normGstin(r.gstin))) : null;
+    return { company: co, branches: new Map(list.map(b => [b.id, { name: b.name, gstin: b.gstin, state: b.state_code }])), vendors, activeGstins, periodFrom: null };
   }
 
   /** The Zoho call options for one run: pacing, per-day budget, time slice and cancel, checked between calls */
@@ -160,6 +165,13 @@ function create({ zr, cfgNow, readSynced = async () => null, audit = { log: asyn
   }
 
   async function fetchDetails(co, ctx, g, summary, st) {
+    // The GSTINs switched on and the months synced decide which documents are worth a call: apply them to what is stored (no Zoho call)
+    // whenever either changed since the last run
+    const sig = `${ctx.activeGstins ? [...ctx.activeGstins].sort().join(',') : '*'}|${ctx.periodFrom || ''}`;
+    if (st.scope_sig !== sig) {
+      summary.scope = await books.applyScope(co.id, C.EXCLUSIONS, (gstin, date) => C.scopeExclusion(gstin, date, ctx));
+      st.scope_sig = sig;
+    }
     const pending = (await books.pendingDetails(co.id)).filter(d => (d.detail_fail || 0) < 3);
     summary.details.queued = pending.length;
     let buf = [];
@@ -211,7 +223,7 @@ function create({ zr, cfgNow, readSynced = async () => null, audit = { log: asyn
       run_id: runInfo.run_id, company: co.id, mode, by: o.by || 'system', started_at: runInfo.started_at, finished_at: null, status: 'running',
       from: o.from || null, to: o.to || null,
       lists: Object.fromEntries(Object.keys(KINDS).map(k => [k, { rows: 0, added: 0, changed: 0 }])),
-      details: { queued: 0, fetched: 0, failed: 0, deleted: 0 }, windows_skipped: 0, warnings: [], calls: 0, error: null, message: '',
+      details: { queued: 0, fetched: 0, failed: 0, deleted: 0 }, windows_skipped: 0, scope: null, warnings: [], calls: 0, error: null, message: '',
     };
     if (st.budget.day !== N.todayIST()) st.budget = { day: N.todayIST(), used: 0 };      // new IST day → fresh budget
     const startCalls = st.budget.used;
@@ -222,9 +234,13 @@ function create({ zr, cfgNow, readSynced = async () => null, audit = { log: asyn
       st.budget.used += 1;                                                      // the branches call
       if (mode === 'period' || mode === 'recheck') {
         const today = N.todayIST();
-        const from = o.from || `${N.fyStart(today) - 1}-04`, to = o.to || today.slice(0, 7);
+        // a re-check without months re-reads the months already synced (not two financial years the user never asked for)
+        const from = o.from || (mode === 'recheck' && syncedFrom(st)) || `${N.fyStart(today) - 1}-04`, to = o.to || today.slice(0, 7);
         if (!/^\d{4}-\d{2}$/.test(from) || !/^\d{4}-\d{2}$/.test(to) || from > to) throw new Error('Choose a period like 2025-04 to 2026-11');
         summary.from = from; summary.to = to;
+        const first = syncedFrom(st);
+        st.synced_from = !first || from < first ? from : first;                   // the first month ever synced: older documents wait until a period reaching them is synced
+        ctx.periodFrom = `${st.synced_from}-01`;
         // The change feed starts from the FIRST listing (set before listing, so a document edited while a long, multi-slice
         // first sync is still going is caught by the next change feed); a later period run never moves it.
         for (const kind of kinds) if (!st.hwm[kind]) st.hwm[kind] = runInfo.started_at;
@@ -244,6 +260,8 @@ function create({ zr, cfgNow, readSynced = async () => null, audit = { log: asyn
         }
         if (kinds.includes('vendor_credit')) await listAllCredits(co, ctx, g, summary, mode === 'recheck');
       } else {
+        const sf = syncedFrom(st);
+        ctx.periodFrom = sf ? `${sf}-01` : null;
         let fed = 0;
         for (const kind of kinds) if (await feed(co, ctx, kind, st, g, summary, runInfo.started_at)) fed++;
         if (!fed) {                                                               // no first sync yet: nothing was read, so this is not a successful sync
@@ -334,6 +352,8 @@ function create({ zr, cfgNow, readSynced = async () => null, audit = { log: asyn
       budget: { day: today, used, limit: cfg.sync.daily_budget, remaining: Math.max(0, cfg.sync.daily_budget - used) },
       eta_days: stats.pending ? Math.ceil(stats.pending / Math.max(1, cfg.sync.daily_budget - 60)) : 0,
       branches: Object.values(st.branches || {}).length, branches_at: st.branches_at,
+      // what the sync reads amounts for: the GSTINs switched on, and the months from the first one synced
+      scope: { gstins_total: (co.registrations || []).length, gstins_on: (co.registrations || []).filter(r => r.active !== false).map(r => ({ gstin: r.gstin, label: r.label || '' })), from: syncedFrom(st) },
       windows: st.windows, credentials: zr.identity(),
     };
   }

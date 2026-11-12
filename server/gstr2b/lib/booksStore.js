@@ -84,6 +84,36 @@ async function pendingDetails(company, limit = 1e9) {
   return out.slice(0, limit);
 }
 
+/**
+ * Re-apply the scope rules (which GSTINs are switched on, which months have been synced) to the documents already stored — no Zoho call.
+ * `scopeOf(recipientGstin, postingDate)` answers 'gstin_off' | 'outside_period' | null (see canonBooks.scopeExclusion).
+ * A document still waiting for its amounts that has fallen out of scope is kept out; a document that was kept out for a scope reason and
+ * is back in scope waits for its amounts again. Documents that already have amounts are never touched. Returns { parked, revived }.
+ */
+async function applyScope(company, texts, scopeOf) {
+  return store.withLock(`booksw_${company}`, async () => {
+    const out = { parked: 0, revived: 0 };
+    for (const { key } of await shardsOf(company)) {
+      const docs = await store.read(key, []);
+      let dirty = false;
+      for (const d of docs) {
+        if (d.deleted || d.amounts) continue;
+        const want = scopeOf(d.recipient_gstin, d.posting_date);
+        if (d.excluded === 'gstin_off' || d.excluded === 'outside_period') {
+          if (want === d.excluded) continue;
+          if (want) { d.excluded = want; d.excluded_text = texts[want]; }
+          else { d.excluded = null; delete d.excluded_text; d.detail_pending = true; out.revived++; }
+          dirty = true;
+        } else if (!d.excluded && d.detail_pending && want) {
+          d.excluded = want; d.excluded_text = texts[want]; d.detail_pending = false; out.parked++; dirty = true;
+        }
+      }
+      if (dirty) await store.write(key, docs);
+    }
+    return out;
+  });
+}
+
 /** Coverage counts for the sync screen */
 async function stats(company) {
   const s = { total: 0, in_scope: 0, detailed: 0, pending: 0, stale: 0, excluded: {}, months: {}, by_kind: {} };
@@ -101,4 +131,4 @@ async function stats(company) {
   return s;
 }
 
-module.exports = { upsertMany, all, get, pendingDetails, stats, shardsOf, monthOf };
+module.exports = { upsertMany, all, get, pendingDetails, applyScope, stats, shardsOf, monthOf };

@@ -16,8 +16,8 @@ const DEFAULT_CONFIG = {
   // Hours as requested (1, 3, 6, 9 PM IST) with a 20-minute offset: the dashboard's main Zoho sync runs on the hour and
   // the Neddle MSME sync at :10, so this module never competes with them for Zoho's per-minute limit.
   schedule: { enabled: true, times: ['13:20', '15:20', '18:20', '21:20'] },
-  // slice_seconds only matters online: a Vercel request may run 300 s, and after the slice the run still saves and reconciles
-  sync: { pace_ms: 1200, daily_budget: 2500, slice_seconds: 200 },
+  // slice_seconds only matters online: a Vercel request may run 300 s, and after the slice the run still saves and reconciles (a step is capped at 180 s)
+  sync: { pace_ms: 1200, daily_budget: 2500, slice_seconds: 180 },
   access: {},                      // userId → { companies: [id] | null, gstins: [gstin] | null }  (null / missing = everything the right allows)
 };
 

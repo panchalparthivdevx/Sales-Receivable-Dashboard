@@ -98,6 +98,27 @@ test('list stage: exclusions are decided from the list row alone (no detail call
   assert.equal(ok.recipient_gstin, REC_A);
 });
 
+test('list stage: scope — documents of a switched-off GSTIN, and documents before the first month synced, wait without a detail call', () => {
+  const on = new Set([REC_A]);                                                            // REC_B (Maharashtra) is switched off
+  const c = { ...ctx(), activeGstins: on, periodFrom: '2026-08-01' };
+  const of = o => C.fromList(bill(o).row, c, 'bill');
+  const inScope = of({ id: 's1', no: '1', date: '2026-10-12' });
+  assert.equal(inScope.excluded, null); assert.equal(inScope.detail_pending, true);
+  const off = of({ id: 's2', no: '2', date: '2026-10-12', branch: 'br_b', dest: 'MH', tax: 'inter' });
+  assert.equal(off.excluded, 'gstin_off'); assert.equal(off.detail_pending, false); assert.equal(off.excluded_text, C.EXCLUSIONS.gstin_off); assert.equal(off.recipient_gstin, REC_B);
+  const old = of({ id: 's3', no: '3', date: '2026-07-31' });
+  assert.equal(old.excluded, 'outside_period'); assert.equal(old.detail_pending, false);
+  assert.equal(of({ id: 's4', no: '4', date: '2026-08-01' }).detail_pending, true, 'the first synced day is in scope');
+  // a credit is dated by its posting date as well; the reasons that need no detail call still come first
+  assert.equal(C.fromList(credit({ id: 'sc', no: 'C-1', date: '2025-03-01' }).row, c, 'vendor_credit').excluded, 'outside_period');
+  assert.equal(of({ id: 's5', no: '5', status: 'void', date: '2026-07-01' }).excluded, 'void');
+  // no GSTIN set up yet (null) and no months synced yet (null) restrict nothing
+  const open = { ...ctx(), activeGstins: null, periodFrom: null };
+  assert.equal(C.fromList(bill({ id: 's6', no: '6', date: '2020-01-01', branch: 'br_b', dest: 'MH', tax: 'inter' }).row, open, 'bill').detail_pending, true);
+  assert.equal(C.scopeExclusion(REC_B, '2026-10-01', { activeGstins: on, periodFrom: null }), 'gstin_off');
+  assert.equal(C.scopeExclusion('', '2020-01-01', { activeGstins: on, periodFrom: '2026-08-01' }), 'outside_period', 'no recipient GSTIN: only the period rule can apply');
+});
+
 test('invalid supplier GSTIN (check digit) is kept and flagged — never "corrected"', () => {
   const typo = SUP_GJ.slice(0, 14) + (SUP_GJ[14] === 'A' ? 'B' : 'A');
   const d = full(bill({ id: 'g1', no: 'G-1', gst: typo }));

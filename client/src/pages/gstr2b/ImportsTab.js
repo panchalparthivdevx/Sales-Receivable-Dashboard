@@ -4,7 +4,7 @@ import { S, Tag, Field, Msg, inr, dt, dtm, monthName } from './ui';
 
 const RUN_TONE = { completed: 'green', partial: 'amber', paused_budget: 'amber', paused_limit: 'amber', needs_first_sync: 'amber', failed: 'red', cancelled: 'grey', running: 'blue' };
 const RUN_TEXT = { completed: 'Completed', partial: 'Partly done (continues next run)', paused_budget: 'Paused — daily budget used', paused_limit: 'Paused — Zoho limit', needs_first_sync: 'First sync needed', failed: 'Failed', cancelled: 'Stopped', running: 'Running' };
-const REASON = { no_supplier_gstin: 'No supplier GSTIN', void: 'Void', draft: 'Draft', deleted: 'Deleted in Zoho', opening_balance: 'Opening balance', composition_supplier: 'Composition supplier', recipient_unmapped: 'Branch without GSTIN', foreign_currency: 'Not in INR', no_gst: 'No GST', incomplete: 'Incomplete' };
+const REASON = { no_supplier_gstin: 'No supplier GSTIN', void: 'Void', draft: 'Draft', deleted: 'Deleted in Zoho', opening_balance: 'Opening balance', composition_supplier: 'Composition supplier', recipient_unmapped: 'Branch without GSTIN', gstin_off: 'GSTIN switched off', outside_period: 'Before the first month synced', foreign_currency: 'Not in INR', no_gst: 'No GST', incomplete: 'Incomplete' };
 const MAX_STEPS = 40;                                            // online: one click never goes on for more than about 2 hours
 const thisMonth = () => new Date(Date.now() + 330 * 60000).toISOString().slice(0, 7);          // India time
 const monthsBack = (ym, n) => { let y = +ym.slice(0, 4), m = +ym.slice(5, 7) - n; while (m < 1) { m += 12; y--; } return `${y}-${String(m).padStart(2, '0')}`; };
@@ -106,6 +106,12 @@ function SyncPanel({ meta, company, setCompany, companies, onChanged }) {
           <Stat k="Zoho calls today" v={`${b.used} / ${b.limit}`} sub="this module's own budget" />
           <Stat k="Failing documents" v={st.failing_documents || 0} tone={st.failing_documents ? 'bad' : undefined} sub="skipped after 3 attempts" />
         </div>
+        {st.scope && st.scope.gstins_total > 0 && (
+          <div style={{ ...S.muted, marginBottom: 8 }}>
+            Amounts are read from Zoho for <b>{st.scope.gstins_on.length} of {st.scope.gstins_total} GSTIN(s)</b> that are switched on{st.scope.gstins_on.length > 0 && st.scope.gstins_total > 1 ? ` (${st.scope.gstins_on.map(x => x.label || x.gstin).join(', ')})` : ''}{st.scope.from ? `, for documents from ${monthName(st.scope.from)}` : ''}.
+            {st.scope.gstins_total > 1 && <> Switching a GSTIN on or off is the "Active" box in Settings → Companies &amp; GSTINs: fewer GSTINs means a much faster sync, and a GSTIN you switch on is read at the next sync.</>}
+          </div>
+        )}
         {Object.keys(stats.excluded || {}).length > 0 && <div style={{ ...S.muted, marginBottom: 8 }}>Kept out of matching (with reasons): {Object.entries(stats.excluded).map(([k, n]) => `${REASON[k] || k}: ${n}`).join(' · ')}</div>}
         <div style={{ ...S.muted, marginBottom: 10 }}>Credentials: {st.credentials}. Branch list read {st.branches_at ? dtm(st.branches_at) : '—'} ({st.branches} branches). Scheduled: {st.scheduled.enabled ? `${st.scheduled.times.join(', ')} IST` : 'off'}{st.scheduled.last && st.scheduled.last.last_tick_at ? ` · last scheduled run ${dtm(st.scheduled.last.last_tick_at)} (${st.scheduled.last.last_mode}: ${st.scheduled.last.last_result})` : ''}{!meta.integrations.scheduler ? ' · scheduled syncs run only on the office PC; here use the buttons.' : ''}</div>
 
@@ -113,7 +119,7 @@ function SyncPanel({ meta, company, setCompany, companies, onChanged }) {
           <div style={S.notice}>
             <b>Step 1 — bring in your Zoho Books documents.</b> Nothing has been read from Zoho Books yet.{' '}
             {meta.rights.prepare
-              ? <>Choose the months below (the latest three are filled in) and click <b>Start syncing this period</b>, then keep this page open until it says "Sync finished". <b>Sync changes now</b> becomes available after that — it only picks up changes made after a first sync.</>
+              ? <>Choose the months below (the latest three are filled in) and click <b>Start syncing this period</b>, then keep this page open until it says "Sync finished". <b>Sync changes now</b> becomes available after that — it only picks up changes made after a first sync. <b>Tip:</b> amounts are read only for GSTINs that are switched on (Settings → Companies &amp; GSTINs → Active), so switch off the ones you are not reconciling yet and the first sync is much faster.</>
               : <>Someone with the "Prepare" right needs to run the first sync.</>}
           </div>
         )}

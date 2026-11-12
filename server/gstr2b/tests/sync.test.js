@@ -12,6 +12,7 @@ const F = require('./fakeZoho');
 const store = require('../lib/store');
 const books = require('../lib/booksStore');
 const SYNC = require('../lib/booksSync');
+const C = require('../lib/canonBooks');
 const ZR = require('../lib/zohoRead');
 
 function setup({ budget = 1000, pageSize = 3, seed = true, lease = false } = {}) {
@@ -177,6 +178,119 @@ test('change feed: an edited bill, expense and credit are refreshed, a voided bi
     assert.match(q.params.last_modified_time, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+0000$/, `${q.path}: the modified-since filter`);
     assert.equal(q.params.sort_column, undefined, `${q.path}: no sort_column (Zoho refuses last_modified_time on expenses)`);
   }
+  rm(dir);
+});
+
+// ── Scope: which documents are worth a Zoho call (one call per document is what a sync costs) ──
+test('scope: a switched-off GSTIN costs no detail call; switched on again it is read at the next sync without listing anything again', async () => {
+  const { dir, zr, cfg, sync } = setup();
+  cfg.companies[0].registrations[1].active = false;                                           // REC_B (Maharashtra: bill b2) is switched off
+  const r = await sync.run({ company: 'devx', mode: 'period', from: '2026-08', to: '2026-10' });
+  assert.equal(r.status, 'completed', r.message || r.error);
+  assert.deepEqual(detailCalls(zr).map(l => l.split('/').pop()).sort(), ['b1', 'b5', 'c1', 'e1'], 'b2, the switched-off GSTIN, is not read');
+  const [b2] = await byZohoId('b2');
+  assert.equal(b2.excluded, 'gstin_off'); assert.equal(b2.detail_pending, false); assert.equal(b2.amounts, null);
+  const st = await books.stats('devx');
+  assert.equal(st.excluded.gstin_off, 1); assert.equal(st.pending, 0, 'nothing is shown as waiting for amounts that will not be read');
+  const status = await sync.status('devx');
+  assert.equal(status.scope.gstins_total, 2); assert.deepEqual(status.scope.gstins_on.map(x => x.gstin), [F.REC_A]); assert.equal(status.scope.from, '2026-08');
+  // switched on: the next change sync reads it; no month is listed again
+  cfg.companies[0].registrations[1].active = true;
+  const queriesBefore = zr.queries.length;
+  const r2 = await sync.run({ company: 'devx', mode: 'incremental' });
+  assert.equal(r2.status, 'completed', r2.message || r2.error); assert.deepEqual(r2.scope, { parked: 0, revived: 1 });
+  const [on] = await byZohoId('b2');
+  assert.equal(on.excluded, null); assert.equal(on.amounts.igst, 36000);
+  assert.ok(zr.queries.slice(queriesBefore).every(q => q.params.last_modified_time && !q.params.date_start), 'only the change feed listed: no month was listed again');
+  assert.equal(detailCalls(zr).filter(l => l.endsWith('/b2')).length, 1);
+  assert.equal((await sync.run({ company: 'devx', mode: 'incremental' })).scope, null, 'the scope step runs only when a setting or the first month changed');
+  rm(dir);
+});
+
+test('scope: no GSTIN set up yet restricts nothing (every document that can be matched is read)', async () => {
+  const { dir, zr, cfg, sync } = setup();
+  cfg.companies[0].registrations = [];
+  assert.equal((await sync.run({ company: 'devx', mode: 'period', from: '2026-08', to: '2026-10' })).status, 'completed');
+  assert.deepEqual(detailCalls(zr).map(l => l.split('/').pop()).sort(), ['b1', 'b2', 'b5', 'c1', 'e1']);
+  rm(dir);
+});
+
+test('scope step: waiting documents of a switched-off GSTIN or before the first month are set aside without a Zoho call, and come back; documents with amounts are never touched', async () => {
+  const dir = tempDir(); store.configure({ dir, useDb: false });
+  const base = { company: { id: 'devx', org_id: F.ORG, invoice_date_field: 'cf_vendor_bill_date', credit_date_field: 'cf_bill_date', credit_number_field: 'vendor_credit_number' }, branches: new Map(F.BRANCHES.map(b => [b.id, { name: b.name, gstin: b.gstin, state: b.state_code }])), vendors: new Map() };
+  const open = { ...base, activeGstins: new Set([F.REC_A, F.REC_B]), periodFrom: null };
+  const rows = [F.bill({ id: 'w1', no: '1', date: '2026-10-12' }), F.bill({ id: 'w2', no: '2', date: '2026-10-12', branch: 'br_b', dest: 'MH', tax: 'inter' }), F.bill({ id: 'w3', no: '3', date: '2025-01-05' }), F.bill({ id: 'w4', no: '4', date: '2026-10-13' })];
+  await books.upsertMany('devx', rows.map(b => C.fromList(b.row, open, 'bill')));
+  const done = C.fromDetail(rows[3].detail, rows[3].row, open, 'bill');                       // w4 already has its amounts
+  await books.upsertMany('devx', [done]);
+  const narrow = { ...base, activeGstins: new Set([F.REC_A]), periodFrom: '2026-08-01' };
+  const apply = c => books.applyScope('devx', C.EXCLUSIONS, (g, d) => C.scopeExclusion(g, d, c));
+  const get = async id => (await books.all('devx')).find(d => d.zoho_id === id);
+  assert.deepEqual(await apply(narrow), { parked: 2, revived: 0 });
+  assert.equal((await get('w1')).detail_pending, true);
+  assert.equal((await get('w2')).excluded, 'gstin_off'); assert.equal((await get('w3')).excluded, 'outside_period');
+  assert.equal((await get('w2')).excluded_text, C.EXCLUSIONS.gstin_off);
+  assert.deepEqual(await apply(narrow), { parked: 0, revived: 0 }, 'applying the same scope again changes nothing');
+  assert.deepEqual(await apply({ ...narrow, activeGstins: new Set([F.REC_A, F.REC_B]) }), { parked: 0, revived: 1 });              // GSTIN switched on: only w2 returns
+  assert.equal((await get('w2')).detail_pending, true); assert.equal((await get('w2')).excluded, null); assert.equal((await get('w3')).excluded, 'outside_period');
+  assert.deepEqual(await apply(open), { parked: 0, revived: 1 });                                                                    // an earlier first month: w3 returns
+  assert.equal((await get('w3')).excluded, null); assert.equal((await get('w3')).detail_pending, true);
+  assert.deepEqual(await apply({ ...narrow, activeGstins: new Set(), periodFrom: '2099-01-01' }).then(r => r.parked), 3, 'all three waiting documents are set aside');
+  const w4 = await get('w4'); assert.ok(w4.amounts && w4.excluded === null, 'a document that already has its amounts is never parked');
+  rm(dir);
+});
+
+test('scope: a vendor credit dated before the first month synced is not read; an earlier period reads it', async () => {
+  const { dir, zr, sync } = setup();
+  zr.put('credits', F.credit({ id: 'c0', no: 'CN/0', date: '2025-03-01' }));
+  const r = await sync.run({ company: 'devx', mode: 'period', from: '2026-08', to: '2026-10' });
+  assert.equal(r.status, 'completed', r.message || r.error);
+  assert.ok(!detailCalls(zr).some(l => l.endsWith('/c0')), 'the old credit costs no detail call');
+  assert.equal((await byZohoId('c0'))[0].excluded, 'outside_period');
+  assert.equal((await sync.loadState('devx')).synced_from, '2026-08');
+  // an earlier period brings it into scope: the credit list is read in full each time, and the scope step revives it
+  const r2 = await sync.run({ company: 'devx', mode: 'period', from: '2025-01', to: '2025-04' });
+  assert.equal(r2.status, 'completed', r2.message || r2.error);
+  assert.equal((await sync.loadState('devx')).synced_from, '2025-01');
+  const [c0] = await byZohoId('c0');
+  assert.equal(c0.excluded, null); assert.ok(c0.amounts);
+  assert.ok(detailCalls(zr).some(l => l.endsWith('/c0')));
+  rm(dir);
+});
+
+test('scope: the change feed does not read a changed document older than the first month synced', async () => {
+  const { dir, zr, sync } = setup();
+  await sync.run({ company: 'devx', mode: 'period', from: '2026-08', to: '2026-10' });
+  const before = detailCalls(zr).length;
+  zr.put('bills', F.bill({ id: 'old1', no: 'OLD/1', date: '2025-02-10', lmt: new Date(Date.now() + 5000).toISOString().replace(/\.\d+Z$/, '+0000') }));
+  const r = await sync.run({ company: 'devx', mode: 'incremental' });
+  assert.equal(r.status, 'completed', r.message || r.error);
+  assert.equal(detailCalls(zr).length, before, 'no detail call for it');
+  assert.equal((await byZohoId('old1'))[0].excluded, 'outside_period');
+  rm(dir);
+});
+
+test('scope: a state saved before the first month was recorded falls back to the months already listed', async () => {
+  const { dir, zr, sync } = setup();
+  await sync.run({ company: 'devx', mode: 'period', from: '2026-08', to: '2026-10' });
+  await store.update('sync_devx', {}, s => { delete s.synced_from; delete s.scope_sig; });      // the shape of a state written by the previous version
+  zr.put('credits', F.credit({ id: 'c9', no: 'CN/9', date: '2024-05-05' }));
+  zr.put('credits', F.credit({ id: 'c10', no: 'CN/10', date: '2026-10-25', lmt: new Date(Date.now() + 5000).toISOString().replace(/\.\d+Z$/, '+0000') }));
+  const before = detailCalls(zr).length;
+  const r = await sync.run({ company: 'devx', mode: 'incremental' });
+  assert.equal(r.status, 'completed', r.message || r.error);
+  assert.equal((await sync.status('devx')).scope.from, '2026-08');
+  assert.deepEqual(detailCalls(zr).slice(before).map(l => l.split('/').pop()), ['c10'], 'only the credit inside the synced months is read');
+  rm(dir);
+});
+
+test('a re-check without months re-reads the months already synced, not two financial years', async () => {
+  const { dir, zr, sync } = setup();
+  await sync.run({ company: 'devx', mode: 'period', from: '2026-08', to: '2026-10' });
+  const mark = zr.queries.length;
+  const r = await sync.run({ company: 'devx', mode: 'recheck' });
+  assert.equal(r.status, 'completed', r.message || r.error); assert.equal(r.from, '2026-08');
+  assert.equal(zr.queries.slice(mark).filter(q => q.params.date_start).map(q => q.params.date_start).sort()[0], '2026-08-01');
   rm(dir);
 });
 
