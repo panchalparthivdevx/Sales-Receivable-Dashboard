@@ -28,6 +28,7 @@ const KINDS = {
   expense:       { path: '/expenses',      key: 'expenses',       detail: id => `/expenses/${id}`,      dkey: 'expense',       label: 'GST-bearing expenses' },
 };
 const MARGIN_MS = 15 * 60000;
+const FRESH_WINDOW_MS = 6 * 3600 * 1000;
 
 class Stop extends Error { constructor(kind, msg) { super(msg); this.stop = kind; } }   // budget | time | cancel
 
@@ -52,10 +53,19 @@ function mergeList(old, light) {
   return { ...light, detail_fail: old.detail_fail || 0 };
 }
 
-function create({ zr, cfgNow, readSynced = async () => null, audit = { log: async () => {} }, log = console, sleepFn = sleep }) {
+/**
+ * useLease (online only): a run also writes a short lease into the stored state, so a second click, tab or user whose request
+ * lands on ANOTHER serverless instance sees "already running" — the in-memory map below only knows its own process. The lease
+ * expires by itself (the slice's deadline plus a grace for saving), so a run the platform killed never blocks the next one.
+ * On the office PC the process itself is the authority and a stale lease must never block a sync after a restart.
+ */
+const LEASE_GRACE_MS = 90000;
+const leaseHeld = st => !!(st.lease && Date.parse(st.lease.until) > Date.now());
+
+function create({ zr, cfgNow, readSynced = async () => null, audit = { log: async () => {} }, log = console, sleepFn = sleep, useLease = false }) {
   const running = new Map();                                        // company id → { run_id, cancel, started_at }
   const stateKey = co => `sync_${co}`;
-  const EMPTY = () => ({ branches: {}, branches_at: null, hwm: {}, windows: {}, budget: { day: '', used: 0 }, runs: [], last_ok_at: null, last_error: null });
+  const EMPTY = () => ({ branches: {}, branches_at: null, hwm: {}, windows: {}, budget: { day: '', used: 0 }, runs: [], last_ok_at: null, last_error: null, lease: null });
   const loadState = async co => ({ ...EMPTY(), ...((await store.read(stateKey(co), null)) || {}) });
   const saveState = (co, st) => store.write(stateKey(co), st);
 
@@ -179,14 +189,22 @@ function create({ zr, cfgNow, readSynced = async () => null, audit = { log: asyn
     const mode = o.mode || 'incremental';
     const runInfo = { run_id: uid('run_'), cancel: false, started_at: nowIso() };
     running.set(co.id, runInfo);
-    const st = await loadState(co.id);
+    const deadline = Date.now() + (o.maxMs || cfg.sync.slice_seconds * 1000);
+    let st;
+    try {
+      st = await loadState(co.id);
+      if (useLease && leaseHeld(st)) {
+        running.delete(co.id);
+        return { busy: true, message: `A sync of ${co.name} is already running (started by ${st.lease.by}) — it ends within a few minutes`, run_id: st.lease.run_id };
+      }
+      if (useLease) { st.lease = { run_id: runInfo.run_id, by: o.by || 'system', at: runInfo.started_at, until: new Date(deadline + LEASE_GRACE_MS).toISOString() }; await saveState(co.id, st); }
+    } catch (e) { running.delete(co.id); throw e; }
     const summary = {
       run_id: runInfo.run_id, company: co.id, mode, by: o.by || 'system', started_at: runInfo.started_at, finished_at: null, status: 'running',
       from: o.from || null, to: o.to || null,
       lists: Object.fromEntries(Object.keys(KINDS).map(k => [k, { rows: 0, added: 0, changed: 0 }])),
-      details: { queued: 0, fetched: 0, failed: 0, deleted: 0 }, warnings: [], calls: 0, error: null, message: '',
+      details: { queued: 0, fetched: 0, failed: 0, deleted: 0 }, windows_skipped: 0, warnings: [], calls: 0, error: null, message: '',
     };
-    const deadline = Date.now() + (o.maxMs || cfg.sync.slice_seconds * 1000);
     if (st.budget.day !== N.todayIST()) st.budget = { day: N.todayIST(), used: 0 };      // new IST day → fresh budget
     const startCalls = st.budget.used;
     const g = guard(co, st, cfg, runInfo, deadline);
@@ -199,17 +217,24 @@ function create({ zr, cfgNow, readSynced = async () => null, audit = { log: asyn
         const from = o.from || `${N.fyStart(today) - 1}-04`, to = o.to || today.slice(0, 7);
         if (!/^\d{4}-\d{2}$/.test(from) || !/^\d{4}-\d{2}$/.test(to) || from > to) throw new Error('Choose a period like 2025-04 to 2026-11');
         summary.from = from; summary.to = to;
-        for (const month of monthsBetween(from, to)) {
+        // The change feed starts from the FIRST listing (set before listing, so a document edited while a long, multi-slice
+        // first sync is still going is caught by the next change feed); a later period run never moves it.
+        for (const kind of kinds) if (!st.hwm[kind]) st.hwm[kind] = runInfo.started_at;
+        const months = monthsBetween(from, to);
+        const recent = new Set(months.slice(0, 2));                               // the newest two months are always listed again
+        for (const month of months) {
           for (const kind of kinds) {
             if (kind === 'vendor_credit') continue;                               // credits are few: one full list below, not per month
+            // A month listed in the last few hours is not listed again by a repeated or resumed run — online, where each run is a
+            // short slice, this keeps the slice's calls for fetching amounts. (A re-check always lists everything.)
+            const w = st.windows[`${kind}:${month}`];
+            if (mode === 'period' && !o.force && !recent.has(month) && w && Date.now() - Date.parse(w.at) < FRESH_WINDOW_MS) { summary.windows_skipped++; continue; }
             const r = await listWindow(co, ctx, kind, month, g, summary, { recheck: mode === 'recheck' });
             st.windows[`${kind}:${month}`] = { at: nowIso(), rows: r.rows, kept: r.kept };
           }
           await saveState(co.id, st);
         }
         if (kinds.includes('vendor_credit')) await listAllCredits(co, ctx, g, summary, mode === 'recheck');
-        // The change feed starts from the first full listing; a later period run never moves it (changes in between stay covered)
-        for (const kind of kinds) if (!st.hwm[kind]) st.hwm[kind] = runInfo.started_at;
       } else {
         for (const kind of kinds) await feed(co, ctx, kind, st, g, summary, runInfo.started_at);
       }
@@ -224,10 +249,11 @@ function create({ zr, cfgNow, readSynced = async () => null, audit = { log: asyn
       summary.finished_at = nowIso();
       summary.calls = Math.max(0, st.budget.used - startCalls);
       st.runs = [summary, ...st.runs].slice(0, 30);
+      st.lease = null;
       try { await saveState(co.id, st); } catch (e) { log.error && log.error(`[gstr2b:${co.id}] could not save sync state: ${e.message}`); }
       running.delete(co.id);
     }
-    await audit.log({ by: summary.by, action: `sync.${mode}`, company: co.id, detail: `${summary.status}: ${summary.details.fetched} detail(s), ${Object.values(summary.lists).reduce((a, l) => a + l.added + l.changed, 0)} list change(s), ${summary.calls} Zoho call(s)${summary.message ? ` — ${summary.message}` : ''}` });
+    await audit.log({ by: summary.by, action: `sync.${mode}`, company: co.id, detail: `${summary.status}: ${summary.details.fetched} detail(s), ${Object.values(summary.lists).reduce((a, l) => a + l.added + l.changed, 0)} list change(s), ${summary.calls} Zoho call(s)${summary.windows_skipped ? `, ${summary.windows_skipped} recently listed month(s) skipped` : ''}${summary.message ? ` — ${summary.message}` : ''}` });
     return summary;
   }
 
@@ -268,7 +294,10 @@ function create({ zr, cfgNow, readSynced = async () => null, audit = { log: asyn
       full = { ...doc, deleted: true, deleted_at: nowIso(), excluded: 'deleted', excluded_text: C.EXCLUSIONS.deleted, detail_pending: false, hash: `deleted:${doc.id}` };
     }
     await books.upsertMany(co.id, [full]);
-    await saveState(co.id, st);
+    // Only the branch list is ours to save: a sync may be running, and writing back the whole (older) state would undo its progress
+    const fresh = await loadState(co.id);
+    fresh.branches = st.branches; fresh.branches_at = st.branches_at;
+    await saveState(co.id, fresh);
     await audit.log({ by, action: 'sync.refresh_one', company: co.id, ref: docId, detail: full.deleted ? 'deleted in Zoho' : 'refreshed' });
     return full;
   }
@@ -282,9 +311,10 @@ function create({ zr, cfgNow, readSynced = async () => null, audit = { log: asyn
     const today = N.todayIST();
     const used = st.budget.day === today ? st.budget.used : 0;
     const ri = running.get(co.id);
+    const leased = useLease && leaseHeld(st);                                 // a run on another instance counts as running
     const fails = (await books.all(co.id)).filter(d => (d.detail_fail || 0) >= 3).length;
     return {
-      company: co.id, running: !!ri, run_id: ri ? ri.run_id : null, last_ok_at: st.last_ok_at, last_error: st.last_error,
+      company: co.id, running: !!ri || leased, run_id: ri ? ri.run_id : leased ? st.lease.run_id : null, last_ok_at: st.last_ok_at, last_error: st.last_error,
       hwm: st.hwm, runs: st.runs.slice(0, 10), stats, failing_documents: fails,
       budget: { day: today, used, limit: cfg.sync.daily_budget, remaining: Math.max(0, cfg.sync.daily_budget - used) },
       eta_days: stats.pending ? Math.ceil(stats.pending / Math.max(1, cfg.sync.daily_budget - 60)) : 0,

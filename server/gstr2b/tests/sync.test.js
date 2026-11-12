@@ -14,13 +14,13 @@ const books = require('../lib/booksStore');
 const SYNC = require('../lib/booksSync');
 const ZR = require('../lib/zohoRead');
 
-function setup({ budget = 1000, pageSize = 3, seed = true } = {}) {
+function setup({ budget = 1000, pageSize = 3, seed = true, lease = false } = {}) {
   const dir = tempDir();
   store.configure({ dir, useDb: false });
   const zr = F.makeFake({ pageSize });
   const cfg = { companies: [{ id: 'devx', name: 'Test Co', org_id: F.ORG, active: true, invoice_date_field: 'cf_vendor_bill_date', credit_date_field: 'cf_bill_date', credit_number_field: 'vendor_credit_number', registrations: [{ gstin: F.REC_A }, { gstin: F.REC_B }] }],
     sync: { pace_ms: 0, daily_budget: budget, slice_seconds: 60 } };
-  const audit = []; const sync = SYNC.create({ zr, cfgNow: async () => cfg, audit: { log: async e => audit.push(e) }, log: { error() {} } });
+  const audit = []; const sync = SYNC.create({ zr, cfgNow: async () => cfg, audit: { log: async e => audit.push(e) }, log: { error() {} }, useLease: lease });
   if (seed) {
     zr.put('bills', F.bill({ id: 'b1', no: 'INV/1', date: '2026-10-12', taxable: 1000 }));
     zr.put('bills', F.bill({ id: 'b2', no: 'INV/2', date: '2026-10-14', taxable: 2000, tax: 'inter', gst: F.SUP_MH, branch: 'br_b', dest: 'MH' }));
@@ -87,6 +87,58 @@ test('interrupted by the daily budget, then resumed: nothing lost, nothing fetch
   assert.equal(new Set(fetched).size, fetched.length, 'every document detail was fetched exactly once across both runs');
   assert.equal((await books.all('devx')).length, 9);
   assert.equal((await books.stats('devx')).pending, 0);
+  rm(dir);
+});
+
+test('a repeated or resumed period run does not list months it listed hours ago, so a short online slice keeps its calls for amounts; a re-check always lists everything', async () => {
+  const { dir, zr, sync } = setup();
+  const lists = () => zr.log.filter(l => /^LIST \/(bills|expenses) /.test(l)).length;
+  const first = await sync.run({ company: 'devx', mode: 'period', from: '2026-05', to: '2026-10' });
+  assert.equal(first.status, 'completed'); assert.equal(first.windows_skipped, 0);
+  const afterFirst = lists();
+  const second = await sync.run({ company: 'devx', mode: 'period', from: '2026-05', to: '2026-10' });
+  assert.equal(second.windows_skipped, 8, '6 months × bills and expenses = 12 listings; only the newest two months (4) are listed again');
+  assert.ok(lists() - afterFirst < afterFirst, 'the repeat spent fewer list calls than the first run');
+  const before = lists();
+  const recheck = await sync.run({ company: 'devx', mode: 'recheck', from: '2026-05', to: '2026-10' });
+  assert.equal(recheck.windows_skipped, 0); assert.equal(lists() - before, afterFirst, 'a re-check lists every month again');
+  assert.equal((await books.stats('devx')).detailed, 5);
+  rm(dir);
+});
+
+test('online: a run on another serverless instance is seen through the stored lease; a lease never outlives its slice and is released afterwards', async () => {
+  const { dir, sync } = setup({ lease: true });
+  const key = 'sync_devx';
+  const other = { run_id: 'run_elsewhere', by: 'Another user', at: new Date().toISOString(), until: new Date(Date.now() + 120000).toISOString() };
+  await store.update(key, {}, s => { s.lease = other; });
+  const refused = await sync.run({ company: 'devx', mode: 'period', from: '2026-10', to: '2026-10' });
+  assert.equal(refused.busy, true); assert.match(refused.message, /already running.*Another user/); assert.equal(refused.run_id, 'run_elsewhere');
+  assert.equal((await sync.status('devx')).running, true, 'the status page of any instance shows the run');
+  assert.equal((await sync.loadState('devx')).runs.length, 0, 'a refused run leaves no trace');
+  // the other run died (the platform killed it): once its lease has run out, nothing blocks the next sync
+  await store.update(key, {}, s => { s.lease = { ...other, until: new Date(Date.now() - 1000).toISOString() }; });
+  assert.equal((await sync.status('devx')).running, false);
+  const r = await sync.run({ company: 'devx', mode: 'period', from: '2026-10', to: '2026-10' });
+  assert.equal(r.status, 'completed', r.message || r.error);
+  assert.equal((await sync.loadState('devx')).lease, null, 'the lease is released when the run ends');
+  assert.equal((await sync.status('devx')).running, false);
+  rm(dir);
+});
+
+test('office PC: a lease is never consulted, so a restart after a crash cannot be blocked by one', async () => {
+  const { dir, sync } = setup({ lease: false });
+  await store.update('sync_devx', {}, s => { s.lease = { run_id: 'run_old', by: 'x', until: new Date(Date.now() + 3600000).toISOString() }; });
+  assert.equal((await sync.status('devx')).running, false);
+  assert.equal((await sync.run({ company: 'devx', mode: 'period', from: '2026-10', to: '2026-10' })).status, 'completed');
+  rm(dir);
+});
+
+test('a first sync that is cut short has already fixed its change-feed starting point (edits made during a multi-slice first sync are not missed)', async () => {
+  const { dir, sync } = setup();
+  const r = await sync.run({ company: 'devx', mode: 'period', from: '2026-08', to: '2026-10', maxMs: 1 });
+  assert.equal(r.status, 'partial');
+  const st = await sync.loadState('devx');
+  assert.ok(st.hwm.bill && st.hwm.expense && st.hwm.vendor_credit, 'high-water marks are set from the start of the first slice');
   rm(dir);
 });
 

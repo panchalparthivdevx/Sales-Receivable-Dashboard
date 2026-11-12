@@ -228,7 +228,7 @@ function Schedule({ meta, reloadMeta }) {
         <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginTop: 8 }}>
           <Field label="Pause between Zoho calls (ms)" hint="600–10000"><input type="number" style={{ ...S.input, width: 120 }} disabled={!canEdit} value={lim.pace_ms} onChange={e => setLim({ ...lim, pace_ms: e.target.value })} /></Field>
           <Field label="Zoho calls per day for this module" hint="100–9000; Zoho's limit is shared with every other module"><input type="number" style={{ ...S.input, width: 120 }} disabled={!canEdit} value={lim.daily_budget} onChange={e => setLim({ ...lim, daily_budget: e.target.value })} /></Field>
-          <Field label="Seconds per sync slice (online)" hint="30–280"><input type="number" style={{ ...S.input, width: 120 }} disabled={!canEdit} value={lim.slice_seconds} onChange={e => setLim({ ...lim, slice_seconds: e.target.value })} /></Field>
+          <Field label="Seconds per sync slice (online)" hint="30–250; online a sync runs in slices of this length"><input type="number" style={{ ...S.input, width: 120 }} disabled={!canEdit} value={lim.slice_seconds} onChange={e => setLim({ ...lim, slice_seconds: e.target.value })} /></Field>
         </div>
         {canEdit && <button style={{ ...S.primary, marginTop: 12 }} onClick={save}>Save</button>}
       </div>

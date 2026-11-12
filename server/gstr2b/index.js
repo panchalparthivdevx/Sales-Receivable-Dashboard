@@ -49,7 +49,7 @@ router.init = (deps = {}) => {
   if (deps.loadUsers) usersOf = deps.loadUsers;
   const zr = deps.zr || ZR.create({ zoho: deps.zoho });
   const recon = RC.create({ cfgNow, audit: AUD, log: deps.log || console });
-  const sync = BS.create({ zr, cfgNow, readSynced: deps.readSynced || (async () => null), audit: AUD, log: deps.log || console });
+  const sync = BS.create({ zr, cfgNow, readSynced: deps.readSynced || (async () => null), audit: AUD, log: deps.log || console, useLease: IS_VERCEL });
   ctx = { zr, recon, sync };
   return ctx;
 };
@@ -282,7 +282,11 @@ router.post('/sync/run', gate('prepare'), wrap(async (req, res) => {
   const run = need().sync.run({ company: co.id, mode, from: req.body?.from, to: req.body?.to, by: byName(req), maxMs: IS_VERCEL ? undefined : 50 * 60 * 1000 })
     .then(async r => { if (!r.busy) await reconAfter(co.id, byName(req)); return r; })
     .catch(e => console.error(`[gstr2b] sync ${co.id}: ${e.message}`));
-  if (IS_VERCEL) { const r = await background(run); return res.json({ started: true, summary: r || null }); }   // one slice per request on Vercel
+  if (IS_VERCEL) {                                                                // one slice per request on Vercel
+    const r = await background(run);
+    if (r && r.busy) return res.json({ busy: true, message: r.message });         // another instance holds the sync lease
+    return res.json({ started: true, summary: r || null });
+  }
   res.json({ started: true });
 }));
 

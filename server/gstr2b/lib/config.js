@@ -16,7 +16,8 @@ const DEFAULT_CONFIG = {
   // Hours as requested (1, 3, 6, 9 PM IST) with a 20-minute offset: the dashboard's main Zoho sync runs on the hour and
   // the Neddle MSME sync at :10, so this module never competes with them for Zoho's per-minute limit.
   schedule: { enabled: true, times: ['13:20', '15:20', '18:20', '21:20'] },
-  sync: { pace_ms: 1200, daily_budget: 2500, slice_seconds: 240 },
+  // slice_seconds only matters online: a Vercel request may run 300 s, and after the slice the run still saves and reconciles
+  sync: { pace_ms: 1200, daily_budget: 2500, slice_seconds: 200 },
   access: {},                      // userId → { companies: [id] | null, gstins: [gstin] | null }  (null / missing = everything the right allows)
 };
 
@@ -116,7 +117,7 @@ function validateSyncLimits(input, current) {
   try {
     if (input.pace_ms !== undefined) s.pace_ms = num(input.pace_ms, 600, 10000, 'Pause between Zoho calls (ms)');
     if (input.daily_budget !== undefined) s.daily_budget = num(input.daily_budget, 100, 9000, 'Zoho calls per day for this module');
-    if (input.slice_seconds !== undefined) s.slice_seconds = num(input.slice_seconds, 30, 280, 'Seconds per sync slice');
+    if (input.slice_seconds !== undefined) s.slice_seconds = num(input.slice_seconds, 30, 250, 'Seconds per sync slice');
   } catch (e) { return err(e.message); }
   return { sync: s };
 }

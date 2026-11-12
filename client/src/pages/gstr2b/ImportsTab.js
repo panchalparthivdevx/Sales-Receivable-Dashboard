@@ -5,6 +5,7 @@ import { S, Tag, Field, Msg, inr, dt, dtm, monthName } from './ui';
 const RUN_TONE = { completed: 'green', partial: 'amber', paused_budget: 'amber', paused_limit: 'amber', failed: 'red', cancelled: 'grey', running: 'blue' };
 const RUN_TEXT = { completed: 'Completed', partial: 'Partly done (continues next run)', paused_budget: 'Paused — daily budget used', paused_limit: 'Paused — Zoho limit', failed: 'Failed', cancelled: 'Stopped', running: 'Running' };
 const REASON = { no_supplier_gstin: 'No supplier GSTIN', void: 'Void', draft: 'Draft', deleted: 'Deleted in Zoho', opening_balance: 'Opening balance', composition_supplier: 'Composition supplier', recipient_unmapped: 'Branch without GSTIN', foreign_currency: 'Not in INR', no_gst: 'No GST', incomplete: 'Incomplete' };
+const MAX_STEPS = 40;                                            // online: one click never goes on for more than about 2 hours
 const fyStart = () => { const d = new Date(Date.now() + 330 * 60000); return (d.getUTCMonth() >= 3 ? d.getUTCFullYear() : d.getUTCFullYear() - 1); };
 
 export default function ImportsTab({ meta, filters, stamp, onChanged }) {
@@ -27,23 +28,57 @@ function SyncPanel({ meta, company, setCompany, companies, onChanged }) {
   const [note, setNote] = useState('');
   const [period, setPeriod] = useState(() => { const y = fyStart(), t = new Date(Date.now() + 330 * 60000).toISOString().slice(0, 7); return { from: `${y - 1}-04`, to: t }; });
   const [showPeriod, setShowPeriod] = useState(false);
+  const [stepping, setStepping] = useState(false);               // online: this page is asking for the next step
+  const stopAsked = useRef(false);
   const timer = useRef(null);
   const load = useCallback(() => (company ? g.syncStatus(company).then(s => { setSt(s); setError(''); return s; }).catch(e => { setError(errMsg(e)); return null; }) : Promise.resolve(null)), [company]);
   useEffect(() => { setSt(null); load(); }, [load]);
-  useEffect(() => { clearInterval(timer.current); timer.current = setInterval(() => { if (st && st.running) load().then(s => { if (s && !s.running) onChanged(); }); }, 3000); return () => clearInterval(timer.current); }, [st, load]); // eslint-disable-line
+  useEffect(() => { clearInterval(timer.current); timer.current = setInterval(() => { if (stepping) load(); else if (st && st.running) load().then(s => { if (s && !s.running) onChanged(); }); }, stepping ? 8000 : 3000); return () => clearInterval(timer.current); }, [st, load, stepping]); // eslint-disable-line
+  useEffect(() => () => { stopAsked.current = true; }, []);   // leaving this page ends the steps after the one in progress
 
   const start = async mode => {
     setError(''); setNote('');
+    const body = { company, mode, ...(mode === 'period' || mode === 'recheck' ? period : {}) };
     try {
-      const r = await g.syncRun({ company, mode, ...(mode === 'period' || mode === 'recheck' ? period : {}) });
-      if (r.busy) setNote(r.message); else setNote('Sync started — progress appears below.');
-      setTimeout(load, 800);
+      if (!meta.integrations.vercel) {                          // office PC: the server runs the whole sync in the background
+        const r = await g.syncRun(body);
+        setNote(r.busy ? r.message : 'Sync started — progress appears below.');
+        setTimeout(load, 800);
+        return;
+      }
+      // Online a request can only run a few minutes, so the sync is done in steps: this page asks for the next step until it is finished
+      stopAsked.current = false; setStepping(true);
+      let step = 0, read = 0;
+      for (;;) {
+        step++;
+        setNote(`Syncing with Zoho — step ${step}${read ? `, ${read.toLocaleString('en-IN')} amounts read so far` : ''}. Keep this page open; a step takes a few minutes.`);
+        const r = await g.syncRun(body);
+        if (r.busy) { setNote(r.message); break; }
+        const sm = r.summary || {};
+        read += (sm.details && sm.details.fetched) || 0;
+        const now = await load();
+        if (sm.status === 'partial' && !stopAsked.current && step < MAX_STEPS) continue;
+        const left = now && now.stats ? now.stats.pending || 0 : 0;
+        const where = `${read.toLocaleString('en-IN')} amount(s) read in ${step} step(s); ${left.toLocaleString('en-IN')} still waiting.`;
+        if (sm.status === 'failed') setError(`${sm.error || 'The sync failed'} (${where})`);
+        else if (sm.status === 'completed') setNote(`Sync finished — ${where}`);
+        else if (sm.status === 'partial') setNote(`${stopAsked.current ? 'Stopped' : 'Paused after many steps'} — ${where} Click the button again to continue.`);
+        else setNote(`${sm.message || RUN_TEXT[sm.status] || sm.status} — ${where}`);
+        break;
+      }
     } catch (e) { setError(errMsg(e)); }
+    finally { setStepping(false); onChanged(); }
+  };
+  const stop = () => {
+    stopAsked.current = true;
+    g.syncCancel(company).catch(() => {});
+    setNote(stepping ? 'Stopping — the step in progress finishes first (up to a few minutes online).' : 'Stopping after the current call…');
   };
   if (!st) return <div style={S.card}><div style={S.cardBody}>{error ? <span style={{ color: '#B91C1C' }}>{error}</span> : 'Loading sync status…'}</div></div>;
   const stats = st.stats || {}, b = st.budget || {};
   const never = !st.last_ok_at && !(st.runs || []).length;
   const pend = stats.pending || 0;
+  const busy = st.running || stepping;
 
   return (
     <div style={S.card}>
@@ -51,7 +86,7 @@ function SyncPanel({ meta, company, setCompany, companies, onChanged }) {
         <span style={S.cardTitle}>Zoho Books sync <Tag tone="green">read-only</Tag></span>
         <span style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           {companies.length > 1 && <select style={S.select} value={company} onChange={e => setCompany(e.target.value)}>{companies.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select>}
-          {st.running ? <Tag tone="blue">Running…</Tag> : <Tag tone={st.last_error ? 'red' : never ? 'amber' : 'green'}>{st.last_error ? 'Last run failed' : never ? 'Never synced' : 'Idle'}</Tag>}
+          {busy ? <Tag tone="blue">Running…</Tag> : <Tag tone={st.last_error ? 'red' : never ? 'amber' : 'green'}>{st.last_error ? 'Last run failed' : never ? 'Never synced' : 'Idle'}</Tag>}
         </span>
       </div>
       <div style={S.cardBody}>
@@ -70,10 +105,10 @@ function SyncPanel({ meta, company, setCompany, companies, onChanged }) {
 
         {meta.rights.prepare && (
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-            <button style={S.primary} disabled={st.running} onClick={() => start('incremental')} title="Reads only what changed in Zoho since the last sync, then fetches amounts for new and edited documents">Sync changes now</button>
-            <button style={S.btn} disabled={st.running} onClick={() => setShowPeriod(v => !v)}>{never ? 'Start the first sync…' : 'Sync a period…'}</button>
-            <button style={S.ghost} disabled={st.running} onClick={() => start('recheck')} title="Re-reads the whole period and removes documents Zoho no longer has (deleted ones never show up as changes)">Check for deleted documents</button>
-            {st.running && <button style={S.danger} onClick={() => g.syncCancel(company).then(() => setNote('Stopping after the current call…'))}>Stop</button>}
+            <button style={S.primary} disabled={busy} onClick={() => start('incremental')} title="Reads only what changed in Zoho since the last sync, then fetches amounts for new and edited documents">Sync changes now</button>
+            <button style={S.btn} disabled={busy} onClick={() => setShowPeriod(v => !v)}>{never ? 'Start the first sync…' : 'Sync a period…'}</button>
+            <button style={S.ghost} disabled={busy} onClick={() => start('recheck')} title="Re-reads the whole period and removes documents Zoho no longer has (deleted ones never show up as changes)">Check for deleted documents</button>
+            {busy && <button style={S.danger} onClick={stop}>Stop</button>}
             <button style={S.ghost} onClick={load}>Refresh</button>
           </div>
         )}
@@ -82,9 +117,9 @@ function SyncPanel({ meta, company, setCompany, companies, onChanged }) {
             <div style={{ display: 'flex', gap: 10, alignItems: 'flex-end', flexWrap: 'wrap' }}>
               <Field label="From month"><input type="month" style={S.input} value={period.from} onChange={e => setPeriod({ ...period, from: e.target.value })} /></Field>
               <Field label="To month"><input type="month" style={S.input} value={period.to} onChange={e => setPeriod({ ...period, to: e.target.value })} /></Field>
-              <button style={S.primary} disabled={st.running || !period.from || !period.to} onClick={() => { start('period'); setShowPeriod(false); }}>Start syncing this period</button>
+              <button style={S.primary} disabled={busy || !period.from || !period.to} onClick={() => { start('period'); setShowPeriod(false); }}>Start syncing this period</button>
             </div>
-            <p style={{ ...S.muted, margin: '8px 0 0', lineHeight: 1.5 }}>Zoho's list has no GST amounts, so each bill that can be matched needs one extra call to read its detail. A long period therefore takes several days at the daily budget ({b.limit} calls) — it keeps going on its own at each scheduled run and can be stopped and resumed safely. Start with the periods you need first (the invoices of the last financial year are the most time-critical: see the deadline notice on Overview).</p>
+            <p style={{ ...S.muted, margin: '8px 0 0', lineHeight: 1.5 }}>Zoho's list has no GST amounts, so each bill that can be matched needs one extra call to read its detail. A long period therefore takes several days at the daily budget ({b.limit} calls){meta.integrations.scheduler ? ' — it keeps going on its own at each scheduled run' : ' — online, click the button again on the next day (or when it pauses) and it carries on'} and can be stopped and resumed safely. Start with the periods you need first (the invoices of the last financial year are the most time-critical: see the deadline notice on Overview).</p>
           </div>
         )}
         {(st.runs || []).length > 0 && (
