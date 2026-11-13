@@ -62,6 +62,7 @@ const express = require('express');
 const XLSX = require('xlsx');
 const F = require('./fakeZoho');
 const { stmt, sup, inv } = require('./fixtures');
+const { FAST_SYNC } = require('./helpers');
 const store = require('../lib/store');
 const files = require('../lib/files');
 
@@ -71,8 +72,9 @@ files.configure({ blob: { async exists(p) { return blobs.has(p); }, async save(p
 const USERS = [{ id: '1', username: 'cfo', name: 'CFO', role: 'admin', active: true, permissions: {} }];
 const COMPANY = { id: 'devx', name: 'Test Co', short: 'T', org_id: F.ORG, invoice_date_field: 'cf_vendor_bill_date', credit_date_field: 'cf_bill_date', credit_number_field: 'vendor_credit_number', registrations: [{ gstin: F.REC_A, label: 'GJ', branch_ids: ['br_a'] }, { gstin: F.REC_B, label: 'MH', branch_ids: ['br_b'] }] };
 
-async function boot(tc) {
+async function boot(tc, { fast = false } = {}) {
   mem.clear(); blobs.clear();                                                          // every test starts from an empty Neon and an empty Blob
+  if (fast) await store.write('config', { sync: FAST_SYNC });                           // tests that sync: no waiting for a turn in the calls-per-minute queue
   const router = require('../index');
   const zr = F.makeFake();
   Object.assign(zr, { listOrganizations: async () => [], listBranches: async () => F.BRANCHES, checkAccess: async () => ({ ok: true, results: [] }) });
@@ -97,7 +99,7 @@ async function boot(tc) {
 const form = (buf, name) => { const f = new FormData(); f.append('file', new Blob([buf]), name); return f; };
 
 test('online: the whole flow runs on Neon + Blob with a read-only disk', async tc => {
-  const t = await boot(tc);
+  const t = await boot(tc, { fast: true });
   const meta0 = (await t.call('GET', '/meta')).body;
   assert.equal(meta0.integrations.vercel, true); assert.equal(meta0.integrations.scheduler, false); assert.equal(meta0.integrations.max_upload_mb, 4);
   assert.equal(t.router.startScheduler(), undefined);                                  // no timers online
@@ -151,19 +153,30 @@ test('online: the whole flow runs on Neon + Blob with a read-only disk', async t
 });
 
 test('online: a Zoho sync slice that runs out of time stops cleanly and the next click continues where it stopped', async tc => {
-  const t = await boot(tc);
+  const t = await boot(tc, { fast: true });
   await t.call('PUT', '/config/companies', { body: { companies: [COMPANY] } });
   for (let i = 1; i <= 6; i++) t.zr.put('bills', F.bill({ id: `s${i}`, no: `S/${i}`, date: '2026-09-1' + i, taxable: 100 * i }));
   const sync = (await t.call('GET', '/meta')).body.sync;
   assert.ok(sync.slice_seconds >= 30 && sync.slice_seconds <= 250, 'a slice must leave room inside the 300-second function limit');
   assert.equal((await t.call('PUT', '/config/sync', { body: { slice_seconds: 290 } })).status, 400);                 // a value that could overrun the limit is refused
-  const limits = await t.call('PUT', '/config/sync', { body: { slice_seconds: 30, pace_ms: 600 } });
-  assert.equal(limits.status, 200);
+  const limits = await t.call('PUT', '/config/sync', { body: { slice_seconds: 30 } });
+  assert.equal(limits.status, 200); assert.equal(limits.body.sync.slice_seconds, 30);
   const first = (await t.call('POST', '/sync/run', { body: { company: 'devx', mode: 'period', from: '2026-09', to: '2026-09' } })).body.summary;
   assert.ok(['completed', 'partial'].includes(first.status));
   const second = (await t.call('POST', '/sync/run', { body: { company: 'devx', mode: 'period', from: '2026-09', to: '2026-09' } })).body.summary;
   assert.equal(second.status, 'completed');
-  assert.equal((await t.call('GET', '/sync/status?company=devx')).body.stats.detailed, 6);
+  const done = (await t.call('GET', '/sync/status?company=devx')).body;
+  assert.equal(done.stats.detailed, 6); assert.equal(done.initial.status, 'completed'); assert.equal(done.initial.percent, 100);
+  // online the page is told about the scheduler as it is observed: here it has never called in
+  assert.equal(done.auto.every_min, 15); assert.equal(done.auto.last_seen_at, null); assert.equal(done.auto.overdue, null); assert.ok(Date.parse(done.auto.next_expected_at) > Date.now());
+
+  // "keep it fresh while the module is open": online the step runs inside the request, like any other step
+  assert.deepEqual((await t.call('POST', '/sync/kick', { body: { company: 'devx' } })).body, { ran: false, reason: 'fresh' });
+  await store.update('sync_devx', {}, s => { s.last_checked_at = new Date(Date.now() - 11 * 60000).toISOString(); });
+  t.zr.put('bills', F.bill({ id: 's7', no: 'S/7', date: '2026-09-20', taxable: 700, lmt: new Date(Date.now() + 5000).toISOString().replace(/.d+Z$/, '+0000') }));
+  const kick = (await t.call('POST', '/sync/kick', { body: { company: 'devx' } })).body;
+  assert.equal(kick.ran, true); assert.equal(kick.status, 'completed'); assert.equal(kick.more, false); assert.equal(kick.fetched, 1);
+  assert.equal((await t.call('GET', '/sync/status?company=devx')).body.stats.detailed, 7);
 
   // a sync running on ANOTHER serverless instance leaves its lease in the stored state: this instance refuses to start a second one
   await store.update('sync_devx', {}, s => { s.lease = { run_id: 'run_elsewhere', by: 'Another user', at: new Date().toISOString(), until: new Date(Date.now() + 120000).toISOString() }; });
@@ -205,14 +218,14 @@ test('online: a failed database read stops the request — it is never taken for
   const logged = console.error; console.error = () => {};                              // db.js logs the failure it swallows; keep the report readable
   try {
     pgFail.skip = 1; pgFail.reads = 3;                                                 // a dropped connection exactly while a setting is saved (after the access check has read the settings)
-    const r = await t.call('PUT', '/config/sync', { body: { pace_ms: 700 } });
+    const r = await t.call('PUT', '/config/sync', { body: { rate_per_min: 70 } });
     assert.equal(r.status, 500); assert.match(JSON.stringify(r.body), /could not be read just now — nothing was changed/);
   } finally { console.error = logged; pgFail.skip = 0; pgFail.reads = 0; }
   const meta = (await t.call('GET', '/meta')).body;
   assert.equal(meta.companies.length, 1, 'the company set-up is still there');
-  assert.notEqual(meta.sync.pace_ms, 700, 'the failed save changed nothing');
-  assert.equal((await t.call('PUT', '/config/sync', { body: { pace_ms: 700 } })).status, 200);   // the same save works once the database answers again
-  assert.equal((await t.call('GET', '/meta')).body.sync.pace_ms, 700);
+  assert.notEqual(meta.sync.rate_per_min, 70, 'the failed save changed nothing');
+  assert.equal((await t.call('PUT', '/config/sync', { body: { rate_per_min: 70 } })).status, 200);   // the same save works once the database answers again
+  assert.equal((await t.call('GET', '/meta')).body.sync.rate_per_min, 70);
   assert.equal((await t.call('GET', '/meta')).body.companies.length, 1);
 
   // the same at the storage level, for a record the module changes and writes back

@@ -3,11 +3,18 @@ import { g, errMsg, download } from './gApi';
 import { S, Tag, Field, Msg, inr, dt, dtm, monthName } from './ui';
 
 const RUN_TONE = { completed: 'green', partial: 'amber', paused_budget: 'amber', paused_limit: 'amber', needs_first_sync: 'amber', failed: 'red', cancelled: 'grey', running: 'blue' };
-const RUN_TEXT = { completed: 'Completed', partial: 'Partly done (continues next run)', paused_budget: 'Paused — daily budget used', paused_limit: 'Paused — Zoho limit', needs_first_sync: 'First sync needed', failed: 'Failed', cancelled: 'Stopped', running: 'Running' };
+const RUN_TEXT = { completed: 'Completed', partial: 'Partly done (continues with the next step)', paused_budget: 'Paused — this module\'s daily budget used', paused_limit: 'Paused — Zoho limit', needs_first_sync: 'First sync needed', failed: 'Failed', cancelled: 'Stopped', running: 'Running' };
+const RUN_MODE = { period: 'Period', incremental: 'Changes', recheck: 'Check against Zoho' };
+const RUN_BY = { schedule: 'Scheduler', auto: 'Automatic (module open)' };
 const REASON = { no_supplier_gstin: 'No supplier GSTIN', void: 'Void', draft: 'Draft', deleted: 'Deleted in Zoho', opening_balance: 'Opening balance', composition_supplier: 'Composition supplier', recipient_unmapped: 'Branch without GSTIN', gstin_off: 'GSTIN switched off', outside_period: 'Before the first month synced', foreign_currency: 'Not in INR', no_gst: 'No GST', incomplete: 'Incomplete' };
+const FIRST = { not_started: ['Not started', 'amber'], in_progress: ['In progress', 'blue'], completed: ['Completed', 'green'], completed_with_errors: ['Completed — some documents could not be read', 'amber'], failed: ['Failed — it is tried again automatically', 'red'] };
+const KIND = { bill: 'Bills', vendor_credit: 'Vendor credits', expense: 'Expenses' };
+const KIND_ONE = { bill: 'Bill', vendor_credit: 'Vendor credit', expense: 'Expense' };
 const MAX_STEPS = 40;                                            // online: one click never goes on for more than about 2 hours
 const thisMonth = () => new Date(Date.now() + 330 * 60000).toISOString().slice(0, 7);          // India time
 const monthsBack = (ym, n) => { let y = +ym.slice(0, 4), m = +ym.slice(5, 7) - n; while (m < 1) { m += 12; y--; } return `${y}-${String(m).padStart(2, '0')}`; };
+const num = n => (n || 0).toLocaleString('en-IN');
+const clock = iso => (iso ? new Date(iso).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }) : '—');
 /** A first sync has been started: the change feed has a starting point. ("Sync changes now" can only follow one.) */
 const firstDone = s => !!(s && s.hwm && (s.hwm.bill || s.hwm.expense || s.hwm.vendor_credit));
 
@@ -16,7 +23,7 @@ export default function ImportsTab({ meta, filters, stamp, onChanged }) {
   const [company, setCompany] = useState(() => (real.find(c => c.id === filters.company) || real[0] || {}).id || '');
   return (
     <div>
-      {real.length > 0 && <SyncPanel meta={meta} company={company} setCompany={setCompany} companies={real} onChanged={onChanged} />}
+      {real.length > 0 && <SyncPanel meta={meta} company={company} setCompany={setCompany} companies={real} onChanged={onChanged} stamp={stamp} />}
       {real.length === 0 && <div style={S.info}>No Zoho company is set up yet (Settings → Companies &amp; GSTINs), so there is nothing to sync. You can still look at the demo company's statements below.</div>}
       {meta.rights.prepare && <UploadPanel meta={meta} onChanged={onChanged} />}
       <Statements meta={meta} filters={filters} stamp={stamp} />
@@ -25,11 +32,11 @@ export default function ImportsTab({ meta, filters, stamp, onChanged }) {
 }
 
 // ── Zoho sync ────────────────────────────────────────────────────────────────
-function SyncPanel({ meta, company, setCompany, companies, onChanged }) {
+function SyncPanel({ meta, company, setCompany, companies, onChanged, stamp }) {
   const [st, setSt] = useState(null);
   const [error, setError] = useState('');
   const [note, setNote] = useState('');
-  const [period, setPeriod] = useState(() => ({ from: monthsBack(thisMonth(), 2), to: thisMonth() }));      // the latest three months: a first sync that finishes in a day
+  const [period, setPeriod] = useState(() => ({ from: monthsBack(thisMonth(), 2), to: thisMonth() }));      // the latest three months, until the user chooses
   const [showPeriod, setShowPeriod] = useState(false);
   const [stepping, setStepping] = useState(false);               // online: this page is asking for the next step
   const stopAsked = useRef(false);
@@ -37,13 +44,20 @@ function SyncPanel({ meta, company, setCompany, companies, onChanged }) {
   const timer = useRef(null);
   const load = useCallback(() => (company ? g.syncStatus(company).then(s => { setSt(s); setError(''); return s; }).catch(e => { setError(errMsg(e)); return null; }) : Promise.resolve(null)), [company]);
   useEffect(() => { autoOpened.current = false; setSt(null); load(); }, [load]);
+  useEffect(() => { if (stamp) load(); }, [stamp]);              // eslint-disable-line   (a step finished elsewhere: the module's own background sync)
   useEffect(() => { if (st && !autoOpened.current) { autoOpened.current = true; if (!firstDone(st)) setShowPeriod(true); } }, [st]);   // before the first sync, the month boxes are already open
-  useEffect(() => { clearInterval(timer.current); timer.current = setInterval(() => { if (stepping) load(); else if (st && st.running) load().then(s => { if (s && !s.running) onChanged(); }); }, stepping ? 8000 : 3000); return () => clearInterval(timer.current); }, [st, load, stepping]); // eslint-disable-line
-  useEffect(() => () => { stopAsked.current = true; }, []);   // leaving this page ends the steps after the one in progress
+  // The card follows a sync wherever it runs (this page, the scheduler, another person): every few seconds while one runs, twice a minute otherwise
+  const running = !!(st && st.running);
+  useEffect(() => {
+    clearInterval(timer.current);
+    timer.current = setInterval(() => { load().then(s => { if (running && !stepping && s && !s.running) onChanged(); }); }, running || stepping ? 4000 : 30000);
+    return () => clearInterval(timer.current);
+  }, [running, load, stepping]); // eslint-disable-line
+  useEffect(() => () => { stopAsked.current = true; }, []);   // leaving this page ends the steps IT asks for after the one in progress (the scheduler carries on)
 
   const start = async mode => {
     setError(''); setNote('');
-    const body = { company, mode, ...(mode === 'period' || mode === 'recheck' ? period : {}) };
+    const body = { company, mode, ...(mode === 'period' || mode === 'recheck' ? (mode === 'period' ? period : {}) : {}) };
     try {
       if (!meta.integrations.vercel) {                          // office PC: the server runs the whole sync in the background
         const r = await g.syncRun(body);
@@ -51,24 +65,25 @@ function SyncPanel({ meta, company, setCompany, companies, onChanged }) {
         setTimeout(load, 800);
         return;
       }
-      // Online a request can only run a few minutes, so the sync is done in steps: this page asks for the next step until it is finished
+      // Online a request can only run a few minutes, so the sync is done in steps: this page asks for the next step until it is finished.
+      // (If the page is closed, the scheduler carries on with the same work.)
       stopAsked.current = false; setStepping(true);
       let step = 0, read = 0;
       for (;;) {
         step++;
-        setNote(`Syncing with Zoho — step ${step}${read ? `, ${read.toLocaleString('en-IN')} amounts read so far` : ''}. Keep this page open; a step takes a few minutes.`);
+        setNote(`Syncing with Zoho — step ${step}${read ? `, ${read.toLocaleString('en-IN')} amounts read so far` : ''}. You can leave this page: the automatic sync carries on, and the progress below is kept up to date.`);
         const r = await g.syncRun(body);
-        if (r.busy) { setNote(r.message); break; }
+        if (r.busy) { setNote(`${r.message} The progress is shown below.`); break; }
         const sm = r.summary || {};
         read += (sm.details && sm.details.fetched) || 0;
         const now = await load();
         if (sm.status === 'partial' && !stopAsked.current && step < MAX_STEPS) continue;
-        const left = now && now.stats ? now.stats.pending || 0 : 0;
+        const left = now && now.initial ? now.initial.pending || 0 : 0;
         const where = `${read.toLocaleString('en-IN')} amount(s) read in ${step} step(s); ${left.toLocaleString('en-IN')} still waiting.`;
         if (sm.status === 'failed') setError(`${sm.error || 'The sync failed'} (${where})`);
         else if (sm.status === 'completed') setNote(`Sync finished — ${where}`);
         else if (sm.status === 'needs_first_sync') setNote(sm.message);
-        else if (sm.status === 'partial') setNote(`${stopAsked.current ? 'Stopped' : 'Paused after many steps'} — ${where} ${mode === 'period' ? 'Start the same period again to continue.' : 'Click the same button again to continue.'}`);
+        else if (sm.status === 'partial') setNote(`${stopAsked.current ? 'Stopped' : 'Paused after many steps'} — ${where} The automatic sync carries on with the rest.`);
         else setNote(`${sm.message || RUN_TEXT[sm.status] || sm.status} — ${where}`);
         break;
       }
@@ -78,13 +93,23 @@ function SyncPanel({ meta, company, setCompany, companies, onChanged }) {
   const stop = () => {
     stopAsked.current = true;
     g.syncCancel(company).catch(() => {});
-    setNote(stepping ? 'Stopping — the step in progress finishes first (up to a few minutes online).' : 'Stopping after the current call…');
+    setNote(meta.integrations.vercel ? 'Stopping — the step in progress finishes first (up to a few minutes). The automatic sync carries on with whatever is left at its next run.' : 'Stopping after the current call…');
+  };
+  const retry = async () => {
+    setError(''); setNote('');
+    try { const r = await g.retryFailed(company); setNote(`${r.reset} document(s) will be read again at the next sync${meta.integrations.vercel ? ' (within 15 minutes, or click "Sync changes now")' : ''}.`); load(); }
+    catch (e) { setError(errMsg(e)); }
   };
   if (!st) return <div style={S.card}><div style={S.cardBody}>{error ? <span style={{ color: '#B91C1C' }}>{error}</span> : 'Loading sync status…'}</div></div>;
-  const stats = st.stats || {}, b = st.budget || {};
+  const stats = st.stats || {}, b = st.budget || {}, z = st.zoho, sp = st.speed || {}, auto = st.auto, v = st.verify;
+  const ini = st.initial || { status: 'not_started' };
+  const [firstText, firstTone] = FIRST[ini.status] || FIRST.not_started;
   const never = !firstDone(st);                                 // no first sync yet (a "Sync changes now" that found nothing to build on does not count)
-  const pend = stats.pending || 0;
   const busy = st.running || stepping;
+  const failing = stats.failing_docs || [];
+  const eta = sp.eta_minutes > 0 ? (sp.eta_minutes < 90 ? `about ${sp.eta_minutes} min at ${sp.rate_per_min} calls a minute` : `about ${(sp.eta_minutes / 60).toFixed(1)} h at ${sp.rate_per_min} calls a minute`) : '';
+  const lastAuto = auto && auto.results && auto.results.find(x => x.company === company);
+  const autoWhat = !lastAuto ? '' : lastAuto.status === 'busy' ? 'a sync was already running' : lastAuto.status === 'needs_first_sync' ? 'waiting for the first sync to be started here' : lastAuto.status === 'completed' ? (lastAuto.fetched || lastAuto.changed ? `${lastAuto.fetched} amount(s) read` : 'nothing new') : (RUN_TEXT[lastAuto.status] || lastAuto.status).toLowerCase();
 
   return (
     <div style={S.card}>
@@ -97,40 +122,94 @@ function SyncPanel({ meta, company, setCompany, companies, onChanged }) {
       </div>
       <div style={S.cardBody}>
         <Msg error={error} ok={note} onClose={() => { setError(''); setNote(''); }} />
-        {st.last_error && <div style={S.error}>Last error ({dtm(st.last_error.at)}): {st.last_error.message}</div>}
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(190px, 1fr))', gap: 10, marginBottom: 10 }}>
-          <Stat k="Last successful sync" v={st.last_ok_at ? dtm(st.last_ok_at) : 'never'} />
-          <Stat k="Documents read" v={`${(stats.total || 0).toLocaleString('en-IN')}`} sub={`${stats.in_scope || 0} can be matched · ${stats.detailed || 0} with amounts`} />
-          <Stat k="Waiting for amounts" v={pend.toLocaleString('en-IN')} tone={pend ? 'warn' : 'good'} sub={pend ? `about ${st.eta_days} day(s) at the daily budget` : 'nothing waiting'} />
-          <Stat k="Edited in Zoho, not refreshed" v={stats.stale || 0} tone={stats.stale ? 'warn' : undefined} />
-          <Stat k="Zoho calls today" v={`${b.used} / ${b.limit}`} sub="this module's own budget" />
-          <Stat k="Failing documents" v={st.failing_documents || 0} tone={st.failing_documents ? 'bad' : undefined} sub="skipped after 3 attempts" />
+        {st.last_error && <div style={S.error}>The last run failed ({dtm(st.last_error.at)}): {st.last_error.message}. It is tried again at the next automatic sync; this message goes away as soon as a run gets through.</div>}
+        {auto && auto.overdue === true && <div style={S.error}><b>The automatic sync has stopped calling in.</b> Its last call was {dtm(auto.last_seen_at)}; it is due every {auto.every_min} minutes. Until it is back, the data is brought up to date whenever this module is open, or by "Sync changes now". (Vercel → the project → Settings → Cron Jobs shows whether the scheduler is enabled.)</div>}
+
+        {/* ── First sync ── */}
+        <div style={{ border: '1px solid #DFE7E3', borderRadius: 8, padding: '0.7rem 0.9rem', marginBottom: 10 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap', alignItems: 'baseline' }}>
+            <span style={{ fontWeight: 700, fontSize: '0.85rem' }}>First sync{ini.from ? ` — ${monthName(ini.from)} to ${monthName(ini.to)}` : ''} <Tag tone={firstTone}>{firstText}</Tag></span>
+            <span style={S.muted}>{ini.completed_at ? `completed ${dtm(ini.completed_at)}` : ini.started_at ? `started ${dtm(ini.started_at)} · ${ini.phase === 'listing' ? 'listing the months in Zoho' : 'reading amounts and tax'}` : 'nothing has been read from Zoho Books yet'}</span>
+          </div>
+          {ini.status !== 'not_started' && (
+            <>
+              <div title={ini.percent === null ? 'The total is known once every month has been listed' : `${ini.percent}%`} style={{ height: 8, background: '#EEF2F0', borderRadius: 4, margin: '8px 0', overflow: 'hidden' }}>
+                <div style={{ width: `${ini.percent === null ? 0 : ini.percent}%`, height: '100%', background: ini.failed ? '#B45309' : '#1C4942', transition: 'width 0.6s' }} />
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(170px, 1fr))', gap: 10 }}>
+                <Stat k="Found in Zoho" v={num(ini.discovered)} sub={`documents that can be matched · ${num(stats.total)} read in all`} />
+                <Stat k="Fully fetched" v={`${num(ini.fetched)}${ini.percent === null ? '' : ` · ${ini.percent}%`}`} sub="with amounts and tax" tone={ini.status === 'completed' ? 'good' : undefined} />
+                <Stat k="Pending" v={num(ini.pending)} tone={ini.pending ? 'warn' : 'good'} sub={ini.pending ? (ini.phase === 'listing' ? 'so far — still listing' : eta) : 'nothing waiting'} />
+                <Stat k="Failed" v={num(ini.failed)} tone={ini.failed ? 'bad' : undefined} sub={ini.failed ? 'could not be read — listed below' : 'none'} />
+              </div>
+              {st.live && busy && <div style={{ ...S.muted, marginTop: 6 }}>Running now ({RUN_BY[st.live.by] || st.live.by}): {num(st.live.fetched)} amount(s) read in this step so far{st.live.failed ? `, ${st.live.failed} failed` : ''}.</div>}
+            </>
+          )}
         </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(190px, 1fr))', gap: 10, marginBottom: 10 }}>
+          <Stat k="Last successful sync" v={st.last_ok_at ? dtm(st.last_ok_at) : 'never'} sub={st.last_checked_at ? `Zoho last checked for changes ${dtm(st.last_checked_at)}` : undefined} />
+          {auto
+            ? <Stat k="Automatic sync" v={auto.last_seen_at ? `last call ${dtm(auto.last_seen_at)}` : 'not seen yet'} tone={auto.overdue ? 'bad' : auto.last_seen_at ? 'good' : 'warn'} sub={`${auto.last_seen_at ? `${autoWhat ? `${autoWhat} · ` : ''}` : ''}next due about ${clock(auto.next_expected_at)} · every ${auto.every_min} min`} />
+            : <Stat k="Scheduled sync" v={st.scheduled.enabled ? `${st.scheduled.times.join(', ')} IST` : 'off'} sub={st.scheduled.last && st.scheduled.last.last_tick_at ? `last run ${dtm(st.scheduled.last.last_tick_at)} (${st.scheduled.last.last_result})` : 'no scheduled run yet'} />}
+          <Stat k="Zoho calls today — this module" v={`${num(b.used)} / ${num(b.limit)}`} sub={sp.rate_per_min ? `at up to ${sp.rate_per_min} a minute, ${sp.concurrency} at a time` : "this module's own budget"} />
+          <Stat k="Zoho's allowance — all integrations" v={z ? (z.day_remaining !== null ? `${num(z.day_remaining)} left of ${num(z.day_limit)}` : `${num(z.day_limit)} a day`) : '—'} sub={z ? `as Zoho reported ${dtm(z.at)} · this module stops at ${num(z.reserve)} left` : 'known after the first call'} tone={z && z.day_remaining !== null && z.day_remaining <= z.reserve ? 'bad' : undefined} />
+          <Stat k="Edited in Zoho, not refreshed" v={stats.stale || 0} tone={stats.stale ? 'warn' : undefined} sub="re-read at the next sync" />
+        </div>
+
+        {failing.length > 0 && (
+          <div style={{ ...S.error, color: '#18191B' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center', marginBottom: 6 }}>
+              <b style={{ color: '#B91C1C' }}>{num(stats.failing)} document(s) could not be read from Zoho after 3 attempts</b>
+              {meta.rights.prepare && <button style={S.btn} onClick={retry}>Try these again</button>}
+            </div>
+            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+              <thead><tr><th style={S.th}>Document</th><th style={S.th}>Posted</th><th style={S.th}>Supplier</th><th style={S.th}>Zoho's answer</th></tr></thead>
+              <tbody>{failing.map(f => <tr key={f.id}><td style={S.td}>{KIND_ONE[f.kind] || f.kind} {f.url ? <a href={f.url} target="_blank" rel="noreferrer">{f.doc_no || 'open in Zoho'}</a> : f.doc_no}</td><td style={S.td}>{dt(f.date)}</td><td style={S.td}>{f.supplier}</td><td style={S.td}>{f.error}</td></tr>)}</tbody>
+            </table>
+            {stats.failing > failing.length && <div style={S.small}>The first {failing.length} are shown.</div>}
+            <div style={S.small}>These are counted as "Failed" above and are not matched until they are read. They are tried again every night, or now with the button.</div>
+          </div>
+        )}
+
+        {v && (
+          <div style={v.ok && v.counts_ok !== false ? S.ok : S.notice}>
+            <b>Checked against Zoho Books on {dtm(v.at)}</b> ({monthName(v.from)} to {monthName(v.to)}): {v.ok ? 'every total stored here equals the total Zoho lists for the same document.' : `${num(v.total.differ)} stored total(s) differ from what Zoho lists — they are re-read at the next sync.`}{v.counts_ok === false ? ' Zoho counts more documents than its list returned this time — the missing ones are looked for again at the next check.' : ''}{v.deleted ? ` ${num(v.deleted)} document(s) deleted in Zoho were removed.` : ''}
+            <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: 6, background: '#fff' }}>
+              <thead><tr><th style={S.th} /><th style={{ ...S.th, ...S.thR }}>Zoho's own count</th><th style={{ ...S.th, ...S.thR }}>Read from Zoho</th><th style={{ ...S.th, ...S.thR }}>Zoho total (net of TDS)</th><th style={{ ...S.th, ...S.thR }}>Kept out of matching</th><th style={{ ...S.th, ...S.thR }}>Waiting</th><th style={{ ...S.th, ...S.thR }}>With amounts</th><th style={{ ...S.th, ...S.thR }}>Total agrees</th><th style={{ ...S.th, ...S.thR }}>Differs</th></tr></thead>
+              <tbody>{Object.entries(v.kinds).map(([k, c]) => (
+                <tr key={k}><td style={S.td}>{KIND[k] || k}{c.not_kept ? <div style={S.small}>{num(c.not_kept)} without GST are not kept</div> : null}</td><td style={{ ...S.td, ...S.num }}>{c.zoho_count === null || c.zoho_count === undefined ? '—' : num(c.zoho_count)}</td><td style={{ ...S.td, ...S.num, ...(c.zoho_count !== null && c.zoho_count !== undefined && c.zoho_count !== c.zoho_rows ? { color: '#B45309', fontWeight: 700 } : {}) }}>{num(c.zoho_rows)}</td><td style={{ ...S.td, ...S.num }}>{inr(c.zoho_total_p)}</td><td style={{ ...S.td, ...S.num }}>{num(c.kept_out)}</td><td style={{ ...S.td, ...S.num }}>{num(c.waiting)}</td>
+                  <td style={{ ...S.td, ...S.num }}>{num(c.agree + c.differ)}</td><td style={{ ...S.td, ...S.num }}>{num(c.agree)}<div style={S.small}>{inr(c.agree_total_p)}</div></td><td style={{ ...S.td, ...S.num, ...(c.differ ? { color: '#B91C1C', fontWeight: 700 } : {}) }}>{num(c.differ)}</td></tr>))}</tbody>
+            </table>
+            <div style={S.small}>"Zoho's own count" is what Zoho itself says it holds for these months; "Read from Zoho" is the number of different documents its lists returned — the two must be equal. Zoho's list shows each document's total after TDS; it is compared with the total read from the document itself. Documents kept out of matching (no supplier GSTIN, void, not in INR…) have no amounts read and are compared by count only. This check runs every night and after a first sync.</div>
+          </div>
+        )}
+
         {st.scope && st.scope.gstins_total > 0 && (
           <div style={{ ...S.muted, marginBottom: 8 }}>
             Amounts are read from Zoho for <b>{st.scope.gstins_on.length} of {st.scope.gstins_total} GSTIN(s)</b> that are switched on{st.scope.gstins_on.length > 0 && st.scope.gstins_total > 1 ? ` (${st.scope.gstins_on.map(x => x.label || x.gstin).join(', ')})` : ''}{st.scope.from ? `, for documents from ${monthName(st.scope.from)}` : ''}.
-            {st.scope.gstins_total > 1 && <> Switching a GSTIN on or off is the "Active" box in Settings → Companies &amp; GSTINs: fewer GSTINs means a much faster sync, and a GSTIN you switch on is read at the next sync.</>}
+            {st.scope.gstins_total > 1 && <> Switching a GSTIN on or off is the "Active" box in Settings → Companies &amp; GSTINs; a GSTIN you switch on is read at the next sync.</>}
           </div>
         )}
-        {Object.keys(stats.excluded || {}).length > 0 && <div style={{ ...S.muted, marginBottom: 8 }}>Kept out of matching (with reasons): {Object.entries(stats.excluded).map(([k, n]) => `${REASON[k] || k}: ${n}`).join(' · ')}</div>}
+        {Object.keys(stats.excluded || {}).length > 0 && <div style={{ ...S.muted, marginBottom: 8 }}>Kept out of matching (with reasons): {Object.entries(stats.excluded).map(([k, n]) => `${REASON[k] || k}: ${num(n)}`).join(' · ')}</div>}
         <div style={{ ...S.muted, marginBottom: 10 }}>Credentials: {st.credentials}. Branch list read {st.branches_at ? dtm(st.branches_at) : '—'} ({st.branches} branches).{' '}
-          {meta.integrations.scheduler
-            ? <>Scheduled: {st.scheduled.enabled ? `${st.scheduled.times.join(', ')} IST` : 'off'}{st.scheduled.last && st.scheduled.last.last_tick_at ? ` · last scheduled run ${dtm(st.scheduled.last.last_tick_at)} (${st.scheduled.last.last_mode}: ${st.scheduled.last.last_result})` : ''}</>
-            : <>Automatic sync: {st.auto_last ? `last run ${dtm(st.auto_last.at)} (${st.auto_last.mode === 'recheck' ? 'with the check for deleted documents' : st.auto_last.quiet ? 'nothing new' : (RUN_TEXT[st.auto_last.status] || st.auto_last.status).toLowerCase()})` : 'not seen yet'} — a GitHub schedule checks Zoho about every 15 minutes (8:37 AM–11:22 PM IST) and for deleted documents at 1 AM{st.auto_last ? '' : '; it starts once the first sync is done and the repository secrets APP_URL and CRON_SECRET are set'}. The buttons below sync now.</>}</div>
+          {auto
+            ? <>Automatic sync: the dashboard's scheduler asks Zoho every {auto.every_min} minutes, round the clock, for bills, vendor credits and GST expenses that were added or edited since the last check — whatever their invoice dates — and at {auto.recheck_ist === '01:00' ? '1:00 AM' : auto.recheck_ist} compares everything with Zoho (deleted documents, totals). Nothing is downloaded again unless Zoho says it changed.{auto.last_seen_at ? ` Last call by ${auto.source || 'the scheduler'}.` : ' The first call appears here within 15 minutes of this version going online.'}</>
+            : <>Each scheduled run reads what changed in Zoho since the last one; the first run of each day also compares everything with Zoho.</>}</div>
 
         {never && (
           <div style={S.notice}>
             <b>Step 1 — bring in your Zoho Books documents.</b> Nothing has been read from Zoho Books yet.{' '}
             {meta.rights.prepare
-              ? <>Choose the months below (the latest three are filled in) and click <b>Start syncing this period</b>, then keep this page open until it says "Sync finished". <b>Sync changes now</b> becomes available after that — it only picks up changes made after a first sync. <b>Tip:</b> amounts are read only for GSTINs that are switched on (Settings → Companies &amp; GSTINs → Active), so switch off the ones you are not reconciling yet and the first sync is much faster.</>
+              ? <>Choose the months below and click <b>Start syncing this period</b>. Once it has started you can leave the page: the sync carries on by itself and this card shows the progress. <b>Sync changes now</b> becomes available after that — it only picks up changes made after a first sync.</>
               : <>Someone with the "Prepare" right needs to run the first sync.</>}
           </div>
         )}
         {meta.rights.prepare && (
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-            <button style={never ? S.btn : S.primary} disabled={busy || never} onClick={() => start('incremental')} title={never ? 'Available after the first sync — it reads only what changed in Zoho since then' : 'Reads only what changed in Zoho since the last sync, then fetches amounts for new and edited documents'}>Sync changes now</button>
-            <button style={never ? S.primary : S.btn} disabled={busy} onClick={() => setShowPeriod(v => !v)}>{never ? 'Start the first sync…' : 'Sync a period…'}</button>
-            <button style={S.ghost} disabled={busy} onClick={() => start('recheck')} title="Re-reads the whole period and removes documents Zoho no longer has (deleted ones never show up as changes)">Check for deleted documents</button>
+            <button style={never ? S.btn : S.primary} disabled={busy || never} onClick={() => start('incremental')} title={never ? 'Available after the first sync — it reads only what changed in Zoho since then' : 'Reads only what changed in Zoho since the last check, then fetches amounts for new and edited documents (and for anything still pending)'}>Sync changes now</button>
+            <button style={never ? S.primary : S.btn} disabled={busy} onClick={() => setShowPeriod(x => !x)}>{never ? 'Start the first sync…' : 'Sync a period…'}</button>
+            <button style={S.ghost} disabled={busy || never} onClick={() => start('recheck')} title="Lists every synced month again: removes documents deleted in Zoho (they never show up as changes), compares every stored total with Zoho's list, and retries documents that failed">Check against Zoho now</button>
             {busy && <button style={S.danger} onClick={stop}>Stop</button>}
             <button style={S.ghost} onClick={load}>Refresh</button>
           </div>
@@ -142,18 +221,20 @@ function SyncPanel({ meta, company, setCompany, companies, onChanged }) {
               <Field label="To month"><input type="month" style={S.input} value={period.to} onChange={e => setPeriod({ ...period, to: e.target.value })} /></Field>
               <button style={S.primary} disabled={busy || !period.from || !period.to} onClick={() => { start('period'); setShowPeriod(false); }}>Start syncing this period</button>
             </div>
-            <p style={{ ...S.muted, margin: '8px 0 0', lineHeight: 1.5 }}>Zoho's list has no GST amounts, so each bill that can be matched needs one extra call to read its detail. A long period therefore takes several days at the daily budget ({b.limit} calls){meta.integrations.scheduler ? ' — it keeps going on its own at each scheduled run' : ' — online, start the same period again on the next day (or when it pauses) and it carries on where it stopped'} and can be stopped and resumed safely. The latest three months are filled in so that the first sync finishes quickly; go further back afterwards, a few months at a time (the invoices of the last financial year are the most time-critical: see the deadline notice on Overview).</p>
+            <p style={{ ...S.muted, margin: '8px 0 0', lineHeight: 1.5 }}>Zoho's list has no GST amounts, so each document that can be matched needs one call of its own to read its detail: about {sp.rate_per_min || 90} documents a minute, so a month of some 600 documents takes about {Math.max(1, Math.round(600 / (sp.rate_per_min || 90)))} minutes and a financial year about an hour and a half. It can be stopped and continues where it stopped; nothing is read twice. Documents dated before the first month you sync are left alone until you sync a period that includes them (the invoices of the last financial year are the most time-critical: see the deadline notice on Overview).</p>
           </div>
         )}
         {(st.runs || []).length > 0 && (
           <details style={{ marginTop: 10 }}><summary style={{ cursor: 'pointer', fontSize: '0.8rem', fontWeight: 600 }}>Recent sync runs ({st.runs.length})</summary>
             <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: 6 }}>
-              <thead><tr><th style={S.th}>Started</th><th style={S.th}>Mode</th><th style={S.th}>By</th><th style={S.th}>Result</th><th style={{ ...S.th, ...S.thR }}>Amounts fetched</th><th style={{ ...S.th, ...S.thR }}>New / changed in list</th><th style={{ ...S.th, ...S.thR }}>Removed</th><th style={{ ...S.th, ...S.thR }}>Zoho calls</th><th style={S.th}>Note</th></tr></thead>
+              <thead><tr><th style={S.th}>Started</th><th style={S.th}>What</th><th style={S.th}>By</th><th style={S.th}>Result</th><th style={{ ...S.th, ...S.thR }}>New in Zoho</th><th style={{ ...S.th, ...S.thR }}>Edited in Zoho</th><th style={{ ...S.th, ...S.thR }}>Amounts fetched</th><th style={{ ...S.th, ...S.thR }}>Failed</th><th style={{ ...S.th, ...S.thR }}>Removed</th><th style={{ ...S.th, ...S.thR }}>Zoho calls</th><th style={S.th}>Note</th></tr></thead>
               <tbody>{st.runs.map(r => (
-                <tr key={r.run_id}><td style={S.td}>{dtm(r.started_at)}</td><td style={S.td}>{r.mode}{r.from ? ` ${r.from}…${r.to}` : ''}</td><td style={S.td}>{r.by}</td><td style={S.td}><Tag tone={RUN_TONE[r.status] || 'grey'}>{RUN_TEXT[r.status] || r.status}</Tag></td>
-                  <td style={{ ...S.td, ...S.num }}>{r.details.fetched}</td><td style={{ ...S.td, ...S.num }}>{Object.values(r.lists).reduce((a, l) => a + l.added + l.changed, 0)}</td><td style={{ ...S.td, ...S.num }}>{r.details.deleted}</td><td style={{ ...S.td, ...S.num }}>{r.calls}</td>
+                <tr key={r.run_id}><td style={S.td}>{dtm(r.started_at)}</td><td style={S.td}>{RUN_MODE[r.mode] || r.mode}{r.from ? ` ${r.from}…${r.to}` : ''}</td><td style={S.td}>{RUN_BY[r.by] || r.by}</td><td style={S.td}><Tag tone={RUN_TONE[r.status] || 'grey'}>{RUN_TEXT[r.status] || r.status}</Tag></td>
+                  <td style={{ ...S.td, ...S.num }}>{Object.values(r.lists).reduce((a, l) => a + l.added, 0)}</td><td style={{ ...S.td, ...S.num }}>{Object.values(r.lists).reduce((a, l) => a + l.changed, 0)}</td>
+                  <td style={{ ...S.td, ...S.num }}>{r.details.fetched}</td><td style={{ ...S.td, ...S.num, ...(r.details.failed ? { color: '#B91C1C' } : {}) }}>{r.details.failed}</td><td style={{ ...S.td, ...S.num }}>{r.details.deleted}</td><td style={{ ...S.td, ...S.num }}>{r.calls}</td>
                   <td style={{ ...S.td, ...S.muted }}>{r.error || r.message || (r.warnings || []).slice(0, 2).join(' · ')}</td></tr>))}</tbody>
-            </table></details>
+            </table>
+            <div style={S.small}>Automatic runs that found nothing new are not listed here (there is one every {auto ? auto.every_min : 15} minutes).</div></details>
         )}
       </div>
     </div>

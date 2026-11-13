@@ -123,6 +123,7 @@ const PUBLIC_API = new Set([
   'GET /api/cron/pocm',
   'GET /api/cron/pl',
   'GET /api/cron/gstr2b',
+  'GET /api/cron/gstr2b-recheck',
   // Mailbox sign-in returns here from Microsoft / Google; it checks its own signed state
   'GET /api/bill-booking/oauth/callback',
 ]);
@@ -16114,8 +16115,10 @@ gstr2b.init({
   },
 });
 app.use('/api/gstr2b', gstr2b);
-// Online, the GSTR-2B Zoho sync is driven by a GitHub schedule (.github/workflows/gstr2b-sync.yml): same Bearer CRON_SECRET as the other cron routes
+// Online, the GSTR-2B Zoho sync is driven by Vercel's scheduler (vercel.json: every 15 minutes, and a nightly re-check) and by the GitHub
+// job that follows each push (.github/workflows/gstr2b-sync.yml): same Bearer CRON_SECRET as the other cron routes
 app.get('/api/cron/gstr2b', cronAuth, gstr2b.cron);
+app.get('/api/cron/gstr2b-recheck', cronAuth, gstr2b.cronRecheck);
 
 // ─── Serve React build (must be after all API routes) ─────────────────────────
 

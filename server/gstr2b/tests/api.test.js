@@ -10,7 +10,7 @@ const assert = require('node:assert/strict');
 const http = require('http');
 const express = require('express');
 const XLSX = require('xlsx');
-const { tempDir, rm, gstin } = require('./helpers');
+const { tempDir, rm, gstin, FAST_SYNC } = require('./helpers');
 const F = require('./fakeZoho');
 const { stmt, inv, sup, item } = require('./fixtures');
 const store = require('../lib/store');
@@ -30,6 +30,7 @@ async function boot(tc) {
   const dir = tempDir();
   store.configure({ dir: dir + '/data', useDb: false });
   files.configure({ dir: dir + '/files', blob: null });
+  await store.write('config', { sync: FAST_SYNC });
   const router = require('../index');
   const zr = F.makeFake();
   Object.assign(zr, { listOrganizations: async () => [{ id: F.ORG, name: 'Test Org', gst_registered: true, currency: 'INR', default: true }], listBranches: async () => F.BRANCHES,
@@ -107,6 +108,9 @@ test('settings, schedule and sync limits are validated and audited; the audit ch
   assert.deepEqual((await t.call('PUT', '/config/schedule', { user: '6', body: { times: ['21:20', '13:20', '13:20'] } })).body.schedule.times, ['13:20', '21:20']);
   assert.equal((await t.call('PUT', '/config/schedule', { user: '6', body: { times: ['25:00'] } })).status, 400);
   assert.equal((await t.call('PUT', '/config/sync', { user: '6', body: { daily_budget: 100000 } })).status, 400);
+  assert.equal((await t.call('PUT', '/config/sync', { user: '6', body: { rate_per_min: 500 } })).status, 400, 'more calls a minute than Zoho allows one user is refused');
+  const saved = (await t.call('PUT', '/config/sync', { user: '6', body: { rate_per_min: 100, concurrency: 5, daily_budget: 40000, zoho_reserve: 20000, pace_ms: 6000 } })).body.sync;
+  assert.deepEqual(saved, { rate_per_min: 100, concurrency: 5, daily_budget: 40000, zoho_reserve: 20000, slice_seconds: 60 }, 'the old "pause between calls" is not a setting any more');
   const meta = (await t.call('GET', '/meta', { user: '6' })).body;
   assert.deepEqual(meta.schedule.times, ['13:20', '21:20']);
   const audit = (await t.call('GET', '/audit', { user: '6' })).body.entries;

@@ -114,9 +114,15 @@ async function applyScope(company, texts, scopeOf) {
   });
 }
 
-/** Coverage counts for the sync screen */
+const FAIL_LIMIT = 3;                                            // a document whose amounts could not be read this many times is set aside until it is retried
+
+/**
+ * Coverage counts for the sync screen, in one pass over the store. `pending` are the documents still waiting for their amounts;
+ * those among them that failed FAIL_LIMIT times are also counted in `failing` (with the first few listed, so the screen can show
+ * which documents and why) — they are not tried again until resetFailures().
+ */
 async function stats(company) {
-  const s = { total: 0, in_scope: 0, detailed: 0, pending: 0, stale: 0, excluded: {}, months: {}, by_kind: {} };
+  const s = { total: 0, in_scope: 0, detailed: 0, pending: 0, stale: 0, failing: 0, failing_docs: [], excluded: {}, months: {}, by_kind: {} };
   for (const { ym, key } of await shardsOf(company)) {
     for (const d of await store.read(key, [])) {
       s.total++;
@@ -125,10 +131,34 @@ async function stats(company) {
       m.docs++;
       if (d.excluded) { s.excluded[d.excluded] = (s.excluded[d.excluded] || 0) + 1; continue; }
       s.in_scope++; m.in_scope++;
-      if (d.detail_pending) { s.pending++; m.pending++; if (d.stale) s.stale++; } else s.detailed++;
+      if (d.detail_pending) {
+        s.pending++; m.pending++; if (d.stale) s.stale++;
+        if ((d.detail_fail || 0) >= FAIL_LIMIT) {
+          s.failing++;
+          if (s.failing_docs.length < 25) s.failing_docs.push({ id: d.id, kind: d.kind, doc_no: d.doc_no || '', date: d.posting_date || '', supplier: (d.supplier && d.supplier.name) || '', attempts: d.detail_fail, error: d.detail_error || '', url: d.zoho_url || '' });
+        }
+      } else s.detailed++;
     }
   }
   return s;
 }
 
-module.exports = { upsertMany, all, get, pendingDetails, applyScope, stats, shardsOf, monthOf };
+/**
+ * Give the documents that were set aside after repeated failures ONE more attempt (the nightly re-check and the "Try these again" button).
+ * One, not a fresh three: a document that still cannot be read is back among the failed ones in the same run, so it never passes for
+ * merely "pending" in between. Returns how many.
+ */
+async function resetFailures(company) {
+  return store.withLock(`booksw_${company}`, async () => {
+    let n = 0;
+    for (const { key } of await shardsOf(company)) {
+      const docs = await store.read(key, []);
+      let dirty = false;
+      for (const d of docs) if (d.detail_pending && !d.excluded && (d.detail_fail || 0) >= FAIL_LIMIT) { d.detail_fail = FAIL_LIMIT - 1; dirty = true; n++; }
+      if (dirty) await store.write(key, docs);
+    }
+    return n;
+  });
+}
+
+module.exports = { upsertMany, all, get, pendingDetails, applyScope, stats, resetFailures, shardsOf, monthOf, FAIL_LIMIT };

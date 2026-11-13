@@ -1,9 +1,16 @@
-# GSTR-2B Reco: automatic Zoho Books sync for the online dashboard (the office PC syncs by itself; Vercel has no timers).
+# GSTR-2B Reco: the job that carries a long Zoho Books sync through in the background, for the online dashboard.
 #
-# Every 15 minutes in the working day this asks the dashboard to read what changed in Zoho Books (new, edited and voided bills,
-# vendor credits and GST expenses) and to fetch the GST amounts of whatever is still waiting; once a night it also checks for
-# documents deleted in Zoho. Nothing is written to Zoho. Each call is one "step" of up to 3 minutes; while a first fill is in
-# progress a scheduled run does up to 3 steps, and "Run workflow" (drain) keeps going until the work is done or the day's budget is used.
+# The regular sync — every 15 minutes, round the clock — is run by Vercel's own scheduler (vercel.json → /api/cron/gstr2b).
+# GitHub's "schedule" trigger is NOT relied on for it: on this repository it did not start the 15-minute workflow even once in
+# 4.5 hours (12 Nov 2026) and starts the older scheduled-sync only a few times a day, hours late. What GitHub does reliably is
+# start a job the moment something is pushed, or "Run workflow" is pressed. So this job
+#   - runs after every push to main (the push that puts a new version online): it waits until Vercel reports that version as
+#     live, then keeps asking the dashboard for the next step while there is more to do. That is how a first sync of several
+#     thousand documents finishes without anyone keeping a page open. If Vercel could NOT put the version online, the job fails
+#     with that message instead of syncing with the old version;
+#   - can be started by hand for the same purpose (Actions → GSTR-2B Zoho sync → Run workflow);
+#   - and once an hour asks GitHub's schedule for one extra call, only as a second line behind Vercel's scheduler.
+# Nothing is written to Zoho. Each call is one step of up to 3 minutes.
 #
 # Uses the same two repository secrets as scheduled-sync.yml (Settings → Secrets and variables → Actions):
 #   APP_URL      the dashboard's address
@@ -13,18 +20,15 @@
 name: GSTR-2B Zoho sync
 
 on:
+  push:
+    branches: [main]
+  workflow_dispatch:                   # "Run workflow": carry on until the work is done or paused for the day
   schedule:
-    - cron: '7,22,37,52 3-17 * * *'    # every 15 min, 8:37 AM – 11:22 PM IST (minutes chosen to miss the dashboard's own :00 / :30 syncs)
-    - cron: '30 19 * * *'              # 1:00 AM IST — the same, plus the check for documents deleted in Zoho
-  workflow_dispatch:                   # "Run workflow": finish the first fill without keeping a page open
-    inputs:
-      drain:
-        description: 'Keep going until the work is done or paused (first fill: up to about 2 hours)'
-        type: boolean
-        default: true
+    - cron: '14 * * * *'               # a second line only — see above (a minute Vercel's scheduler does not use)
 
 permissions:
   contents: read
+  statuses: read                       # to read Vercel's "deployed" mark on the pushed commit
 
 concurrency:
   group: gstr2b-sync
@@ -33,27 +37,58 @@ concurrency:
 jobs:
   call:
     runs-on: ubuntu-latest
-    timeout-minutes: 170
+    timeout-minutes: 300
     env:
       APP_URL: ${{ secrets.APP_URL }}
       CRON_SECRET: ${{ secrets.CRON_SECRET }}
-      SCHEDULE: ${{ github.event.schedule }}
-      DRAIN: ${{ github.event.inputs.drain }}
+      EVENT: ${{ github.event_name }}
+      GITHUB_TOKEN: ${{ github.token }}
     steps:
       - name: Call the dashboard
         if: env.APP_URL != ''
         run: |
           set -u
-          mode=incremental
-          [ "$SCHEDULE" = "30 19 * * *" ] && mode=recheck
-          max=3
-          [ "$DRAIN" = "true" ] && max=45
+          # Vercel marks every commit it deploys on GitHub: success | failure | error | pending (none = no mark yet)
+          vercel_state() {
+            curl -sS --max-time 20 -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" "${GITHUB_API_URL:-https://api.github.com}/repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/status" 2>/dev/null \
+              | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const v=(JSON.parse(s).statuses||[]).find(x=>/vercel/i.test(x.context));console.log(v?v.state+"|"+(v.description||""):"none|")}catch(e){console.log("none|")}})'
+          }
+          # after a push the new version needs a few minutes to go live: wait for Vercel's word, so that the steps below run the new code
+          if [ "$EVENT" = "push" ]; then
+            if [ -n "${GITHUB_TOKEN:-}" ]; then
+              state=none
+              for t in $(seq 1 "${DEPLOY_TRIES:-40}"); do
+                s=$(vercel_state); state=${s%%|*}
+                if [ "$state" = "success" ]; then break; fi
+                if [ "$state" = "failure" ] || [ "$state" = "error" ]; then
+                  echo "::error::Vercel could not put this version online (${s#*|}). The dashboard still runs the previous version, so nothing was synced by this run — open the commit's Vercel status for the reason."
+                  exit 1
+                fi
+                sleep "${DEPLOY_POLL:-15}"
+              done
+              if [ "$state" != "success" ]; then echo "::warning::No word from Vercel about this version after waiting — carrying on with whatever version is online"; fi
+              sleep "${DEPLOY_SETTLE:-20}"
+            else
+              sleep "${DEPLOY_WAIT:-150}"
+            fi
+          fi
+          max="${MAX_STEPS:-90}"                                     # a push or "Run workflow" keeps going while there is more to do (90 steps ≈ 4.5 hours)
+          if [ "$EVENT" = "schedule" ]; then max=1; fi
+          failures=0
           for i in $(seq 1 "$max"); do
-            code=$(curl -sS --max-time 320 -o response.json -w '%{http_code}' -H "Authorization: Bearer $CRON_SECRET" "${APP_URL%/}/api/cron/gstr2b?mode=$mode" || echo 000)
-            out=$(cat response.json 2>/dev/null || true)
+            code=$(curl -sS --max-time 320 -o response.json -w '%{http_code}' -H "Authorization: Bearer $CRON_SECRET" "${APP_URL%/}/api/cron/gstr2b?src=github") || code=000
+            out=$(head -c 600 response.json 2>/dev/null || true)
             if [ "$code" = "401" ]; then echo "::error::The dashboard refused the CRON_SECRET (401): it must be the same value as CRON_SECRET in the Vercel project"; exit 1; fi
-            if [ "$code" != "200" ]; then echo "::warning::step $i: HTTP $code $out"; break; fi
+            if [ "$code" != "200" ]; then
+              # a busy moment: try again a few times, waiting longer each time, before giving up
+              failures=$((failures + 1))
+              echo "::warning::step $i: HTTP $code $out"
+              if [ "$failures" -ge 4 ]; then break; fi
+              sleep $(( ${RETRY_PAUSE:-30} * failures ))
+              continue
+            fi
+            failures=0
             echo "step $i: $out"
             echo "$out" | grep -q '"more":true' || break
-            sleep "${STEP_PAUSE:-5}"
+            sleep "${STEP_PAUSE:-3}"
           done

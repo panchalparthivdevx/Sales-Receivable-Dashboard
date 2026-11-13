@@ -16,12 +16,31 @@ const DEFAULT_CONFIG = {
   // Hours as requested (1, 3, 6, 9 PM IST) with a 20-minute offset: the dashboard's main Zoho sync runs on the hour and
   // the Neddle MSME sync at :10, so this module never competes with them for Zoho's per-minute limit.
   schedule: { enabled: true, times: ['13:20', '15:20', '18:20', '21:20'] },
-  // slice_seconds only matters online: a Vercel request may run 300 s, and after the slice the run still saves and reconciles (a step is capped at 180 s)
-  sync: { pace_ms: 1200, daily_budget: 2500, slice_seconds: 180 },
+  // Zoho calls: how fast, how many at once and how many a day. The numbers are set against what Zoho itself reports for the organisation
+  // (response headers, checked live on 12 Nov 2026 for DevX: 90,000 calls a day shared by every integration, 150 a minute and 20 at once
+  // per Zoho user) — rate_per_min leaves a third of the minute allowance to the dashboard's other modules, which use the same Zoho user.
+  //   rate_per_min   calls a minute this module may make ("more" is faster — the earlier "pause between calls" was easy to set the wrong way)
+  //   concurrency    calls in flight at once (the rate, not this, decides the speed; it only stops slow answers from holding the queue)
+  //   daily_budget   this module's own calls per India-time day
+  //   zoho_reserve   the sync also stops when Zoho says the WHOLE organisation has this few calls left today (kept for the other integrations)
+  //   slice_seconds  online only: a Vercel request may run 300 s, and after the step the run still saves and reconciles (a step is capped at 180 s)
+  sync: { rate_per_min: 90, concurrency: 4, daily_budget: 30000, zoho_reserve: 15000, slice_seconds: 180 },
   access: {},                      // userId → { companies: [id] | null, gstins: [gstin] | null }  (null / missing = everything the right allows)
 };
 
 const PERIOD_BASES = { record: 'Reconciliation record (GSTR-2B period, else Books month)', books: 'Books accounting month', portal: 'GSTR-2B return period', invoice: 'Invoice date month' };
+
+// When the online copy is called by Vercel's scheduler (vercel.json "crons" — a test keeps the two in step). Minutes past each hour, the same
+// in UTC and in India time (IST is UTC + 5:30 and the four minutes are 15 apart); the night run also looks for documents deleted in Zoho.
+const ONLINE_SCHEDULE = { minutes: [7, 22, 37, 52], every_min: 15, recheck_utc: '19:30', recheck_ist: '01:00' };
+
+/** Sync limits as stored → as used. Limits saved by the first version ("pause between calls" and a budget sized for Zoho's old 10,000-a-day plan) are dropped. */
+function syncLimits(stored) {
+  const s = stored || {};
+  if (s.rate_per_min === undefined) return { ...DEFAULT_CONFIG.sync, ...(s.slice_seconds ? { slice_seconds: s.slice_seconds } : {}) };
+  const { pace_ms, ...rest } = s;                                   // eslint-disable-line no-unused-vars
+  return { ...DEFAULT_CONFIG.sync, ...rest };
+}
 
 function merge(raw) {
   const c = raw || {};
@@ -29,7 +48,7 @@ function merge(raw) {
     ...DEFAULT_CONFIG, ...c,
     settings: { ...DEFAULT_CONFIG.settings, ...(c.settings || {}), tol_p: { ...DEFAULT_CONFIG.settings.tol_p, ...((c.settings || {}).tol_p || {}) } },
     schedule: { ...DEFAULT_CONFIG.schedule, ...(c.schedule || {}) },
-    sync: { ...DEFAULT_CONFIG.sync, ...(c.sync || {}) },
+    sync: syncLimits(c.sync),
     companies: c.companies || [],
     access: c.access || {},
   };
@@ -115,11 +134,15 @@ function validateSyncLimits(input, current) {
   const s = { ...current };
   const num = (v, lo, hi, name) => { const n = Math.round(Number(v)); if (!Number.isFinite(n) || n < lo || n > hi) throw new Error(`${name} must be between ${lo} and ${hi}`); return n; };
   try {
-    if (input.pace_ms !== undefined) s.pace_ms = num(input.pace_ms, 600, 10000, 'Pause between Zoho calls (ms)');
-    if (input.daily_budget !== undefined) s.daily_budget = num(input.daily_budget, 100, 9000, 'Zoho calls per day for this module');
-    if (input.slice_seconds !== undefined) s.slice_seconds = num(input.slice_seconds, 30, 250, 'Seconds per sync slice');
+    // Upper limits follow what Zoho allows one user (150 calls a minute, 20 at once, 90,000 a day for the whole organisation on DevX's plan);
+    // a smaller plan simply answers "slow down" and the sync waits, so a high number here can never get the organisation blocked.
+    if (input.rate_per_min !== undefined) s.rate_per_min = num(input.rate_per_min, 10, 120, 'Zoho calls per minute');
+    if (input.concurrency !== undefined) s.concurrency = num(input.concurrency, 1, 6, 'Calls at the same time');
+    if (input.daily_budget !== undefined) s.daily_budget = num(input.daily_budget, 100, 80000, 'Zoho calls per day for this module');
+    if (input.zoho_reserve !== undefined) s.zoho_reserve = num(input.zoho_reserve, 0, 60000, 'Calls kept free for the other integrations');
+    if (input.slice_seconds !== undefined) s.slice_seconds = num(input.slice_seconds, 30, 250, 'Seconds per sync step');
   } catch (e) { return err(e.message); }
-  return { sync: s };
+  return { sync: syncLimits({ ...s, rate_per_min: s.rate_per_min ?? DEFAULT_CONFIG.sync.rate_per_min }) };
 }
 
 /** Which companies / GSTINs a user may see: null = unrestricted. */
@@ -148,4 +171,4 @@ function validateAccess(input, users) {
   return { access: out };
 }
 
-module.exports = { DEFAULT_CONFIG, PERIOD_BASES, merge, validateCompanies, validateSettings, validateSchedule, validateSyncLimits, validateAccess, accessOf, canSeeCompany, canSeeGstin, visibleRegistrations };
+module.exports = { DEFAULT_CONFIG, PERIOD_BASES, ONLINE_SCHEDULE, syncLimits, merge, validateCompanies, validateSettings, validateSchedule, validateSyncLimits, validateAccess, accessOf, canSeeCompany, canSeeGstin, visibleRegistrations };

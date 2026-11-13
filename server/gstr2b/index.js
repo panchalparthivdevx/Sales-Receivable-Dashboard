@@ -164,7 +164,7 @@ router.get('/meta', gate(), wrap(async (req, res) => {
   res.json({
     rights: { prepare: r.prepare, review: r.review, approve: r.approve, config: r.config, admin: r.admin },
     me: { id: r.user.id, username: r.user.username, name: r.user.name },
-    companies, settings: cfg.settings, schedule: { ...cfg.schedule, last: sched }, sync: cfg.sync, period_bases: CFG.PERIOD_BASES,
+    companies, settings: cfg.settings, schedule: { ...cfg.schedule, last: sched }, sync: cfg.sync, online_schedule: CFG.ONLINE_SCHEDULE, period_bases: CFG.PERIOD_BASES,
     statuses: M.STATUS, flags: EX.FLAG_TEXT, workflow: RV.WORKFLOW, definitions: D.DEFINITIONS, rules: RULES.RULES, coverage_matrix: RC.COVERAGE_MATRIX,
     integrations: { zoho: need().zr.identity(), zoho_dedicated: need().zr.dedicated(), read_only: true, vercel: IS_VERCEL, scheduler: !IS_VERCEL, max_upload_mb: IS_VERCEL ? 4 : 40 },
     phases: { implemented: ['Zoho read-only sync', 'GSTR-2B JSON / Excel import with versions', 'Matching engine and review', 'Dashboards, vendor summary, bridge', 'Excel export', 'Audit trail'],
@@ -262,33 +262,84 @@ router.put('/config/access', gate('config'), wrap(async (req, res) => {
 }));
 
 // ── Zoho sync ─────────────────────────────────────────────────────────────────
+/**
+ * The online scheduler as it is actually observed: every call the scheduler makes leaves a small record (`auto`), so the page shows when it
+ * last called in, when the next call is due, and says so when calls have stopped coming — a schedule that is only written down proves nothing.
+ */
+function schedulerSeen(beat, now = Date.now()) {
+  const S = CFG.ONLINE_SCHEDULE;
+  const next = new Date(now); next.setUTCSeconds(0, 0);
+  const minute = S.minutes.find(m => m > new Date(now).getUTCMinutes());
+  if (minute === undefined) { next.setUTCHours(next.getUTCHours() + 1); next.setUTCMinutes(S.minutes[0]); } else next.setUTCMinutes(minute);
+  const last = beat && beat.last_seen_at ? Date.parse(beat.last_seen_at) : null;
+  return { every_min: S.every_min, minutes: S.minutes, recheck_ist: S.recheck_ist, last_seen_at: last === null ? null : beat.last_seen_at, source: (beat && beat.source) || null, last_mode: (beat && beat.mode) || null,
+    results: (beat && beat.results) || null, next_expected_at: next.toISOString(), overdue: last === null ? null : now - last > (2 * S.every_min + 5) * 60000 };
+}
+router.schedulerSeen = schedulerSeen;
+
 router.get('/sync/status', gate(), wrap(async (req, res) => {
   const co = companyOf(req, String(req.query.company || ''));
   if (co.demo) return res.json({ company: co.id, demo: true, running: false, stats: { total: 0 } });
   const st = await need().sync.status(co.id);
   const sched = await store.read('sched', {});
-  res.json({ ...st, scheduled: { enabled: req.cfg.schedule.enabled && !IS_VERCEL, times: req.cfg.schedule.times, last: sched } });
+  const beat = await store.read('auto', null);
+  res.json({ ...st, scheduled: { enabled: req.cfg.schedule.enabled && !IS_VERCEL, times: req.cfg.schedule.times, last: sched }, auto: IS_VERCEL || beat ? schedulerSeen(beat) : null });
 }));
 
+/** Reconcile after a sync changed documents; the sync's "reconciliation owed" mark is cleared only when it ran (so a cut-off attempt is made again) */
 async function reconAfter(company, by) {
-  try { await need().recon.run({ company, by, mode: 'dirty' }); } catch (e) { if (!/No active GSTIN/.test(e.message)) console.error(`[gstr2b] reconciliation after sync failed (${company}): ${e.message}`); }
+  try { await need().recon.run({ company, by, mode: 'dirty' }); await need().sync.reconciled(company); }
+  catch (e) {
+    if (/No active GSTIN/.test(e.message)) { await need().sync.reconciled(company).catch(() => {}); return; }
+    console.error(`[gstr2b] reconciliation after sync failed (${company}): ${e.message}`);
+  }
 }
+// Online a request may run 5 minutes, so a step is at most 3 minutes of Zoho calls and leaves time to save (and, in the last step, to reconcile)
+const stepMs = cfg => (IS_VERCEL ? Math.min(cfg.sync.slice_seconds, 180) * 1000 : 50 * 60 * 1000);
 
 router.post('/sync/run', gate('prepare'), wrap(async (req, res) => {
   const co = companyOf(req, String(req.body?.company || ''));
   if (co.demo) return bad(res, 400, 'The demo company has no Zoho organisation to sync');
   const mode = ['period', 'incremental', 'recheck'].includes(req.body?.mode) ? req.body.mode : 'incremental';
   if (need().sync.isRunning(co.id)) return res.json({ busy: true, message: `A sync of ${co.name} is already running` });
-  // Online a request may run 5 minutes, so a step is at most 3 minutes of Zoho calls and leaves time to save (and, in the last step, to reconcile)
-  const run = need().sync.run({ company: co.id, mode, from: req.body?.from, to: req.body?.to, by: byName(req), maxMs: IS_VERCEL ? Math.min(req.cfg.sync.slice_seconds, 180) * 1000 : 50 * 60 * 1000 })
+  const run = need().sync.run({ company: co.id, mode, from: req.body?.from, to: req.body?.to, by: byName(req), maxMs: stepMs(req.cfg) })
     .then(async r => { if (!r.busy && !(IS_VERCEL && r.status === 'partial')) await reconAfter(co.id, byName(req)); return r; })       // online a partial step is followed by another: reconcile once, at the end
     .catch(e => console.error(`[gstr2b] sync ${co.id}: ${e.message}`));
-  if (IS_VERCEL) {                                                                // one slice per request on Vercel
+  if (IS_VERCEL) {                                                                // one step per request on Vercel
     const r = await background(run);
     if (r && r.busy) return res.json({ busy: true, message: r.message });         // another instance holds the sync lease
     return res.json({ started: true, summary: r || null });
   }
   res.json({ started: true });
+}));
+
+/**
+ * "Keep it fresh while someone is looking": the module calls this when it is opened and every few minutes after. If a first sync has been
+ * started and there is work — an unfinished listing, documents waiting for amounts, or no change check in the last 10 minutes — one step
+ * runs (the same step the scheduler runs). So the data catches up whenever the module is in use, even if every scheduler were down.
+ * Any module user may trigger it: it only reads from Zoho, within the same budget, and is refused while another sync is running.
+ */
+router.post('/sync/kick', gate(), wrap(async (req, res) => {
+  const co = companyOf(req, String(req.body?.company || ''));
+  if (co.demo || !co.active || !co.registrations.some(r => r.active !== false)) return res.json({ ran: false, reason: 'not_set_up' });
+  const sync = need().sync;
+  const d = await sync.due(co.id, { minAgeMs: 10 * 60000 });
+  if (!d.run) return res.json({ ran: false, reason: d.reason });
+  const run = sync.run({ company: co.id, mode: d.mode, from: d.from, to: d.to, by: 'auto', auto: true, maxMs: stepMs(req.cfg) })
+    .then(async r => { if (!r.busy && r.status !== 'partial' && r.recon_due) await reconAfter(co.id, 'auto'); return r; })
+    .catch(e => { console.error(`[gstr2b] automatic sync ${co.id}: ${e.message}`); return null; });
+  if (!IS_VERCEL) return res.json({ ran: true, background: true, why: d.why });   // the office PC carries on by itself
+  const r = await background(run);
+  if (!r || r.busy) return res.json({ ran: false, reason: r ? 'running' : 'failed' });
+  res.json({ ran: true, why: d.why, status: r.status, more: r.status === 'partial' && r.progress > 0, fetched: r.details.fetched, message: r.message || r.error || '' });
+}));
+
+router.post('/sync/retry-failed', gate('prepare'), wrap(async (req, res) => {
+  const co = companyOf(req, String(req.body?.company || ''));
+  if (co.demo) return bad(res, 400, 'The demo company has no Zoho organisation to sync');
+  const n = await need().sync.retryFailed(co.id);
+  await AUD.log({ by: byName(req), action: 'sync.retry_failed', company: co.id, detail: `${n} document(s) that could not be read will be tried again` });
+  res.json({ reset: n });
 }));
 
 router.post('/sync/cancel', gate('prepare'), wrap(async (req, res) => {
@@ -580,36 +631,53 @@ router.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
   bad(res, 500, `Something went wrong: ${err.message}`);
 });
 
-// ── Scheduled sync online: a GitHub schedule calls GET /api/cron/gstr2b (wired in server/index.js, Bearer CRON_SECRET) ──────────
+// ── Scheduled sync online: GET /api/cron/gstr2b (wired in server/index.js, Bearer CRON_SECRET) ─────────────────────────────────
+// Called by Vercel's scheduler every 15 minutes round the clock (vercel.json "crons"; /api/cron/gstr2b-recheck once a night), and by the
+// GitHub job that follows every push (.github/workflows/gstr2b-sync.yml), which keeps asking while there is more to do.
 /**
- * One scheduled step for every set-up company that has had its first sync: the change feed ("incremental": new, edited and voided
- * documents, then the amounts of whatever is waiting) or, at night, a "recheck" that also finds documents deleted in Zoho. A step ends
- * at its time slice, the daily budget or the end of the work; `more` tells the caller (the GitHub job) that another step would continue,
- * which is how a first fill proceeds without anyone keeping a page open. Nothing is written to Zoho.
+ * One scheduled step for every set-up company that has had its first sync started:
+ *   - an unfinished listing (a first sync or a re-check that was cut short) is continued first;
+ *   - otherwise the change feed ("incremental": new, edited and voided documents since the last checkpoint, whatever their invoice dates),
+ *     then the amounts of whatever is waiting — or, at night, a "recheck" that also finds documents deleted in Zoho and compares every
+ *     stored total with Zoho's list. The first tick after a first sync completes is such a check too.
+ * A step ends at its time slice, a daily limit or the end of the work; `more` tells a caller that can ask again at once (the GitHub job)
+ * that another step would get further, which is how a first fill proceeds without anyone keeping a page open. Every call leaves a mark
+ * (`auto`), also when a sync was already running, so the page can show that the scheduler is alive. Nothing is written to Zoho.
  */
-router.cronTick = async ({ mode = 'incremental', maxMs = 170000 } = {}) => {
+router.cronTick = async ({ mode = 'incremental', maxMs = 170000, source = 'a scheduler call' } = {}) => {
+  const seen = new Date().toISOString();
+  const mark = extra => store.write('auto', { last_seen_at: seen, source, mode, ...extra }).catch(e => console.error('[gstr2b] could not record the scheduler call:', e.message));
+  await mark({});
   const cfg = await cfgNow();
   const companies = cfg.companies.filter(c => c.active && !c.demo && c.registrations.some(r => r.active !== false));
   const results = [];
+  const sync = need().sync;
   for (const co of companies) {
     try {
-      const sync = need().sync;
-      if (sync.isRunning(co.id)) { results.push({ company: co.id, status: 'busy' }); continue; }
-      const st = await sync.loadState(co.id);
-      if (!Object.keys(st.hwm || {}).length) { results.push({ company: co.id, status: 'needs_first_sync' }); continue; }      // the first sync needs the months chosen on the page
-      const r = await sync.run({ company: co.id, mode, by: 'schedule', maxMs: Math.floor(maxMs / companies.length) });                 // the companies share one function call
+      const d = await sync.due(co.id);
+      if (!d.run) { results.push({ company: co.id, status: d.reason === 'running' ? 'busy' : d.reason }); continue; }     // a sync is running, or the first sync has not been started on the page yet
+      const listing = d.mode !== 'incremental';
+      const m = listing ? d.mode : (d.verify_due ? 'recheck' : mode);
+      const r = await sync.run({ company: co.id, mode: m, ...(listing ? { from: d.from, to: d.to } : {}), by: 'schedule', auto: true, maxMs: Math.floor(maxMs / companies.length) });   // the companies share one function call
       if (r.busy) { results.push({ company: co.id, status: 'busy' }); continue; }
-      if (r.status !== 'partial' && !r.quiet) await reconAfter(co.id, 'schedule');                  // reconcile when something changed and the work is done (a partial step is followed by another)
-      results.push({ company: co.id, status: r.status, mode, fetched: r.details.fetched, queued: r.details.queued, calls: r.calls, ...(r.message ? { message: r.message } : {}), ...(r.error ? { error: r.error } : {}) });
+      if (r.status !== 'partial' && r.recon_due) await reconAfter(co.id, 'schedule');               // reconcile when documents changed and the work is done (a partial step is followed by another)
+      results.push({ company: co.id, status: r.status, mode: m, fetched: r.details.fetched, queued: r.details.queued, changed: Object.values(r.lists).reduce((a, l) => a + l.added + l.changed, 0), calls: r.calls, progress: r.progress,
+        ...(r.message ? { message: r.message } : {}), ...(r.error ? { error: r.error } : {}) });
     } catch (e) { results.push({ company: co.id, status: 'failed', error: e.message }); console.error(`[gstr2b] scheduled ${mode} sync of ${co.id}: ${e.message}`); }
   }
-  return { ok: true, mode, more: results.some(x => x.status === 'partial'), results };
+  // "more" = asking again at once would get further (a step that was cut short AND got somewhere — never a step that is stuck or paused for the day)
+  const more = results.some(x => x.status === 'partial' && x.progress > 0);
+  await mark({ more, results: results.map(x => ({ company: x.company, status: x.status, mode: x.mode || null, fetched: x.fetched || 0, changed: x.changed || 0 })) });
+  return { ok: true, mode, more, results };
 };
-router.cron = async (req, res) => {
-  const mode = req.query && req.query.mode === 'recheck' ? 'recheck' : 'incremental';
-  try { res.json(await router.cronTick({ mode })); }
+const cronSource = req => (req.query && req.query.src === 'github' ? 'the GitHub job' : /vercel-cron/i.test(String((req.headers || {})['user-agent'] || '')) ? 'Vercel\'s scheduler' : 'a scheduler call');
+const cronHandler = fixed => async (req, res) => {
+  const mode = fixed || (req.query && req.query.mode === 'recheck' ? 'recheck' : 'incremental');
+  try { res.json(await router.cronTick({ mode, source: cronSource(req) })); }
   catch (e) { console.error('[gstr2b] cron:', e.message); res.status(500).json({ ok: false, error: e.message }); }
 };
+router.cron = cronHandler(null);
+router.cronRecheck = cronHandler('recheck');
 
 // ── Scheduled sync on the office PC (hours from Settings, India time) ─────────
 let timer = null;
@@ -630,7 +698,7 @@ router.startScheduler = () => {
       const mode = sched.last_recheck_day === day ? 'incremental' : 'recheck';          // the first run of each day also checks for deletions
       const results = [];
       for (const co of cfg.companies.filter(c => c.active && !c.demo && c.registrations.length)) {
-        const r = await need().sync.run({ company: co.id, mode, by: 'schedule', maxMs: 50 * 60 * 1000 });
+        const r = await need().sync.run({ company: co.id, mode, by: 'schedule', auto: true, maxMs: 50 * 60 * 1000 });
         results.push(`${co.short || co.id}: ${r.status || (r.busy ? 'busy' : '?')}`);
         if (!r.busy) await reconAfter(co.id, 'schedule');
       }

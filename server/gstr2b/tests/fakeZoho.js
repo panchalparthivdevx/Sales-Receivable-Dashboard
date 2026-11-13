@@ -92,15 +92,34 @@ function makeFake({ pageSize = 3 } = {}) {
   const log = [];
   const state = { branches: BRANCHES, failDetail: new Set() };
   const gone = id => Object.assign(new Error('The bill does not exist.'), { gone: true, response: { status: 404, data: { code: 1002 } } });
+  const COLL = { '/bills': 'bills', '/vendorcredits': 'credits', '/expenses': 'expenses' };
+  const rowId = r => r.bill_id || r.vendor_credit_id || r.expense_id;
+  /** The rows a list filter selects (date range, "modified since") */
+  const filtered = (path, params) => {
+    let rows = [...store[COLL[path]].values()].map(e => e.row);
+    if (params.date_start) rows = rows.filter(r => r.date >= params.date_start);
+    if (params.date_end) rows = rows.filter(r => r.date <= params.date_end);
+    if (params.last_modified_time) { const since = lmtOf(params.last_modified_time); rows = rows.filter(r => lmtOf(r.last_modified_time) >= since); }       // only documents modified since
+    return rows;
+  };
   const zr = {
-    calls: { total: 0 }, log, store, state, queries: [],
+    calls: { total: 0 }, log, store, state, queries: [], counts: [], inFlight: 0, maxInFlight: 0,
     identity: () => 'fake credentials', errText: e => e.message, isGone: e => !!(e && e.gone), dedicated: () => false,
+    usage: () => state.usage || null,                                      // what Zoho's allowance headers said last (tests set state.usage)
     async listBranches() { zr.calls.total++; log.push('GET /branches'); return state.branches; },
     async get(org, path, params = {}, opts = {}) {
       if (opts.before) await opts.before();
       zr.calls.total++; log.push(`GET ${path}`);
+      if (COLL[path]) {
+        // a list asked for its count alone (response_option=2) — answered as live Zoho answers it (13 Nov 2026): { page_context: { total } }
+        if (Number(params.response_option) !== 2) throw new Error(`fake: GET ${path} without response_option=2 — rows are read with list()`);
+        zr.counts.push({ path, params: { ...params } });
+        return state.noCount ? { code: 0, message: 'success' } : { code: 0, message: 'success', page_context: { total: filtered(path, params).length } };
+      }
       const m = path.match(/^\/(bills|vendorcredits|expenses)\/(.+)$/);
       if (!m) throw new Error(`fake: unsupported GET ${path}`);
+      if (state.detailMs) { zr.inFlight++; zr.maxInFlight = Math.max(zr.maxInFlight, zr.inFlight); await new Promise(r => setTimeout(r, state.detailMs)); zr.inFlight--; }   // an answer that takes a moment
+      if (state.throttleOnce && opts.onThrottle) { const secs = state.throttleOnce; state.throttleOnce = 0; opts.onThrottle(secs); }                             // Zoho said "too many requests" once (the real client waits and retries)
       const coll = store[{ bills: 'bills', vendorcredits: 'credits', expenses: 'expenses' }[m[1]]];
       const e = coll.get(m[2]);
       if (!e) throw gone(m[2]);
@@ -108,20 +127,24 @@ function makeFake({ pageSize = 3 } = {}) {
       return { [{ bills: 'bill', vendorcredits: 'vendor_credit', expenses: 'expense' }[m[1]]]: e.detail };
     },
     async list(org, path, key, params = {}, opts = {}) {
-      const coll = store[{ '/bills': 'bills', '/vendorcredits': 'credits', '/expenses': 'expenses' }[path]];
-      zr.queries.push({ path, params: { ...params } });
       // refuse what live Zoho refuses (see SORT_COLUMNS); the "modified since" filter needs ISO 8601 with an offset, never "YYYY-MM-DD HH:MM:SS"
       if (params.sort_column && !(SORT_COLUMNS[path] || []).includes(params.sort_column)) throw zohoError(400, 2, 'Invalid value passed for sort_column');
       if (params.last_modified_time !== undefined && !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+-]\d{4}$/.test(String(params.last_modified_time))) throw zohoError(400, 2, 'Invalid value passed for last_modified_time');
-      let rows = [...coll.values()].map(e => e.row);
-      if (params.date_start) rows = rows.filter(r => r.date >= params.date_start);
-      if (params.date_end) rows = rows.filter(r => r.date <= params.date_end);
-      if (params.last_modified_time) { const since = lmtOf(params.last_modified_time); rows = rows.filter(r => lmtOf(r.last_modified_time) >= since); }       // only documents modified since
+      let rows = filtered(path, params);
       const sortCol = params.sort_column || 'date';
       rows.sort((a, b) => (String(a[sortCol]) < String(b[sortCol]) ? -1 : 1) * (params.sort_order === 'D' ? -1 : 1));
+      // The paging defect seen live (13 Nov 2026: 522 vendor-credit rows, 519 different documents): for the next `readings` readings of
+      // this list the documents in `ids` are not returned and others come back twice in their place. Zoho's count stays right.
+      const defect = state.pagingDefect && state.pagingDefect[path];
+      if (defect && defect.readings > 0 && rows.length) {
+        defect.readings--;
+        const shown = rows.filter(r => !defect.ids.includes(rowId(r)));
+        rows = [...shown, ...shown.slice(0, rows.length - shown.length)];
+      }
       const all = [];
       for (let p = 0; p * pageSize < Math.max(rows.length, 1); p++) {
         if (opts.before) await opts.before();
+        if (p === 0) zr.queries.push({ path, params: { ...params } });               // a list that was stopped before its first call asked Zoho nothing
         zr.calls.total++; log.push(`LIST ${path} page ${p + 1}`);
         const page = rows.slice(p * pageSize, (p + 1) * pageSize);
         const more = (p + 1) * pageSize < rows.length;

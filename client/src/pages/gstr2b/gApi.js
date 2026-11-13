@@ -40,6 +40,8 @@ export const g = {
   syncStatus:  company      => axios.get(`${B}/sync/status`, { params: { company } }).then(d),
   syncRun:     body         => axios.post(`${B}/sync/run`, body, { timeout: 600000 }).then(d),
   syncCancel:  company      => axios.post(`${B}/sync/cancel`, { company }).then(d),
+  syncKick:    company      => axios.post(`${B}/sync/kick`, { company }, { timeout: 600000 }).then(d),
+  retryFailed: company      => axios.post(`${B}/sync/retry-failed`, { company }).then(d),
   refresh:     (company, doc_id) => axios.post(`${B}/sync/refresh`, { company, doc_id }, { timeout: 120000 }).then(d),
 
   preview:     (form, onProgress) => axios.post(`${B}/import/preview`, form, { timeout: 600000, onUploadProgress: onProgress }).then(d),

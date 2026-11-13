@@ -15,13 +15,14 @@ const SYNC = require('../lib/booksSync');
 const C = require('../lib/canonBooks');
 const ZR = require('../lib/zohoRead');
 
-function setup({ budget = 1000, pageSize = 3, seed = true, lease = false } = {}) {
+function setup({ budget = 1000, pageSize = 3, seed = true, lease = false, rate = 600, workers = 3, reserve = 0 } = {}) {
   const dir = tempDir();
   store.configure({ dir, useDb: false });
   const zr = F.makeFake({ pageSize });
   const cfg = { companies: [{ id: 'devx', name: 'Test Co', org_id: F.ORG, active: true, invoice_date_field: 'cf_vendor_bill_date', credit_date_field: 'cf_bill_date', credit_number_field: 'vendor_credit_number', registrations: [{ gstin: F.REC_A }, { gstin: F.REC_B }] }],
-    sync: { pace_ms: 0, daily_budget: budget, slice_seconds: 60 } };
-  const audit = []; const sync = SYNC.create({ zr, cfgNow: async () => cfg, audit: { log: async e => audit.push(e) }, log: { error() {} }, useLease: lease });
+    sync: { rate_per_min: rate, concurrency: workers, daily_budget: budget, zoho_reserve: reserve, slice_seconds: 60 } };
+  const naps = [];                                                  // the waits the calls-per-minute queue asked for (never really slept in tests)
+  const audit = []; const sync = SYNC.create({ zr, cfgNow: async () => cfg, audit: { log: async e => audit.push(e) }, log: { error() {} }, useLease: lease, sleepFn: async ms => { naps.push(ms); } });
   if (seed) {
     zr.put('bills', F.bill({ id: 'b1', no: 'INV/1', date: '2026-10-12', taxable: 1000 }));
     zr.put('bills', F.bill({ id: 'b2', no: 'INV/2', date: '2026-10-14', taxable: 2000, tax: 'inter', gst: F.SUP_MH, branch: 'br_b', dest: 'MH' }));
@@ -34,7 +35,7 @@ function setup({ budget = 1000, pageSize = 3, seed = true, lease = false } = {})
     zr.put('expenses', F.expense({ id: 'e1', ref: 'SUP/7', date: '2026-10-21' }));
     zr.put('expenses', F.expense({ id: 'e2', noTax: true, date: '2026-10-22' }));
   }
-  return { dir, zr, cfg, sync, audit };
+  return { dir, zr, cfg, sync, audit, naps };
 }
 const detailCalls = zr => zr.log.filter(l => /^GET \/(bills|vendorcredits|expenses)\/[^/]+$/.test(l));
 const byZohoId = async (id) => (await books.all('devx')).filter(d => d.zoho_id === id);
@@ -91,18 +92,30 @@ test('interrupted by the daily budget, then resumed: nothing lost, nothing fetch
   rm(dir);
 });
 
-test('a repeated or resumed period run does not list months it listed hours ago, so a short online slice keeps its calls for amounts; a re-check always lists everything', async () => {
-  const { dir, zr, sync } = setup();
-  const lists = () => zr.log.filter(l => /^LIST \/(bills|expenses) /.test(l)).length;
-  const first = await sync.run({ company: 'devx', mode: 'period', from: '2026-05', to: '2026-10' });
-  assert.equal(first.status, 'completed'); assert.equal(first.windows_skipped, 0);
-  const afterFirst = lists();
-  const second = await sync.run({ company: 'devx', mode: 'period', from: '2026-05', to: '2026-10' });
-  assert.equal(second.windows_skipped, 8, '6 months × bills and expenses = 12 listings; only the newest two months (4) are listed again');
-  assert.ok(lists() - afterFirst < afterFirst, 'the repeat spent fewer list calls than the first run');
+test('a period sync that is cut short continues where it stopped: no month is listed twice, and its later steps spend their calls on amounts only', async () => {
+  const { dir, zr, sync, cfg } = setup({ budget: 9 });
+  const lists = () => zr.log.filter(l => /^LIST /.test(l)).length;
+  const ask = () => sync.run({ company: 'devx', mode: 'period', from: '2026-05', to: '2026-10' });
+  const first = await ask();
+  assert.equal(first.status, 'paused_budget'); assert.ok(first.windows_listed > 0 && first.windows_listed < 13, 'stopped in the middle of the listing');
+  cfg.sync.daily_budget = 1000;
+  const second = await ask();
+  assert.equal(second.status, 'completed', second.message || second.error);
+  assert.equal(first.windows_listed + second.windows_listed, 13, '6 months × bills and expenses + the credit list = 13 listings, each done exactly once across both steps');
+  assert.equal(second.windows_skipped, first.windows_listed - (first.windows_listed === 13 ? 1 : 0), 'the second step skipped what the first had listed');
+  const afterListing = lists();
+  // a later step of the same sync (online each step asks for the same period again) lists nothing at all
+  const st = await sync.loadState('devx');
+  st.initial.completed_at = null; await store.write('sync_devx', st);          // as if amounts were still waiting
+  const third = await ask();
+  assert.equal(third.status, 'completed'); assert.equal(third.windows_listed, 0); assert.equal(lists(), afterListing, 'not a single list call');
+  // once the sync is finished, asking for the same period again is a new pass and lists everything
+  const again = await ask();
+  assert.equal(again.windows_listed, 13); assert.equal(again.windows_skipped, 0);
+  // a re-check always lists everything
   const before = lists();
   const recheck = await sync.run({ company: 'devx', mode: 'recheck', from: '2026-05', to: '2026-10' });
-  assert.equal(recheck.windows_skipped, 0); assert.equal(lists() - before, afterFirst, 'a re-check lists every month again');
+  assert.equal(recheck.windows_skipped, 0); assert.equal(recheck.windows_listed, 13); assert.ok(lists() > before);
   assert.equal((await books.stats('devx')).detailed, 5);
   rm(dir);
 });
@@ -176,7 +189,7 @@ test('change feed: an edited bill, expense and credit are refreshed, a voided bi
   assert.deepEqual([...new Set(asked.map(q => q.path))].sort(), ['/bills', '/expenses', '/vendorcredits']);
   for (const q of asked) {
     assert.match(q.params.last_modified_time, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+0000$/, `${q.path}: the modified-since filter`);
-    assert.equal(q.params.sort_column, undefined, `${q.path}: no sort_column (Zoho refuses last_modified_time on expenses)`);
+    assert.equal(q.params.sort_column, 'created_time', `${q.path}: sorted by created time — never by last_modified_time, which Zoho refuses on expenses`);
   }
   rm(dir);
 });
@@ -401,7 +414,7 @@ test('the Zoho client has no way to write: only GET methods exist and every requ
   const sent = [];
   const http = { get: async (url, o) => { sent.push({ url, params: o.params }); return { data: { ok: true } }; }, post: async () => { throw new Error('POST must never be used for data'); } };
   const zr = ZR.create({ http, env: { ZOHO_API_DOMAIN: 'https://www.zohoapis.in', ZOHO_ACCOUNTS_URL: 'https://accounts.zoho.in' }, zoho: { getAccessToken: async () => 'tok' }, sleep: async () => {} });
-  assert.deepEqual(Object.keys(zr).sort(), ['calls', 'checkAccess', 'dedicated', 'errText', 'get', 'identity', 'isGone', 'list', 'listBranches', 'listOrganizations']);
+  assert.deepEqual(Object.keys(zr).sort(), ['calls', 'checkAccess', 'dedicated', 'errText', 'get', 'identity', 'isGone', 'list', 'listBranches', 'listOrganizations', 'usage']);
   for (const k of Object.keys(zr)) assert.ok(!/^(post|put|delete|patch|send|create|update)/i.test(k), `no write method: ${k}`);
   assert.ok(Object.isFrozen(zr));
   await zr.get('123', '/bills', { per_page: 1 });
@@ -435,4 +448,267 @@ test('Zoho client: waits out a short 429, stops on the daily limit (45), paces c
   await z4.get('1', '/a', {}, { paceMs: 1000 }); await z4.get('1', '/b', {}, { paceMs: 1000 });
   assert.ok(gaps.length === 1 && gaps[0] > 0 && gaps[0] <= 1000);
   assert.ok(z4.isGone(Object.assign(new Error('x'), { response: { status: 404 } })) && z4.isGone({ response: { data: { code: 1002 } } }) && !z4.isGone(new Error('x')));
+});
+
+// ── Speed and limits ──
+test('the calls-per-minute queue: turns are 60 / rate seconds apart however many callers wait, and a "too many requests" from Zoho holds everyone back', async () => {
+  const naps = [];
+  const q = SYNC.limiter(60, async ms => { naps.push(Math.round(ms / 100) * 100); });          // 60 a minute = one turn a second
+  await Promise.all([q.turn(), q.turn(), q.turn(), q.turn(), q.turn()]);                       // five workers ask at the same moment
+  assert.deepEqual(naps, [1000, 2000, 3000, 4000], 'the first goes at once, the others one second apart');
+  q.holdFor(30000);
+  naps.length = 0; await q.turn();
+  assert.ok(naps[0] >= 29900, `nobody takes a turn while Zoho asked us to wait (${naps[0]} ms)`);
+  assert.equal(Math.round(SYNC.limiter(90).gap), 667, '90 a minute = a call every two thirds of a second');
+});
+
+test('amounts are read by several workers at once, each document exactly once, at the rate set — and the old "pause between calls" no longer exists', async () => {
+  const { dir, zr, sync, naps } = setup({ rate: 600, workers: 3 });                              // 600 a minute = a turn every 100 ms
+  for (let i = 0; i < 12; i++) zr.put('bills', F.bill({ id: `p${i}`, no: `P/${i}`, date: '2026-10-0' + (1 + (i % 9)), taxable: 100 + i }));
+  zr.state.detailMs = 25;                                                                       // every answer takes a moment
+  const r = await sync.run({ company: 'devx', mode: 'period', from: '2026-08', to: '2026-10' });
+  assert.equal(r.status, 'completed', r.message || r.error);
+  const fetched = detailCalls(zr).map(l => l.split('/').pop());
+  assert.equal(fetched.length, 17); assert.equal(new Set(fetched).size, 17, 'no document was read twice');
+  assert.equal(zr.maxInFlight, 3, 'three calls were in flight at once — never more than the setting');
+  assert.ok(naps.length > 0 && naps.every(ms => ms > 0), 'calls waited for their turn in the queue');
+  assert.equal((await books.stats('devx')).pending, 0);
+  // the limits a company saved with the first version (a 6-second pause, a budget sized for 10,000 calls a day) are replaced, not carried over
+  const CFG = require('../lib/config');
+  assert.deepEqual(CFG.merge({ sync: { pace_ms: 6000, daily_budget: 5000, slice_seconds: 200 } }).sync, { rate_per_min: 90, concurrency: 4, daily_budget: 30000, zoho_reserve: 15000, slice_seconds: 200 });
+  assert.deepEqual(CFG.merge({ sync: { rate_per_min: 60, daily_budget: 20000, pace_ms: 6000 } }).sync, { rate_per_min: 60, concurrency: 4, daily_budget: 20000, zoho_reserve: 15000, slice_seconds: 180 });
+  assert.match(CFG.validateSyncLimits({ rate_per_min: 5 }, CFG.merge(null).sync).error, /between 10 and 120/);
+  assert.match(CFG.validateSyncLimits({ concurrency: 9 }, CFG.merge(null).sync).error, /between 1 and 6/);
+  assert.match(CFG.validateSyncLimits({ zoho_reserve: 70000 }, CFG.merge(null).sync).error, /between 0 and 60000/);
+  rm(dir);
+});
+
+test('Zoho says "too many requests" in the middle of a run: the other workers hold back as long as Zoho asked, and nothing is lost', async () => {
+  const { dir, zr, sync, naps } = setup();
+  zr.state.throttleOnce = 20;                                                                   // one "retry after 20 seconds"
+  const r = await sync.run({ company: 'devx', mode: 'period', from: '2026-08', to: '2026-10' });
+  assert.equal(r.status, 'completed', r.message || r.error);
+  assert.ok(naps.some(ms => ms >= 19000), 'a later call waited out the 20 seconds');
+  assert.equal((await books.stats('devx')).detailed, 5);
+  rm(dir);
+});
+
+test('the organisation\'s own Zoho allowance is respected: the sync stops for the day when Zoho reports that only the reserve is left, and carries on the next day', async () => {
+  const { dir, zr, sync } = setup({ reserve: 15000 });
+  const tomorrow = new Date(Date.now() + 6 * 3600 * 1000).toISOString();
+  zr.state.usage = { day_limit: 90000, day_remaining: 14990, day_reset_at: tomorrow, minute_limit: 150, minute_remaining: 149, concurrency_limit: 20, at: new Date().toISOString() };
+  const r = await sync.run({ company: 'devx', mode: 'period', from: '2026-08', to: '2026-10' });
+  assert.equal(r.status, 'paused_limit'); assert.match(r.message, /14990 of the organisation's 90000 calls left.*keeps 15000 free for the other integrations/);
+  assert.equal(zr.log.filter(l => /^(LIST|GET \/(bills|vendorcredits|expenses))/.test(l)).length, 0, 'not one more call was made');
+  const st = await sync.status('devx');
+  assert.equal(st.zoho.day_remaining, 14990); assert.equal(st.zoho.day_limit, 90000); assert.equal(st.zoho.reserve, 15000); assert.equal(st.zoho.minute_limit, 150);
+  // a reading from before Zoho's midnight reset says nothing about today
+  zr.state.usage = { ...zr.state.usage, day_reset_at: new Date(Date.now() - 60000).toISOString() };
+  const next = await sync.run({ company: 'devx', mode: 'period', from: '2026-08', to: '2026-10' });
+  assert.equal(next.status, 'completed', next.message || next.error);
+  assert.equal((await sync.status('devx')).zoho.day_remaining, null, 'yesterday\'s count is not shown as today\'s');
+  rm(dir);
+});
+
+// ── First-sync status ──
+test('first sync status: not started → in progress (listing, then amounts, with a percentage) → completed; headers alone are never "completed"', async () => {
+  const { dir, sync, cfg } = setup({ budget: 6 });
+  let st = await sync.status('devx');
+  assert.equal(st.initial.status, 'not_started'); assert.equal(st.initial.percent, null);
+  await sync.run({ company: 'devx', mode: 'period', from: '2026-08', to: '2026-10', by: 'CFO' });           // the small budget stops it while listing
+  st = await sync.status('devx');
+  assert.equal(st.initial.status, 'in_progress'); assert.equal(st.initial.phase, 'listing'); assert.equal(st.initial.percent, null, 'no percentage until the total is known');
+  assert.equal(st.initial.from, '2026-08'); assert.equal(st.initial.to, '2026-10'); assert.equal(st.initial.by, 'CFO');
+  cfg.sync.daily_budget = 12;                                                                              // enough to finish listing (10 calls so far) and read a few amounts
+  await sync.run({ company: 'devx', mode: 'period', from: '2026-08', to: '2026-10', by: 'CFO' });
+  st = await sync.status('devx');
+  assert.equal(st.initial.status, 'in_progress'); assert.equal(st.initial.phase, 'amounts', 'every month is listed, but amounts are still missing: NOT complete');
+  assert.equal(st.initial.discovered, 5); assert.ok(st.initial.fetched > 0 && st.initial.fetched < 5, `${st.initial.fetched} fetched`); assert.equal(st.initial.pending, 5 - st.initial.fetched);
+  assert.equal(st.initial.percent, st.initial.fetched * 20); assert.equal(st.initial.completed_at, null);
+  assert.ok(st.speed.eta_minutes >= 1);
+  cfg.sync.daily_budget = 1000;
+  const done = await sync.run({ company: 'devx', mode: 'incremental', by: 'schedule', auto: true });       // the scheduler finishes it
+  assert.equal(done.status, 'completed');
+  st = await sync.status('devx');
+  assert.equal(st.initial.status, 'completed'); assert.equal(st.initial.percent, 100); assert.equal(st.initial.pending, 0); assert.equal(st.initial.failed, 0); assert.ok(st.initial.completed_at);
+  assert.equal(st.speed.eta_minutes, 0);
+  rm(dir);
+});
+
+test('a sync state written by the previous version is taken over as it is: the first sync shows "in progress" and finishes without listing a month again', async () => {
+  const { dir, zr, sync } = setup();
+  const now = new Date().toISOString();
+  const ctx = { company: { id: 'devx', org_id: F.ORG, invoice_date_field: 'cf_vendor_bill_date', credit_date_field: 'cf_bill_date', credit_number_field: 'vendor_credit_number' }, branches: new Map(F.BRANCHES.map(b => [b.id, { name: b.name, gstin: b.gstin, state: b.state_code }])), vendors: new Map(), activeGstins: null, periodFrom: '2026-08-01' };
+  await books.upsertMany('devx', [...zr.store.bills.values()].map(e => C.fromList(e.row, ctx, 'bill')));   // listed, no amounts — as the old version left them
+  // … with an error from 5:34 pm still in the state although runs after it got through (what the card showed in red on 12 Nov 2026)
+  const earlier = new Date(Date.now() - 2 * 3600 * 1000).toISOString();
+  const oldRun = { run_id: 'run_old', company: 'devx', mode: 'period', by: 'Administrator', status: 'partial', started_at: now, finished_at: now, from: '2026-08', to: '2026-10', lists: { bill: { rows: 0, added: 0, changed: 0 } }, details: { queued: 3, fetched: 0, failed: 0, deleted: 0 }, calls: 31, warnings: [], message: 'This slice used its time; the run continues next time' };
+  await store.write('sync_devx', { branches: {}, hwm: { bill: now, expense: now, vendor_credit: now }, synced_from: '2026-08', budget: { day: '', used: 0 }, runs: [oldRun], last_ok_at: null, lease: null,
+    last_error: { at: earlier, message: 'Zoho: Invalid value passed for sort_column (code 2)' },
+    windows: Object.fromEntries(['2026-08', '2026-09', '2026-10'].flatMap(m => [[`bill:${m}`, { at: now, rows: 1, kept: 1 }], [`expense:${m}`, { at: now, rows: 0, kept: 0 }]])) });
+  let st = await sync.status('devx');
+  assert.equal(st.initial.status, 'in_progress'); assert.equal(st.initial.phase, 'amounts'); assert.equal(st.initial.from, '2026-08'); assert.equal(st.initial.to, '2026-10');
+  assert.equal(st.initial.pending, 3); assert.equal(st.initial.percent, 0);
+  assert.equal(st.last_error, null, 'the leftover error is not shown: later runs got through');
+  assert.equal(st.runs[0].run_id, 'run_old', 'the earlier runs are still listed');
+  assert.deepEqual(await sync.due('devx').then(d => [d.run, d.mode]), [true, 'incremental'], 'the scheduler carries on with a change check + the amounts, not with a new listing');
+  const lists = zr.queries.length;
+  const r = await sync.run({ company: 'devx', mode: 'incremental', by: 'schedule', auto: true });
+  assert.equal(r.status, 'completed', r.message || r.error);
+  assert.ok(zr.queries.slice(lists).every(q => q.params.last_modified_time && !q.params.date_start), 'no month was listed again');
+  st = await sync.status('devx');
+  assert.equal(st.initial.status, 'completed'); assert.equal(st.initial.fetched, 3);
+  assert.equal(st.last_error, null, 'the error of an earlier run is not shown once a later run got through');
+  rm(dir);
+});
+
+test('an error is shown only while it is the latest outcome: a later run that gets through — even a partial one — clears it', async () => {
+  const { dir, zr, sync } = setup();
+  const real = zr.listBranches;
+  zr.listBranches = async () => { throw new Error('Zoho: service unavailable'); };
+  const bad = await sync.run({ company: 'devx', mode: 'period', from: '2026-08', to: '2026-10' });
+  assert.equal(bad.status, 'failed');
+  let st = await sync.status('devx');
+  assert.match(st.last_error.message, /service unavailable/); assert.equal(st.initial.status, 'not_started');
+  zr.listBranches = real;
+  const part = await sync.run({ company: 'devx', mode: 'period', from: '2026-08', to: '2026-10', maxMs: -1 });
+  assert.equal(part.status, 'partial');
+  st = await sync.status('devx');
+  assert.equal(st.last_error, null); assert.equal(st.initial.status, 'in_progress');
+  // a failure during a first sync is shown as "failed" until the next run
+  zr.listBranches = async () => { throw new Error('Zoho: service unavailable'); };
+  await sync.run({ company: 'devx', mode: 'period', from: '2026-08', to: '2026-10' });
+  assert.equal((await sync.status('devx')).initial.status, 'failed');
+  zr.listBranches = real;
+  assert.equal((await sync.run({ company: 'devx', mode: 'period', from: '2026-08', to: '2026-10' })).status, 'completed');
+  assert.equal((await sync.status('devx')).initial.status, 'completed');
+  rm(dir);
+});
+
+test('checked against Zoho: every listed document is accounted for, stored totals are compared with Zoho\'s list, and a difference is reported — not hidden', async () => {
+  const { dir, zr, sync } = setup();
+  await sync.run({ company: 'devx', mode: 'period', from: '2026-08', to: '2026-10' });
+  const ok = await sync.run({ company: 'devx', mode: 'recheck', from: '2026-08', to: '2026-10', by: 'CFO' });
+  assert.equal(ok.status, 'completed', ok.message || ok.error);
+  let v = (await sync.status('devx')).verify;
+  assert.equal(v.ok, true); assert.equal(v.by, 'CFO'); assert.equal(v.from, '2026-08');
+  const b = v.kinds.bill, e = v.kinds.expense, c = v.kinds.vendor_credit;
+  assert.equal(b.zoho_rows, 7); assert.equal(b.stored, 7); assert.equal(b.kept_out, 4); assert.equal(b.agree, 3); assert.equal(b.differ, 0); assert.equal(b.waiting, 0);
+  assert.equal(b.kept_out + b.waiting + b.agree + b.differ, b.zoho_rows, 'every bill Zoho lists is in exactly one column');
+  assert.equal(b.agree_total_p, 118000 + 236000 + (590000 - 10000), 'the three bills\' totals as Zoho lists them (the third is net of Rs 100 TDS)');
+  assert.equal(b.taxable_p, 100000 + 200000 + 500000); assert.equal(b.tax_p, 18000 + 36000 + 90000);
+  assert.equal(e.zoho_rows, 2); assert.equal(e.not_kept, 1, 'the expense without GST is not stored'); assert.equal(e.agree, 1);
+  assert.equal(c.zoho_rows, 1); assert.equal(c.agree, 1);
+  assert.equal(v.total.zoho_rows, 10); assert.equal(v.total.agree, 5);
+  // Zoho's own count of each list was asked for too, and the lists returned exactly that many different documents
+  assert.equal(b.zoho_count, 7); assert.equal(e.zoho_count, 2); assert.equal(c.zoho_count, 1); assert.equal(v.total.zoho_count, 10); assert.equal(v.counts_ok, true);
+  // Zoho now lists a different total for a bill whose "last modified" did not move (so the change feed cannot know)
+  const b1 = zr.store.bills.get('b1'); b1.row = { ...b1.row, total: 9999 };
+  await sync.run({ company: 'devx', mode: 'recheck', from: '2026-08', to: '2026-10' });
+  v = (await sync.status('devx')).verify;
+  assert.equal(v.ok, false); assert.equal(v.kinds.bill.differ, 1); assert.equal(v.kinds.bill.agree, 2); assert.equal(v.kinds.bill.differ_p, 118000 - 999900);
+  assert.deepEqual(v.differ_docs.map(d => [d.doc_no, d.zoho_p, d.stored_p]), [['INV/1', 999900, 118000]]);
+  rm(dir);
+});
+
+test('the scheduler\'s question "what is due?": nothing before a first sync, the rest of an unfinished listing, waiting amounts, a change check when the last one is old enough', async () => {
+  const { dir, sync, cfg } = setup({ budget: 4 });
+  assert.deepEqual(await sync.due('devx'), { run: false, reason: 'needs_first_sync' });
+  await sync.run({ company: 'devx', mode: 'period', from: '2026-08', to: '2026-10' });
+  assert.deepEqual(await sync.due('devx').then(d => [d.run, d.mode, d.from, d.to]), [true, 'period', '2026-08', '2026-10']);
+  cfg.sync.daily_budget = 13;
+  await sync.run({ company: 'devx', mode: 'period', from: '2026-08', to: '2026-10' });                       // listing done, amounts not
+  const d = await sync.due('devx', { minAgeMs: 3600000 });
+  assert.equal(d.run, true); assert.equal(d.mode, 'incremental'); assert.match(d.why, /waiting for amounts/);
+  cfg.sync.daily_budget = 1000;
+  await sync.run({ company: 'devx', mode: 'incremental' });
+  assert.deepEqual(await sync.due('devx', { minAgeMs: 3600000 }), { run: false, reason: 'fresh' });
+  const fresh = await sync.due('devx');
+  assert.equal(fresh.run, true); assert.equal(fresh.verify_due, true, 'a finished first sync is compared with Zoho once');
+  await sync.run({ company: 'devx', mode: 'recheck' });
+  assert.equal((await sync.due('devx')).verify_due, false);
+  rm(dir);
+});
+
+test('Zoho client: reads the organisation\'s allowance from every answer (per organisation), also from a refusal, and tells the caller how long Zoho asked to wait', async () => {
+  const h = (left, minute) => ({ 'x-rate-limit-limit': '90000', 'x-rate-limit-remaining': String(left), 'x-rate-limit-reset': '3600', 'x-user-access-limit': '150', 'x-user-access-remaining': String(minute), 'x-user-concurrency-limit': '20' });
+  let n = 0; const asked = [];
+  const http = { get: async (url, o) => {
+    n++;
+    if (o.params.organization_id === 'B') return { data: {}, headers: {} };                                   // an answer without the allowance headers
+    if (n === 2) throw Object.assign(new Error('rl'), { response: { status: 429, data: { code: 44 }, headers: { ...h(80000, 0), 'retry-after': '12' } } });
+    return { data: { ok: n }, headers: h(90000 - n, 149) };
+  } };
+  const zr = ZR.create({ http, env: { ZOHO_API_DOMAIN: 'x', ZOHO_ACCOUNTS_URL: 'y' }, zoho: { getAccessToken: async () => 't' }, sleep: async () => {} });
+  assert.equal(zr.usage('A'), null, 'nothing known before the first answer');
+  await zr.get('A', '/bills');
+  const u = zr.usage('A');
+  assert.equal(u.day_limit, 90000); assert.equal(u.day_remaining, 89999); assert.equal(u.minute_limit, 150); assert.equal(u.minute_remaining, 149); assert.equal(u.concurrency_limit, 20);
+  assert.ok(Math.abs(Date.parse(u.day_reset_at) - Date.now() - 3600000) < 5000, 'the reset moment is worked out from Zoho\'s "seconds until reset"');
+  await zr.get('A', '/bills', {}, { onThrottle: s => asked.push(s) });                                         // refused once, then answered
+  assert.deepEqual(asked, [12]); assert.equal(zr.usage('A').day_remaining, 89997);
+  await zr.get('B', '/bills');
+  assert.equal(zr.usage('B'), null, 'one organisation\'s allowance is never taken for another\'s');
+  await assert.rejects(ZR.create({ http: { get: async () => { throw Object.assign(new Error('limit'), { response: { status: 429, data: { code: 45 }, headers: {} } }); } }, env: {}, zoho: { getAccessToken: async () => 't' }, sleep: async () => {} }).get('1', '/bills'), /after midnight \(India time\)/);
+});
+
+// ── Every document of a list — completely ──
+test('a list that pages badly (one document missing, another returned twice — seen live on vendor credits) is read again until Zoho\'s own count is reached', async () => {
+  const { dir, zr, sync } = setup();
+  zr.state.pagingDefect = { '/bills': { ids: ['b1'], readings: 1 } };                          // the first reading of a bills list loses b1
+  const r = await sync.run({ company: 'devx', mode: 'period', from: '2026-10', to: '2026-10' });
+  assert.equal(r.status, 'completed', r.message || r.error); assert.deepEqual(r.warnings, []);
+  const docs = await books.all('devx');
+  assert.ok(docs.find(d => d.zoho_id === 'b1').amounts, 'the document the first reading lost was found by the second and has its amounts');
+  assert.equal(docs.filter(d => d.kind === 'bill').length, 4, 'and no document was stored twice');
+  const readings = zr.queries.filter(q => q.path === '/bills').map(q => `${q.params.sort_column} ${q.params.sort_order}`);
+  assert.deepEqual(readings, ['created_time A', 'created_time D'], 'sorted by created time (dates repeat, created times hardly ever), the second reading in the opposite order');
+  assert.deepEqual(zr.counts.filter(c => c.path === '/bills').map(c => [c.params.date_start, c.params.response_option]), [['2026-10-01', 2], ['2026-10-01', 2]], 'Zoho was asked for its own count after each reading');
+  assert.equal((await sync.loadState('devx')).windows['bill:2026-10'].complete, true); assert.equal((await sync.loadState('devx')).windows['bill:2026-10'].count, 4);
+  rm(dir);
+});
+
+test('a list that stays short of Zoho\'s count is reported, never taken for complete: nothing is removed on its word, and the check against Zoho shows the gap', async () => {
+  const { dir, zr, sync } = setup();
+  assert.equal((await sync.run({ company: 'devx', mode: 'period', from: '2026-08', to: '2026-10' })).status, 'completed');
+  zr.state.pagingDefect = { '/bills': { ids: ['b1'], readings: 99 } };                         // Zoho keeps leaving b1 out of the October list
+  const gets = detailCalls(zr).length;
+  const r = await sync.run({ company: 'devx', mode: 'recheck', from: '2026-08', to: '2026-10' });
+  assert.equal(r.status, 'completed', r.message || r.error);
+  assert.ok(r.warnings.some(w => /Zoho counts 4 bills dated 2026-10 but its list returned only 3 different ones in three readings/.test(w)), r.warnings.join(' | '));
+  assert.equal(zr.queries.filter(q => q.path === '/bills' && q.params.date_start === '2026-10-01').length - 1, 3, 'three readings of that month in the re-check (plus the first sync\'s one)');
+  const b1 = (await books.all('devx')).find(d => d.zoho_id === 'b1');
+  assert.equal(b1.deleted, false, 'b1 was not in the list, but the list was known to be incomplete: it is not taken for deleted');
+  assert.equal(detailCalls(zr).length, gets, 'and Zoho was not even asked whether it still exists');
+  const v = (await sync.status('devx')).verify;
+  assert.equal(v.counts_ok, false); assert.equal(v.kinds.bill.zoho_count, 7); assert.equal(v.kinds.bill.zoho_rows, 6);
+  assert.equal((await sync.loadState('devx')).windows['bill:2026-10'].complete, false);
+  // the change check is held to the same standard: a "modified since" list that is short does not move the checkpoint
+  zr.state.pagingDefect = null;
+  for (let i = 0; i < 5; i++) zr.put('bills', F.bill({ id: `m${i}`, no: `M/${i}`, date: '2026-10-2' + i, lmt: new Date(Date.now() + 5000 + i).toISOString().replace(/\.\d+Z$/, '+0000') }));
+  const mark = (await sync.loadState('devx')).hwm.bill;
+  zr.state.pagingDefect = { '/bills': { ids: ['m4'], readings: 99 } };
+  const inc = await sync.run({ company: 'devx', mode: 'incremental' });
+  assert.equal(inc.status, 'completed'); assert.equal(inc.details.fetched, 4);
+  assert.equal((await sync.loadState('devx')).hwm.bill, mark, 'the checkpoint stays where it was');
+  zr.state.pagingDefect = null;
+  const again = await sync.run({ company: 'devx', mode: 'incremental' });
+  assert.equal(again.details.fetched, 1, 'so the next change check finds the document that was left out');
+  assert.ok((await sync.loadState('devx')).hwm.bill > mark, 'and only then moves on');
+  rm(dir);
+});
+
+test('a change check that fits in one page asks Zoho for nothing more (an idle check stays at four calls); an organisation whose Zoho gives no count is simply not compared by count', async () => {
+  const { dir, zr, sync } = setup();
+  await sync.run({ company: 'devx', mode: 'period', from: '2026-08', to: '2026-10' });
+  const counts = zr.counts.length, calls = zr.calls.total;
+  const idle = await sync.run({ company: 'devx', mode: 'incremental', by: 'schedule', auto: true });
+  assert.equal(idle.status, 'completed'); assert.equal(idle.calls, 4, 'the branch list and one "modified since" list for bills, vendor credits and expenses');
+  assert.equal(zr.calls.total - calls, 4); assert.equal(zr.counts.length, counts, 'no count was asked for: a single page has no boundary to lose a document at');
+  zr.state.noCount = true;
+  const r = await sync.run({ company: 'devx', mode: 'recheck', from: '2026-08', to: '2026-10' });
+  assert.equal(r.status, 'completed', r.message || r.error); assert.deepEqual(r.warnings, []);
+  const v = (await sync.status('devx')).verify;
+  assert.equal(v.kinds.bill.zoho_count, null); assert.equal(v.kinds.bill.zoho_rows, 7); assert.equal(v.counts_ok, true); assert.equal(v.ok, true);
+  rm(dir);
 });

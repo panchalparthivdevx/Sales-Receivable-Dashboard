@@ -16,6 +16,9 @@ const REC = '24AAFCD1234E1Z5';          // synthetic recipient GSTIN (not checke
 const SUP = '27AAACR5055K1Z7';          // synthetic supplier GSTIN (valid checksum)
 const SUP2 = '27AAACR5055K2Z6';         // same PAN, different registration (checksum not asserted)
 
+// Sync limits for tests: so many calls a minute that the calls-per-minute queue never has to wait, and no reserve to keep
+const FAST_SYNC = { rate_per_min: 600000, concurrency: 3, daily_budget: 1000, zoho_reserve: 0, slice_seconds: 60 };
+
 let seq = 0;
 const rupees = v => Math.round(v * 100);
 
@@ -57,4 +60,4 @@ function gstin(state, pan, entity = '1') {
 function tempDir(prefix = 'g2btest-') { return fs.mkdtempSync(path.join(os.tmpdir(), prefix)); }
 const rm = dir => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (_) {} };
 
-module.exports = { REC, SUP, SUP2, books, portal, pair, rupees, gstin, tempDir, rm };
+module.exports = { FAST_SYNC, REC, SUP, SUP2, books, portal, pair, rupees, gstin, tempDir, rm };

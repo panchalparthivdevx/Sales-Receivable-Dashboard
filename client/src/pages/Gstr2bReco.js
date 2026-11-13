@@ -38,6 +38,24 @@ export default function Gstr2bReco() {
 
   const loadMeta = useCallback(() => g.meta().then(m => { setMeta(m); setError(''); }).catch(e => setError(errMsg(e))), []);
   useEffect(() => { loadMeta(); }, [loadMeta]);
+  // Keep the Books data fresh while the module is open: every few minutes the server is asked whether a sync step is due — a change check,
+  // or the rest of a sync that is still going (POST /sync/kick). Online such a step runs inside that request, so it is simply left to
+  // finish; when it says there is more, the next one follows at once. The scheduler does the same when nobody has the module open.
+  const realIds = meta ? meta.companies.filter(c => !c.demo && c.active !== false).map(c => c.id).join(',') : '';
+  useEffect(() => {
+    if (!realIds) return undefined;
+    let stop = false, timer = null;
+    const round = async () => {
+      let again = false;
+      for (const id of realIds.split(',')) {
+        if (stop) return;
+        try { const r = await g.syncKick(id); if (r.ran && r.fetched > 0) setStamp(s => s + 1); if (r.ran && r.more) again = true; } catch (_) { /* tried again at the next round */ }
+      }
+      if (!stop) timer = setTimeout(round, again ? 2000 : 4 * 60000);
+    };
+    timer = setTimeout(round, 1500);
+    return () => { stop = true; clearTimeout(timer); };
+  }, [realIds]);
   useEffect(() => { try { sessionStorage.setItem(FILTER_KEY, JSON.stringify(filters)); } catch (_) { /* optional */ } }, [filters]);
   const go = id => { setTab(id); try { sessionStorage.setItem('g2b_tab', id); } catch (_) { /* optional */ } };
   const onDrill = (extra, to = 'workbench') => { setDrill(extra); go(to); };

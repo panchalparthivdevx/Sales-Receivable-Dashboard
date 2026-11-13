@@ -210,7 +210,7 @@ function Schedule({ meta, reloadMeta }) {
     setError(''); setOk('');
     try {
       await g.saveSchedule({ enabled: sch.enabled, times: sch.times.split(/[,\s]+/).filter(Boolean) });
-      await g.saveSync({ pace_ms: +lim.pace_ms, daily_budget: +lim.daily_budget, slice_seconds: +lim.slice_seconds });
+      await g.saveSync({ rate_per_min: +lim.rate_per_min, concurrency: +lim.concurrency, daily_budget: +lim.daily_budget, zoho_reserve: +lim.zoho_reserve, slice_seconds: +lim.slice_seconds });
       setOk('Saved. The schedule takes effect at the next scheduled time.'); reloadMeta();
     } catch (e) { setError(errMsg(e)); }
   };
@@ -219,17 +219,20 @@ function Schedule({ meta, reloadMeta }) {
       <div style={S.cardHead}><span style={S.cardTitle}>Scheduled Zoho sync (this module only)</span></div>
       <div style={S.cardBody}>
         <Msg error={error} ok={ok} onClose={() => { setError(''); setOk(''); }} />
-        {!meta.integrations.scheduler && <div style={S.notice}>Scheduled syncs run on the office PC only. On the online (Vercel) dashboard use the buttons on Imports &amp; sync; the shared Vercel schedule is not changed by this module.</div>}
+        {!meta.integrations.scheduler && <div style={S.info}>Online, the automatic sync is run by the dashboard's scheduler: every {meta.online_schedule.every_min} minutes round the clock (at {meta.online_schedule.minutes.map(m => `:${String(m).padStart(2, '0')}`).join(', ')} past each hour) it reads what was added or edited in Zoho since the last check, and at {meta.online_schedule.recheck_ist} India time it compares everything with Zoho. These times are set in the dashboard's deployment, not here; the times below apply to the office PC copy only. Imports &amp; sync shows when the scheduler last called in.</div>}
         <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', alignItems: 'flex-end' }}>
           <Field label="Scheduled sync"><label style={{ fontSize: '0.8rem', display: 'flex', gap: 6 }}><input type="checkbox" disabled={!canEdit} checked={sch.enabled} onChange={e => setSch({ ...sch, enabled: e.target.checked })} /> On</label></Field>
           <Field label="Times (India time, 24-hour)" hint="Default 13:20, 15:20, 18:20, 21:20 — the hours asked for (1, 3, 6, 9 PM), 20 minutes after the hour so it never competes with the dashboard's own sync at :00 / :10"><input style={{ ...S.input, width: 300 }} disabled={!canEdit} value={sch.times} onChange={e => setSch({ ...sch, times: e.target.value })} /></Field>
         </div>
         <p style={{ ...S.muted, lineHeight: 1.5 }}>Each scheduled run reads what changed in Zoho since the last one, then fetches amounts for new and edited documents. The first run of each day also re-checks the period for deleted documents. The shared sync schedule of the other modules is not touched.</p>
         <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginTop: 8 }}>
-          <Field label="Pause between Zoho calls (ms)" hint="600–10000"><input type="number" style={{ ...S.input, width: 120 }} disabled={!canEdit} value={lim.pace_ms} onChange={e => setLim({ ...lim, pace_ms: e.target.value })} /></Field>
-          <Field label="Zoho calls per day for this module" hint="100–9000; Zoho's limit is shared with every other module"><input type="number" style={{ ...S.input, width: 120 }} disabled={!canEdit} value={lim.daily_budget} onChange={e => setLim({ ...lim, daily_budget: e.target.value })} /></Field>
-          <Field label="Seconds per sync slice (online)" hint="30–250; online a sync runs in steps of this length (never more than 180)"><input type="number" style={{ ...S.input, width: 120 }} disabled={!canEdit} value={lim.slice_seconds} onChange={e => setLim({ ...lim, slice_seconds: e.target.value })} /></Field>
+          <Field label="Zoho calls per minute" hint="10–120 · a higher number is faster. Zoho allows this organisation's user 150 a minute, shared with the dashboard's other modules"><input type="number" style={{ ...S.input, width: 120 }} disabled={!canEdit} value={lim.rate_per_min} onChange={e => setLim({ ...lim, rate_per_min: e.target.value })} /></Field>
+          <Field label="Calls at the same time" hint="1–6 · Zoho allows 20"><input type="number" style={{ ...S.input, width: 120 }} disabled={!canEdit} value={lim.concurrency} onChange={e => setLim({ ...lim, concurrency: e.target.value })} /></Field>
+          <Field label="Zoho calls per day for this module" hint="100–80000 · a first sync of a financial year needs about 8,000"><input type="number" style={{ ...S.input, width: 120 }} disabled={!canEdit} value={lim.daily_budget} onChange={e => setLim({ ...lim, daily_budget: e.target.value })} /></Field>
+          <Field label="Calls kept free for other integrations" hint="0–60000 · the sync stops for the day when Zoho reports that the whole organisation has this few calls left"><input type="number" style={{ ...S.input, width: 120 }} disabled={!canEdit} value={lim.zoho_reserve} onChange={e => setLim({ ...lim, zoho_reserve: e.target.value })} /></Field>
+          <Field label="Seconds per sync step (online)" hint="30–250; online a sync runs in steps of this length (never more than 180)"><input type="number" style={{ ...S.input, width: 120 }} disabled={!canEdit} value={lim.slice_seconds} onChange={e => setLim({ ...lim, slice_seconds: e.target.value })} /></Field>
         </div>
+        <p style={{ ...S.muted, lineHeight: 1.5 }}>Zoho counts every integration of the organisation against one daily allowance (90,000 calls on the current plan, starting again at midnight India time). This module reads Zoho's own count after every call: it never uses more than its own daily number above, and it also stops for the day if the organisation's remaining allowance falls to the number kept free — so the other integrations cannot be starved by a long sync. If Zoho answers "too many requests", the sync waits as long as Zoho asks and then carries on.</p>
         {canEdit && <button style={{ ...S.primary, marginTop: 12 }} onClick={save}>Save</button>}
       </div>
     </div>
