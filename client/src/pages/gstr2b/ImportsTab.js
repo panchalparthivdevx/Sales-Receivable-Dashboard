@@ -44,7 +44,8 @@ function SyncPanel({ meta, company, setCompany, companies, onChanged, stamp }) {
   const timer = useRef(null);
   const load = useCallback(() => (company ? g.syncStatus(company).then(s => { setSt(s); setError(''); return s; }).catch(e => { setError(errMsg(e)); return null; }) : Promise.resolve(null)), [company]);
   useEffect(() => { autoOpened.current = false; setSt(null); load(); }, [load]);
-  useEffect(() => { if (stamp) load(); }, [stamp]);              // eslint-disable-line   (a step finished elsewhere: the module's own background sync)
+  // a step finished elsewhere (the module's own background sync): read the status again
+  useEffect(() => { if (stamp) load(); }, [stamp]); // eslint-disable-line
   useEffect(() => { if (st && !autoOpened.current) { autoOpened.current = true; if (!firstDone(st)) setShowPeriod(true); } }, [st]);   // before the first sync, the month boxes are already open
   // The card follows a sync wherever it runs (this page, the scheduler, another person): every few seconds while one runs, twice a minute otherwise
   const running = !!(st && st.running);
