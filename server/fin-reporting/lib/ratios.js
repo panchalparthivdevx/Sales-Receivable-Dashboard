@@ -167,7 +167,16 @@ def({ cat: 'Interest & debt-service coverage', id: 'cov.icr_borrow', name: 'Inte
 def({ cat: 'Interest & debt-service coverage', id: 'cov.dscr_ebitda', name: 'Debt-service coverage — EBITDA-based (from statements)', unit: 'times', definition: 'EBITDA over finance costs plus scheduled principal repayments. NOT the lender-defined DSCR. Uses the scheduled principal entered under Management Inputs → Debt schedule for the period; without it, the cash-flow repayments (which include prepayments and refinancing) are used and the result is a proxy.', formula: 'EBITDA ÷ (finance costs + scheduled principal repayments)', inputs: ['EBITDA', 'Finance costs', 'Scheduled principal (debt schedule) or repayments (cash flow)'], source: 'Statements + debt schedule', basis: 'flow', annual: 'none', srcRatio: 'rt.dscr',
   calc: e => { const x = e.ebitdaOf(e.flow), f = e.flow('pl.exp_fin'); const sch = scheduledPrincipal(e); if (sch != null) return ratioRes(x, f == null ? null : f + sch, { note: 'scheduled principal from the debt schedule input' }); const rep = e.flow('cf.borrow_out'); if (rep == null) return missing(`debt schedule (scheduled principal) or a cash flow statement for ${e.per?.short}`); return { ...ratioRes(x, f == null ? null : f - rep), status: PROXY, note: 'principal = repayments in the cash flow (includes prepayments / refinancing); enter the debt schedule for the scheduled principal' }; } });
 def({ cat: 'Interest & debt-service coverage', id: 'cov.dscr_lender', name: 'DSCR — lender definition', unit: 'times', definition: 'As defined in each loan agreement. Needs the covenant definition and threshold for each facility.', formula: 'Per covenant definition (Management Inputs → Covenants)', inputs: ['Covenant definition', 'Covenant threshold', 'Lender-defined numerator and denominator'], source: 'Management inputs', basis: 'flow', annual: 'per covenant',
-  calc: e => { const cov = (e.inputs.records || []).filter(r => r.type === 'covenant' && /dscr/i.test(r.values?.metric || '')); if (!cov.length) return missing('covenant definitions for DSCR (lender, facility, definition, threshold)'); return { v: null, status: MISSING, note: `Covenant definitions recorded (${cov.length}); the lender-defined numerator / denominator for ${e.per?.short} must be entered as a covenant test value` }; } });
+  calc: e => {
+    const cov = (e.inputs.records || []).filter(r => r.type === 'covenant' && /dscr/i.test(r.values?.metric || '') && (!r.basis || r.basis === e.b));
+    if (!cov.length) return missing('covenant definitions for DSCR (lender, facility, definition, threshold)');
+    const tested = cov.filter(r => r.values?.testedValue != null && r.values?.periodEnd === e.per?.end);
+    if (!tested.length) return { v: null, status: MISSING, note: `Covenant definitions recorded (${cov.length}); enter the value the lender's definition gives for the test period ending ${e.per?.end} (Debt & covenants → covenant tests)` };
+    // several facilities: show the tightest against its threshold
+    const head = r => (r.values.operator === '<=' ? r.values.threshold - r.values.testedValue : r.values.testedValue - r.values.threshold);
+    const t = tested.sort((a, c) => head(a) - head(c))[0];
+    return { v: Number(t.values.testedValue), status: OK, note: `as tested for ${t.values.facility || 'the facility'} (${t.values.operator} ${t.values.threshold}: ${head(t) >= 0 ? 'within threshold' : 'BREACH'})${tested.length > 1 ? `; tightest of ${tested.length} facilities` : ''}` };
+  } });
 
 // Operating efficiency and expense ratios
 def({ cat: 'Operating efficiency', id: 'eff.asset_turn', name: 'Asset turnover', unit: 'times', definition: 'Revenue (annualised) over average total assets.', formula: 'Revenue × 365 ÷ days ÷ average total assets', inputs: ['Revenue', 'Total assets'], source: STMT, basis: 'mixed', annual: '× 365 ÷ days',
@@ -255,7 +264,8 @@ function sharesAt(e) {
   return { n: null };
 }
 function scheduledPrincipal(e) {
-  const recs = (e.inputs.records || []).filter(r => r.type === 'debt_schedule' && r.periodEnd && r.periodEnd >= e.per.start && r.periodEnd <= e.per.end);
+  // a consolidated figure includes the standalone company's facilities
+  const recs = (e.inputs.records || []).filter(r => r.type === 'debt_schedule' && r.periodEnd && r.periodEnd >= e.per.start && r.periodEnd <= e.per.end && (!r.basis || e.b === 'CO' || r.basis === e.b));
   if (!recs.length) return null;
   return recs.reduce((s, r) => s + (Number(r.values?.principal) || 0), 0);
 }

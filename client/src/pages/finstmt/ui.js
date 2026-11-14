@@ -110,7 +110,7 @@ export function FilterBar({ F, setF, show = {}, periods = [], budgetVersions = [
         <option value="auto">Auto (same period last year)</option>{flow.map(p => <option key={p.id} value={p.id}>{p.short}{p.availability === 'derived' ? ' — derived' : ''}</option>)}
       </select></Lbl>}
       <Lbl t="Financial version"><select style={S.select} value={F.mode} onChange={e => set('mode', e.target.value)} title="As originally reported: the workbook prepared for the period (e.g. FY2025-26 from the audited annual workbook). Latest reported: the most recent workbook that repeats the period (restated / regrouped comparatives)."><option value="original">As originally reported</option><option value="latest">Latest reported / regrouped</option></select></Lbl>
-      {show.budget && <Lbl t="Budget version"><select style={S.select} value={F.budget || ''} onChange={e => set('budget', e.target.value)}><option value="">{budgetVersions.length ? '— choose —' : 'No budget entered'}</option>{budgetVersions.map(v => <option key={v}>{v}</option>)}</select></Lbl>}
+      {show.budget && <Lbl t="Budget version"><select style={S.select} value={F.budget || ''} onChange={e => set('budget', e.target.value)}><option value="">{budgetVersions.length ? 'Newest version' : 'No budget yet'}</option>{budgetVersions.map(v => <option key={v.id} value={v.id}>{v.name}{v.frozen ? ' (frozen)' : ''}</option>)}</select></Lbl>}
       {show.branch && <Lbl t="Branch / project"><select style={S.select} value={F.branch || ''} onChange={e => set('branch', e.target.value)}><option value="">All (company)</option>{branches.map(b => <option key={b}>{b}</option>)}</select></Lbl>}
       <Lbl t="Units"><select style={S.select} value={F.unit} onChange={e => set('unit', e.target.value)}><option value="inr">₹</option><option value="lakh">₹ lakh</option><option value="crore">₹ crore</option></select></Lbl>
       {show.display && <Lbl t="Show as"><select style={S.select} value={F.display} onChange={e => set('display', e.target.value)}><option value="amount">Amount</option><option value="pctrev">% of revenue</option><option value="seat">Per seat per month</option><option value="sqft">Per sq ft per month</option></select></Lbl>}
@@ -186,5 +186,6 @@ export function MissingInputs({ report, coverage }) {
   if (!list) return null;
   const missing = list.filter(x => !x.records);
   if (!missing.length) return null;
-  return <Note tone="warn"><b>Waiting for management inputs:</b> {missing.map(m => m.label).join(' · ')}. Enter them on the Management Inputs tab (form or Excel template). Until then the parts of this page that need them say "Missing input" — nothing is estimated.</Note>;
+  const here = missing.filter(m => !m.where), there = missing.filter(m => m.where);
+  return <Note tone="warn"><b>Waiting for inputs:</b> {here.length > 0 && <>{here.map(m => m.label).join(' · ')} (Management Inputs tab, form or Excel template){there.length ? '; ' : '. '}</>}{there.length > 0 && <>{there.map(m => `${m.label} (Data Validation & Reconciliation → ${m.where})`).join(' · ')}. </>}Until then the parts of this page that need them say "Missing input" — nothing is estimated.</Note>;
 }

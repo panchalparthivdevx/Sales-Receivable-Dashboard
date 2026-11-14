@@ -1,9 +1,10 @@
 import React from 'react';
 import { fsApi } from './api';
-import { C, S, Card, Note, Badge, Loading, ErrorBox, fmtVal, fmtAmt, unitLabel, pctTxt, useLoad, MissingInputs } from './ui';
+import { C, S, Card, Note, Badge, Loading, ErrorBox, fmtVal, fmtAmt, unitLabel, useLoad, MissingInputs } from './ui';
 import { ComparisonTable, Commentary } from './CompareTab';
 import { TrendChart } from './CfoTab';
-import { lineOfBudget, lineValue } from './calc';
+import { lineValue } from './calc';
+import { BudgetVsActual } from './BudgetSection';
 
 const yoyOf = p => p.replace(/^FY(\d{4})/, (m, y) => `FY${+y - 1}`);
 
@@ -22,7 +23,6 @@ export default function PerformanceTab({ F, onGoImport }) {
   const rv = (i, id) => R[i]?.values?.[id];
   const recs = inputs.data?.records || [];
   const per = cmp.data?.current;
-  const budgets = per ? recs.filter(r => r.type === 'budget' && r.values.periodEnd === per.end && (!r.values.periodStart || r.values.periodStart === per.start) && !r.branch && (!F.budget || r.values.version === F.budget)) : [];
   const classes = recs.filter(r => r.type === 'cost_class');
   const revNote = notes.data?.groups?.find(g => g.lines.includes('pl.rev'));
   const revItems = revNote ? revNote.rows.filter(r => !r.subhead && !r.total && r.cells[cur]?.v) : [];
@@ -71,11 +71,8 @@ export default function PerformanceTab({ F, onGoImport }) {
         </Card>
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(420px, 1fr))', gap: 16 }}>
-        <Card title={`Budget vs actual${F.budget ? ` — ${F.budget}` : ''}`}>
-          {!budgets.length ? <Note tone="warn">No budget for {per?.label || 'this period'}. Enter budgets on Management Inputs (form or Excel template) — budgets are matched to exact periods and never pro-rated.</Note> :
-            <table style={{ width: '100%', borderCollapse: 'collapse' }}><thead><tr><th style={S.th}>Line</th><th style={S.th}>Version</th><th style={{ ...S.th, ...S.num }}>Budget</th><th style={{ ...S.th, ...S.num }}>Actual</th><th style={{ ...S.th, ...S.num }}>Variance</th></tr></thead>
-              <tbody>{budgets.map(b => { const id = lineOfBudget(b.values.line); const a = id ? lineValue(pl.data, id, cur) : null; const fav = a == null ? null : (/expense|cost|depreciation|capex/i.test(b.values.line) ? a <= b.values.amount : a >= b.values.amount);
-                return <tr key={b.id}><td style={S.td}>{b.values.line}</td><td style={S.td}>{b.values.version}</td><td style={{ ...S.td, ...S.num }}>{fmtAmt(b.values.amount, F.unit)}</td><td style={{ ...S.td, ...S.num }}>{a == null ? 'n/a' : fmtAmt(a, F.unit)}</td><td style={{ ...S.td, ...S.num, color: fav == null ? C.ink : fav ? C.good : C.bad }}>{a == null ? '' : `${fmtAmt(a - b.values.amount, F.unit)} (${pctTxt(b.values.amount ? (a - b.values.amount) / Math.abs(b.values.amount) : null)}) ${fav ? 'favourable' : 'adverse'}`}</td></tr>; })}</tbody></table>}
+        <Card title="Budget vs actual">
+          <BudgetVsActual F={F} period={cur} />
         </Card>
         <Card title="Break-even (fixed / variable costs)">
           {!breakEven ? <Note tone="warn">Needs the fixed / variable classification of expense lines (Management Inputs → Fixed / variable cost classification). Nothing is assumed.</Note> :

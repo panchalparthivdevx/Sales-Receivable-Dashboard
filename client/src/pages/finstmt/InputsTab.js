@@ -8,9 +8,12 @@ import { BUDGET_LINES } from './calc';
 const ALERT_METRICS = [['liq.cr', 'Current ratio (×)'], ['lev.de', 'Debt / equity excl. leases (×)'], ['lev.nd_ebitda_l', 'Net debt incl. leases / TTM EBITDA (×)'], ['cov.iscr', 'Interest coverage (×)'], ['cov.dscr_ebitda', 'EBITDA-based DSCR (×)'],
   ['wc.dso', 'DSO (days)'], ['prof.ebitda_m', 'EBITDA margin (fraction, e.g. 0.6)'], ['prof.pat_m', 'PAT margin (fraction)'], ['unit.occupancy', 'Occupancy (fraction)']];
 
-export default function InputsTab({ rights }) {
+// inputs now kept as formats on Data Validation & Reconciliation (its section ids)
+export const MOVED_SECTION = { Budget: 'budget', 'Branch master': 'branches', 'Collections & payments forecast': 'forecast', 'Debt & covenants': 'debt' };
+
+export default function InputsTab({ rights, goValidation }) {
   const inp = useLoad(() => fsApi.inputs(), []);
-  const [type, setType] = useState('budget');
+  const [type, setType] = useState('branch_capacity');
   const [form, setForm] = useState({ basis: 'SA', source: '', values: {} });
   const [msg, setMsg] = useState('');
   const [settings, setSettings] = useState(null);
@@ -20,6 +23,8 @@ export default function InputsTab({ rights }) {
   const T = d.types[type];
   const recs = d.records.filter(r => r.type === type).sort((a, b) => (b.periodEnd || b.effectiveDate || '').localeCompare(a.periodEnd || a.effectiveDate || ''));
   const can = rights?.inputs;
+  const moved = T.moved;
+  const open = where => goValidation && goValidation(MOVED_SECTION[where] || 'recon');
   const st = settings || { thresholds: d.settings?.thresholds || {}, alerts: d.settings?.alerts || {}, gstOnReceivables: d.settings?.gstOnReceivables ?? '' };
   const flash = t => { setMsg(t); setTimeout(() => setMsg(''), 5000); };
   const save = async () => {
@@ -44,18 +49,19 @@ export default function InputsTab({ rights }) {
       <Card title="What each report is waiting for">
         <div style={{ overflowX: 'auto' }}><table style={{ width: '100%', borderCollapse: 'collapse' }}>
           <thead><tr><th style={S.th}>Report</th><th style={S.th}>Inputs it needs (records entered)</th></tr></thead>
-          <tbody>{Object.entries(d.coverage.reports).map(([rep, list]) => <tr key={rep}><td style={{ ...S.td, fontWeight: 600 }}>{rep}</td><td style={S.td}>{list.map(x => <span key={x.type} onClick={() => setType(x.type)} style={{ display: 'inline-block', marginRight: 10, cursor: 'pointer', color: x.records ? C.good : C.warn }}>{x.records ? '✓' : '○'} {x.label} ({x.records})</span>)}</td></tr>)}</tbody>
+          <tbody>{Object.entries(d.coverage.reports).map(([rep, list]) => <tr key={rep}><td style={{ ...S.td, fontWeight: 600 }}>{rep}</td><td style={S.td}>{list.map(x => <span key={x.type} onClick={() => (x.where ? open(x.where) : setType(x.type))} title={x.where ? `Kept on Data Validation & Reconciliation → ${x.where}` : ''} style={{ display: 'inline-block', marginRight: 10, cursor: 'pointer', color: x.records ? C.good : C.warn }}>{x.records ? '✓' : '○'} {x.label} ({x.records}){x.where ? <span style={{ color: C.info }}> → {x.where}</span> : null}</span>)}</td></tr>)}</tbody>
         </table></div>
-        <div style={{ ...S.small, marginTop: 6 }}>Nothing here has a default. The sample amounts and thresholds in the requirements are illustrative and are not loaded.</div>
+        <div style={{ ...S.small, marginTop: 6 }}>Nothing here has a default. The sample amounts and thresholds in the requirements are illustrative and are not loaded. Budget, branch master, collection / payment forecast, debt schedule and covenants are kept as formats on Data Validation & Reconciliation (blue links).</div>
       </Card>
       <Card title="Enter or upload" right={<>
-        <select style={S.select} value={type} onChange={e => { setType(e.target.value); setForm({ basis: form.basis, source: form.source, values: {} }); }}>{Object.entries(d.types).map(([k, t]) => <option key={k} value={k}>{t.label}</option>)}</select>
-        <button style={S.btn('outline')} onClick={() => fsApi.download(`/inputs/template/${type}`, {}, `${type}_template.xlsx`)}><Download size={14} />Template</button>
-        {can && <label style={{ ...S.btn('outline'), cursor: 'pointer' }}><Upload size={14} />Upload Excel<input type="file" accept=".xlsx" style={{ display: 'none' }} onChange={e => { if (e.target.files[0]) upload(e.target.files[0]); e.target.value = ''; }} /></label>}
+        <select style={S.select} value={type} onChange={e => { setType(e.target.value); setForm({ basis: form.basis, source: form.source, values: {} }); }}>{Object.entries(d.types).filter(([k, t]) => !t.moved || k === type || d.records.some(r => r.type === k)).map(([k, t]) => <option key={k} value={k}>{t.label}{t.moved ? ` (earlier entries — now on Data Validation → ${t.moved})` : ''}</option>)}</select>
+        {!moved && <button style={S.btn('outline')} onClick={() => fsApi.download(`/inputs/template/${type}`, {}, `${type}_template.xlsx`)}><Download size={14} />Template</button>}
+        {can && !moved && <label style={{ ...S.btn('outline'), cursor: 'pointer' }}><Upload size={14} />Upload Excel<input type="file" accept=".xlsx" style={{ display: 'none' }} onChange={e => { if (e.target.files[0]) upload(e.target.files[0]); e.target.value = ''; }} /></label>}
         {can && type === 'branch_capacity' && <button style={S.btn('outline')} onClick={prefill} title="Copy the seats and sq ft kept for the Finance Overview branch P&L (undated) as rows effective from a date you give">Prefill from Finance Overview</button>}
       </>}>
-        <div style={{ ...S.small, marginBottom: 10 }}>{T.help} Unit: {T.unit}.</div>
-        {can && <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'flex-end', marginBottom: 12 }}>
+        {moved ? <Note>{T.label} are now kept on Data Validation & Reconciliation → {moved}, with their own format to fill in and upload. {goValidation && <button style={S.btn('primary')} onClick={() => open(moved)}>Open {moved}</button>} Entries made here earlier are listed below{T.label === 'Covenants' || /debt/i.test(T.label) ? ' and still count until a debt schedule is entered there' : ''}.</Note>
+          : <div style={{ ...S.small, marginBottom: 10 }}>{T.help} Unit: {T.unit}.</div>}
+        {can && !moved && <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'flex-end', marginBottom: 12 }}>
           <label style={S.small}>Company<br /><input style={S.input} value="Dev Accelerator Ltd" disabled /></label>
           <label style={S.small}>Basis<br /><select style={S.select} value={form.basis} onChange={e => setForm(f => ({ ...f, basis: e.target.value }))}><option value="SA">Standalone</option><option value="CO">Consolidated</option></select></label>
           {T.fields.map(f => <label key={f.key} style={S.small}>{f.label}{f.required ? ' *' : ''}<br />

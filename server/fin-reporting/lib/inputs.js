@@ -42,6 +42,9 @@ const TYPES = {
     fields: [['metric', 'Metric', str, true], ['periodEnd', 'Period end', date, true], ['target', 'Target value', num, true], ['unit', 'Unit', str, false]] },
 };
 
+// Kept on Data Validation & Reconciliation (planning sections) instead of here; older records of these types still count
+const MOVED = { budget: 'Budget', branch_opening: 'Branch master', collection_forecast: 'Collections & payments forecast', payment_forecast: 'Collections & payments forecast', debt_schedule: 'Debt & covenants', covenant: 'Debt & covenants' };
+
 // What each report / ratio needs from these inputs
 const REQUIRED_BY = {
   'CFO Overview': ['budget', 'branch_capacity', 'collection_forecast', 'payment_forecast', 'debt_schedule', 'covenant', 'capex', 'target'],
@@ -141,11 +144,12 @@ function parseUpload(type, buf, user) {
 function emptyStore() { return { records: [], settings: { thresholds: {}, alerts: {}, gstOnReceivables: null } }; }
 
 /** Which inputs are present, and what each report is waiting for */
-function coverage(store) {
+function coverage(store, planning = {}) {
   const counts = {};
   for (const r of store.records || []) counts[r.type] = (counts[r.type] || 0) + 1;
-  const reports = Object.fromEntries(Object.entries(REQUIRED_BY).map(([rep, types]) => [rep, types.map(t => ({ type: t, label: TYPES[t].label, records: counts[t] || 0 }))]));
+  for (const [t, n] of Object.entries(planning)) counts[t] = (counts[t] || 0) + (n || 0);
+  const reports = Object.fromEntries(Object.entries(REQUIRED_BY).map(([rep, types]) => [rep, types.map(t => ({ type: t, label: TYPES[t].label, records: counts[t] || 0, where: MOVED[t] || null }))]));
   return { counts, reports, alertsSet: Object.keys(store.settings?.alerts || {}).length };
 }
 
-module.exports = { TYPES, REQUIRED_BY, validate, normalise, template, parseUpload, emptyStore, coverage, COMPANY };
+module.exports = { TYPES, MOVED, REQUIRED_BY, validate, normalise, template, parseUpload, emptyStore, coverage, COMPANY };

@@ -1427,6 +1427,9 @@ export default function FinancialStatements() {
   const [source, setSource]     = useState({ bs: 'imported', pl: 'imported', notes: 'imported' });
   const [F, setF] = useState({ basis: 'SA', mode: 'original', unit: 'lakh', fy: null, period: null, cmp: 'auto', budget: '', branch: '', display: 'amount', withAdj: false });
 
+  const [budgetVersions, setBudgetVersions] = useState([]);
+  useEffect(() => { if (['cfo', 'performance'].includes(tab)) fsApi.budgetVersions().then(r => setBudgetVersions(r.versions || [])).catch(() => setBudgetVersions([])); }, [tab]);
+  const goValidation = useCallback(section => { try { sessionStorage.setItem('fs_validation_section', section); } catch { /* private mode */ } setTab('validation'); }, []);
   const reloadStatus = useCallback(() => fsApi.status().then(s => { setFsStatus(s); return s; }).catch(() => setFsStatus({ active: null, versions: [], staging: [], rights: {} })), []);
   useEffect(() => { reloadStatus(); }, [reloadStatus]);
   useEffect(() => {
@@ -1645,7 +1648,7 @@ export default function FinancialStatements() {
         ))}
       </div>
 
-      {showFilters && imported && <FilterBar F={F} setF={setF} show={FILTERS_FOR[tab] || {}} periods={plPeriods} budgetVersions={[]} branches={[]} />}
+      {showFilters && imported && <FilterBar F={F} setF={setF} show={FILTERS_FOR[tab] || {}} periods={plPeriods} budgetVersions={budgetVersions} branches={[]} />}
 
       {/* Balance Sheet */}
       {tab === 'bs' && <>
@@ -1715,7 +1718,7 @@ export default function FinancialStatements() {
       {imported && tab === 'capex' && <CapexTab F={F} onGoImport={goImport} />}
       {tab === 'client' && <ClientTab F={F} />}
       {tab === 'compliance' && <ComplianceTab F={F} goTab={setTab} />}
-      {tab === 'inputs' && <InputsTab rights={fsStatus.rights} />}
+      {tab === 'inputs' && <InputsTab rights={fsStatus.rights} goValidation={goValidation} />}
       {tab === 'validation' && <ValidationTab F={F} status={fsStatus} reloadStatus={reloadStatus} />}
 
       {/* Chart of Accounts */}

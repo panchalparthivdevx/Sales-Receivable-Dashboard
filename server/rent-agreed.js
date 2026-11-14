@@ -329,4 +329,4 @@ function attachAgreed(rows, monthKeys) {
   return { file: book.file, matched, groups: Object.keys(groups).length, unmatched };
 }
 
-module.exports = { attachAgreed, loadAgreements, pickLocalWorkbook, ROOT, agreedForMonth, branchKey, vendorKey, officeKey, nameScore, toMonth };
+module.exports = { attachAgreed, loadAgreements, pickLocalWorkbook, pickWorkbook, ROOT, agreedForMonth, branchKey, vendorKey, officeKey, nameScore, toMonth };

@@ -1,12 +1,36 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import { FolderOpen, Upload, CheckCircle2, RotateCcw, Trash2 } from 'lucide-react';
 import { fsApi, errText } from './api';
 import { C, S, Card, Note, Badge, Loading, fmtVal, useLoad, ExportButtons, exportPdf, pdfMeta } from './ui';
+import BudgetSection, { Pills } from './BudgetSection';
+import { BranchMasterSection, ForecastSection, DebtSection } from './PlanningTabs';
 
 const STATUSES = ['Material difference', 'Unreconciled', 'Difference', 'Rounding', 'Agrees', 'Info'];
 const pLabel = p => (p ? p.replace(/^FY(\d{4})-(.*)$/, (m, y, k) => `${k === 'FY' ? '' : `${k} `}FY${y.slice(2)}`).replace(/^BS-/, 'As at ') : '');
 
-export default function ValidationTab({ F, status, reloadStatus }) {
+// Sections: the import and reconciliation of the published workbooks, then the planning inputs (formats to fill in)
+const SECTIONS = [['recon', 'Reconciliation & import'], ['budget', 'Budget'], ['branches', 'Branch master'], ['forecast', 'Collections & payments forecast'], ['debt', 'Debt schedule & covenants']];
+
+export default function ValidationTab(props) {
+  const [section, setSection] = useState(() => { try { return sessionStorage.getItem('fs_validation_section') || 'recon'; } catch { return 'recon'; } });
+  const [msg, setMsg] = useState('');
+  const choose = k => { setSection(k); try { sessionStorage.setItem('fs_validation_section', k); } catch { /* private mode */ } };
+  const timer = useRef(null);
+  // a newer message restarts the clock, so an earlier one's timer cannot clear it
+  const flash = t => { setMsg(t); clearTimeout(timer.current); timer.current = setTimeout(() => setMsg(''), 12000); };
+  const rights = props.status?.rights || {};
+  return <div>
+    <Pills value={section} onChange={choose} items={SECTIONS} />
+    {msg && section !== 'recon' && <div style={{ ...S.card, background: C.tint, color: C.green, fontSize: '0.8rem', whiteSpace: 'pre-wrap', position: 'sticky', top: 0, zIndex: 5 }}>{msg}</div>}
+    {section === 'recon' && <ReconSection {...props} />}
+    {section === 'budget' && <BudgetSection rights={rights} flash={flash} />}
+    {section === 'branches' && <BranchMasterSection rights={rights} flash={flash} />}
+    {section === 'forecast' && <ForecastSection rights={rights} flash={flash} />}
+    {section === 'debt' && <DebtSection rights={rights} flash={flash} />}
+  </div>;
+}
+
+function ReconSection({ F, status, reloadStatus }) {
   const [busy, setBusy] = useState('');
   const [msg, setMsg] = useState('');
   const rec = useLoad(() => (status?.active ? fsApi.recon(F.mode) : Promise.resolve(null)), [status?.active?.id, F.mode]);

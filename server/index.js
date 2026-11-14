@@ -16124,7 +16124,35 @@ app.get('/api/cron/gstr2b-recheck', cronAuth, gstr2b.cronRecheck);
 // Self-contained module — see server/fin-reporting/README.md. It never writes to Zoho; the balance sheet and P&L already in
 // this module (financial_bs_data / financial_pl_data) are read only to compare them with the imported figures.
 const finReporting = require('./fin-reporting');
-finReporting.init({ readLegacy: async () => ({ bs: await readFinBsData(), pl: await readFinData() }) });
+finReporting.init({
+  readLegacy: async () => ({ bs: await readFinBsData(), pl: await readFinData() }),
+  // read-only access to the caches the budget, forecasts and branch master are built from
+  ops: {
+    readSynced: entity => syncEngine.readSyncedData(entity),
+    invoiceSubtotals: async () => { if (!Object.keys(_invSubTotals).length) await _loadInvSubTotals(); return _invSubTotals; },
+    plMapping: () => readPLMapping(),
+    plAcctTxns: (fy, accountId) => readPLAcctTxnsDisk(fy, accountId),
+    plPrefetchStatus: fy => _plPrefetchStatus[fy] || null,
+    plPrefetch: async fy => {
+      if (_plPrefetchStatus[fy]?.running) return { ok: false, message: 'Already running', status: _plPrefetchStatus[fy] };
+      const mapping = await readPLMapping();
+      const accountIds = [...new Set(mapping.heads.flatMap(h => (h.accounts || []).map(a => a.account_id).filter(Boolean)))];
+      if (!accountIds.length) return { ok: false, message: 'No accounts are mapped in the Branch P&L mapping.' };
+      background(new Promise(done => setImmediate(() => runPLPrefetch(fy, accountIds, 'budget').finally(done))));
+      return { ok: true, fy, accounts: accountIds.length, message: `Fetching ${accountIds.length} accounts from Zoho for FY ${fy}.` };
+    },
+    plCapacity: () => readPLCapacity(),
+    loanData: async () => readLoanData(),
+    branches: async () => BUDGET_BRANCHES,
+    agreements: () => readAgreementsData(),
+    rentBillDetails: () => rptStore('rent_bill_details', RENT_DETAILS_FILE),
+    rentWorkbook: async () => {
+      const ra = require('./rent-agreed');
+      const p = ra.pickWorkbook();
+      return p ? { file: p.f, wb: workbooks.read('rent_module', path.join(ra.ROOT, p.f)) } : null;
+    },
+  },
+});
 app.use('/api/fin-reporting', finReporting);
 
 // ─── Serve React build (must be after all API routes) ─────────────────────────

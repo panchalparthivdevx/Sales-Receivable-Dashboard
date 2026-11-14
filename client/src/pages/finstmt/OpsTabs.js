@@ -5,6 +5,18 @@ import PLReport from '../../components/PLReport';
 import { fsApi } from './api';
 import { C, S, Card, Note, Badge, Loading, ErrorBox, fmtVal, fmtAmt, unitLabel, useLoad, MissingInputs } from './ui';
 import { rsToLakh } from './calc';
+import { mLabel } from './BudgetSection';
+
+// planning data kept on Data Validation & Reconciliation (forecast, debt schedule, branch master)
+const useForecast = () => useLoad(() => fsApi.forecast().catch(() => null), []);
+const FcNote = ({ fc }) => (fc.data ? <div style={S.small}>Forecast from today: clients' and vendors' payment days over the last 12 months in Zoho{fc.data.budget ? `, the budget "${fc.data.budget.name}"` : ''}, rent agreements and the debt schedule. Details, settings and manual lines: Data Validation & Reconciliation → Collections & payments forecast.</div> : null);
+function FcKinds({ fc, dir, du }) {
+  if (fc.loading) return <Loading />;
+  if (!fc.data?.table?.length) return <Note tone="warn">The forecast is not available just now (Data Validation & Reconciliation → Collections & payments forecast).</Note>;
+  const k = dir === 'in' ? 'ins' : 'outs';
+  const kinds = [...new Set(fc.data.table.flatMap(r => Object.keys(r[k])))];
+  return <T head={['Month', ...kinds, 'Total']} num={kinds.map((_, i) => i + 1).concat(kinds.length + 1)} rows={fc.data.table.map(r => [mLabel(r.month), ...kinds.map(x => fmtAmt(r[k][x] || 0, du)), fmtAmt(dir === 'in' ? r.totalIn : r.totalOut, du)])} />;
+}
 
 // Operational reports. Statement figures (period-matched) and live module data (as of today) are always labelled as such;
 // nothing operational is inferred from statement totals.
@@ -43,6 +55,8 @@ export function BranchTab({ F }) {
   const recs = inp.data?.records || [];
   const cap = recs.filter(r => r.type === 'branch_capacity').sort((a, b) => (a.branch || '').localeCompare(b.branch || '') || (a.effectiveDate || '').localeCompare(b.effectiveDate || ''));
   const open = recs.filter(r => r.type === 'branch_opening');
+  const master = useLoad(() => fsApi.branches().catch(() => null), []);
+  const brs = master.data?.items || [];
   return <div>
     <MissingInputs report="Branch Performance" coverage={inp.data?.coverage} />
     <Note>Branch results come from Zoho Books (the Finance Overview branch P&L report below), because the published statements are company-level only. Company-level figures are never split across branches here.</Note>
@@ -58,7 +72,9 @@ export function BranchTab({ F }) {
           {live('Sales module (seats on current invoices)')}</>}
       </Card>
     </div>
-    <Card title="Branch opening dates">{!open.length ? <Note tone="warn">No opening dates entered (Management Inputs → Branch opening dates). Needed for like-for-like and ramp-up views.</Note> : <T head={['Branch', 'Opened', 'Closed', 'Model', 'Source']} rows={open.map(r => [r.branch, r.effectiveDate, r.values.closingDate || '—', r.values.model || '—', r.source])} />}</Card>
+    <Card title="Branch master — dates, model, area and seats">{master.loading ? <Loading /> : !brs.length ? <Note tone="warn">No branch saved in the branch master yet (Data Validation & Reconciliation → Branch master). Needed for like-for-like and ramp-up views and for per-seat figures.</Note> :
+      <T head={['Branch', 'City', 'Model', 'Zone', 'Super built-up (sq ft)', 'Carpet (sq ft)', 'Seats', 'Expense start', 'Revenue start', 'Status']} num={[4, 5, 6]} rows={brs.map(b => [b.name, b.city || '—', b.model || '—', b.zone || '—', b.superBuiltUp != null ? fmtVal(b.superBuiltUp, 'nos') : '—', b.carpet != null ? fmtVal(b.carpet, 'nos') : '—', b.seats != null ? fmtVal(b.seats, 'nos') : '—', b.expenseStart || '—', b.revenueStart || '—', b.status || '—'])} />}
+      {open.length > 0 && <div style={{ marginTop: 10 }}><div style={S.small}>Opening dates entered earlier on Management Inputs:</div><T head={['Branch', 'Opened', 'Closed', 'Model', 'Source']} rows={open.map(r => [r.branch, r.effectiveDate, r.values.closingDate || '—', r.values.model || '—', r.source])} /></div>}</Card>
   </div>;
 }
 
@@ -68,7 +84,7 @@ export function ArTab({ F, onGoImport }) {
   const r = useRatioSeries(F, ['wc.dso']);
   const ar = useLoad(() => api.arAging().catch(() => null), []);
   const inp = useInputs();
-  const fc = (inp.data?.records || []).filter(x => x.type === 'collection_forecast').sort((a, b) => a.periodEnd.localeCompare(b.periodEnd));
+  const fc = useForecast();
   if (s.error) return <ErrorBox error={s.error} onGo={onGoImport} />;
   return <div>
     <MissingInputs report="AR & Collections" coverage={inp.data?.coverage} />
@@ -84,7 +100,7 @@ export function ArTab({ F, onGoImport }) {
         <T head={['Customer', 'Outstanding', '> 90 days']} num={[1, 2]} rows={ar.data.customers.slice(0, 15).map(c => [c.customer_name, fmtAmt(rsToLakh(c.total_outstanding), F.unit), fmtAmt(rsToLakh(c.buckets.slice(2).reduce((t, b) => t + b.amount, 0)), F.unit)])} />
         {live('Sales module (Zoho invoices, incl. GST)', ar.data.as_of)}</>}
     </Card>
-    <Card title="Collection forecast vs collections">{!fc.length ? <Note tone="warn">No collection forecast entered (Management Inputs → Collection forecast).</Note> : <T head={['Month', 'Branch', 'Client', `Expected (${unitLabel(F.unit)})`, 'Source']} num={[3]} rows={fc.map(x => [x.periodEnd, x.branch || '—', x.values.client || '—', fmtAmt(x.values.amount, F.unit), x.source])} />}</Card>
+    <Card title={`Collection forecast (${unitLabel(F.unit)}, after TDS)`}><FcKinds fc={fc} dir="in" du={F.unit} /><FcNote fc={fc} /></Card>
   </div>;
 }
 
@@ -94,7 +110,7 @@ export function ApTab({ F, onGoImport }) {
   const r = useRatioSeries(F, ['wc.dpo']);
   const ap = useLoad(() => api.purApAging().catch(() => null), []);
   const inp = useInputs();
-  const fc = (inp.data?.records || []).filter(x => x.type === 'payment_forecast').sort((a, b) => a.periodEnd.localeCompare(b.periodEnd));
+  const fc = useForecast();
   if (s.error) return <ErrorBox error={s.error} onGo={onGoImport} />;
   return <div>
     <MissingInputs report="AP & Payments" coverage={inp.data?.coverage} />
@@ -109,7 +125,7 @@ export function ApTab({ F, onGoImport }) {
         <T head={['Bucket (days past due)', `Outstanding (${unitLabel(F.unit)})`, 'Bills']} num={[1, 2]} rows={['current', '0-30', '31-60', '61-90', '90+'].map(k => [k === 'current' ? 'Not yet due' : k, fmtAmt(rsToLakh(ap.data[k]?.total), F.unit), ap.data[k]?.count ?? ''])} />
         {live('Purchase module (Zoho bills)')}</>}
     </Card>
-    <Card title="Payment forecast">{!fc.length ? <Note tone="warn">No payment forecast entered (Management Inputs → Payment forecast).</Note> : <T head={['Month', 'Category', 'Branch', `Amount (${unitLabel(F.unit)})`, 'Source']} num={[3]} rows={fc.map(x => [x.periodEnd, x.values.category, x.branch || '—', fmtAmt(x.values.amount, F.unit), x.source])} />}</Card>
+    <Card title={`Payment forecast (${unitLabel(F.unit)})`}><FcKinds fc={fc} dir="out" du={F.unit} /><FcNote fc={fc} /></Card>
   </div>;
 }
 
@@ -118,12 +134,8 @@ export function CashTab({ F, onGoImport }) {
   const bs = useSeries(F, 'BS', ['bs.cash']);
   const cf = useSeries(F, 'CF', ['cf.cfo']);
   const inp = useInputs();
-  const recs = inp.data?.records || [];
-  const coll = recs.filter(r => r.type === 'collection_forecast'), pay = recs.filter(r => r.type === 'payment_forecast'), dsch = recs.filter(r => r.type === 'debt_schedule');
-  const months = [...new Set([...coll, ...pay, ...dsch].map(r => r.periodEnd))].sort();
+  const fc = useForecast();
   if (bs.error) return <ErrorBox error={bs.error} onGo={onGoImport} />;
-  const lastBs = bs.data?.periods?.[bs.data.periods.length - 1];
-  let run = lastBs ? ['bs.cash', 'bs.obank', 'bs.c_inv'].reduce((t, id) => t + (bs.data.get(id, lastBs.id) || 0), 0) : null;
   return <div>
     <MissingInputs report="Cash & Treasury" coverage={inp.data?.coverage} />
     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(420px, 1fr))', gap: 16 }}>
@@ -133,9 +145,10 @@ export function CashTab({ F, onGoImport }) {
         <div style={S.small}>Cash flow statements are published for half years and years; quarters are not available and are not derived.</div></Card>
     </div>
     <Card title="Cash forecast and funding gap">
-      {!months.length ? <Note tone="warn">No collection, payment or debt-service forecast entered. Management Inputs → Collection forecast, Payment forecast, Debt schedule.</Note> :
-        <T head={['Month', 'Collections', 'Payments', 'Debt service', 'Net', 'Closing cash']} num={[1, 2, 3, 4, 5]} rows={months.map(m => { const a = coll.filter(r => r.periodEnd === m).reduce((t, r) => t + r.values.amount, 0), b = pay.filter(r => r.periodEnd === m).reduce((t, r) => t + r.values.amount, 0), d = dsch.filter(r => r.periodEnd === m).reduce((t, r) => t + r.values.principal + (r.values.interest || 0), 0); run = run == null ? null : run + a - b - d; return [m, fmtAmt(a, F.unit), fmtAmt(b, F.unit), fmtAmt(d, F.unit), fmtAmt(a - b - d, F.unit), <span style={{ color: run != null && run < 0 ? C.bad : C.ink }}>{run == null ? 'n/a' : fmtAmt(run, F.unit)}{run != null && run < 0 ? ' funding gap' : ''}</span>]; })} />}
-      {lastBs && <div style={S.small}>Opening balance = cash, bank and liquid investments as at {lastBs.label.replace('As at ', '')}. Months between that date and the first forecast month are not filled in.</div>}
+      {fc.loading ? <Loading /> : !fc.data?.table?.length ? <Note tone="warn">The forecast is not available just now (Data Validation & Reconciliation → Collections & payments forecast).</Note> :
+        <T head={['Month', 'Collections', 'Payments (excl. debt service)', 'Debt service', 'Net', 'Closing cash']} num={[1, 2, 3, 4, 5]} rows={fc.data.table.map(r => { const ds = r.outs['Debt service'] || 0; return [mLabel(r.month), fmtAmt(r.totalIn, F.unit), fmtAmt(r.totalOut - ds, F.unit), fmtAmt(ds, F.unit), fmtAmt(r.net, F.unit), <span style={{ color: r.gap ? C.bad : C.ink }}>{r.closing == null ? 'opening cash n/a' : fmtAmt(r.closing, F.unit)}{r.gap ? ' funding gap' : ''}</span>]; })} />}
+      {fc.data?.opening && <div style={S.small}>Opening: {fc.data.opening.source === 'entered' ? 'bank balance entered' : fc.data.opening.source} (as at {fc.data.opening.asAt}).</div>}
+      <FcNote fc={fc} />
     </Card>
   </div>;
 }
@@ -146,8 +159,11 @@ export function DebtTab({ F, onGoImport }) {
   const r = useRatioSeries(F, ['cov.iscr']);
   const loans = useLoad(() => api.loanData().catch(() => null), []);
   const inp = useInputs();
-  const recs = inp.data?.records || [];
-  const sch = recs.filter(x => x.type === 'debt_schedule'), cov = recs.filter(x => x.type === 'covenant');
+  const debt = useLoad(() => fsApi.debt().catch(() => null), []);
+  const facs = debt.data?.facilities || [], cov = debt.data?.covenants || [];
+  // schedule rows in ₹ lakh with their due dates
+  const sch = (debt.data?.schedule || []).filter(x => facs.some(y => y.id === x.facilityId && (F.basis === 'CO' || y.basis !== 'CO'))).map(x => ({ periodEnd: x.dueDate, principal: rsToLakh(x.principal), interest: rsToLakh(x.interest) }));
+  const facName = id => (id === 'ALL' ? 'All facilities' : facs.find(x => x.id === id) ? `${facs.find(x => x.id === id).lender} / ${facs.find(x => x.id === id).facilityName}` : '—');
   if (bs.error) return <ErrorBox error={bs.error} onGo={onGoImport} />;
   const lastBs = bs.data?.periods?.[bs.data.periods.length - 1];
   const asOf = lastBs ? lastBs.end : null;
@@ -159,15 +175,14 @@ export function DebtTab({ F, onGoImport }) {
     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(420px, 1fr))', gap: 16 }}>
       <Card title="Coverage and leverage (from the statements)">{r.loading ? <Loading /> : <T head={['Period', 'Interest cover (EBITDA)', 'EBITDA-based DSCR', 'Net debt incl. leases / TTM EBITDA', 'Debt / equity']} num={[1, 2, 3, 4]} rows={(r.data?.results || []).map(x => [x.period.short, fmtVal(x.values['cov.iscr']?.v, 'times'), <span>{fmtVal(x.values['cov.dscr_ebitda']?.v, 'times')} <Badge status={x.values['cov.dscr_ebitda']?.status} title={x.values['cov.dscr_ebitda']?.note} /></span>, fmtVal(x.values['lev.nd_ebitda_l']?.v, 'times'), fmtVal(x.values['lev.de']?.v, 'times')])} />}
         <div style={S.small}>The EBITDA-based DSCR is not the lender's DSCR. Lender covenants are tested below on their own definitions.</div></Card>
-      <Card title="Maturity profile (debt schedule)">{!sch.length ? <Note tone="warn">No debt schedule entered (Management Inputs → Debt principal & interest schedule).</Note> : <T head={['Bucket', 'Principal', 'Interest']} num={[1, 2]} rows={buckets.map(([l, a, b]) => { const rr = sch.filter(x => x.periodEnd > a && x.periodEnd <= b); return [l, fmtAmt(rr.reduce((t, x) => t + x.values.principal, 0), F.unit), fmtAmt(rr.reduce((t, x) => t + (x.values.interest || 0), 0), F.unit)]; })} />}
-        {asOf && sch.length > 0 && <div style={S.small}>From the latest balance-sheet date ({asOf}).</div>}</Card>
+      <Card title="Maturity profile (debt schedule)">{!sch.length ? <Note tone="warn">No debt schedule entered (Data Validation & Reconciliation → Debt schedule & covenants).</Note> : <T head={['Bucket', 'Principal', 'Interest']} num={[1, 2]} rows={buckets.map(([l, a, b]) => { const rr = sch.filter(x => x.periodEnd > a && x.periodEnd <= b); return [l, fmtAmt(rr.reduce((t, x) => t + x.principal, 0), F.unit), fmtAmt(rr.reduce((t, x) => t + (x.interest || 0), 0), F.unit)]; })} />}
+        {asOf && sch.length > 0 && <div style={S.small}>From the latest balance-sheet date ({asOf}); {facs.length} facilit{facs.length === 1 ? 'y' : 'ies'}.</div>}</Card>
     </div>
-    <Card title="Covenant headroom">{!cov.length ? <Note tone="warn">No covenants entered (Management Inputs → Covenants: lender, facility, metric, definition, test and threshold). Covenant status is never assumed.</Note> :
-      <T head={['Lender / facility', 'Metric', 'Definition', 'Test', 'Tested value', 'Headroom', 'Status']} rows={cov.map(c => { const v = c.values.testedValue; const ok = v == null ? null : c.values.operator === '>=' ? v >= c.values.threshold : v <= c.values.threshold; const head = v == null ? null : c.values.operator === '>=' ? v - c.values.threshold : c.values.threshold - v;
-        return [`${c.values.lender} / ${c.values.facility}`, c.values.metric, c.values.definition, `${c.values.operator} ${c.values.threshold}`, v == null ? '—' : `${v}${c.values.periodEnd ? ` (${c.values.periodEnd})` : ''}`, head == null ? '' : head.toFixed(2), <Badge status={v == null ? 'Missing data' : ok ? 'Within threshold' : 'Breach'} />]; })} />}</Card>
+    <Card title="Covenant headroom">{!cov.length ? <Note tone="warn">No covenants entered (Data Validation & Reconciliation → Debt schedule & covenants: facility, metric, definition, test and threshold). Covenant status is never assumed.</Note> :
+      <T head={['Facility', 'Metric', 'Definition', 'Test', 'Tested value', 'Headroom', 'Status']} rows={cov.map(c => [facName(c.facilityId), c.metric, c.definition, `${c.operator} ${c.threshold}`, c.test ? `${c.test.value} (${c.test.periodEnd})` : '—', c.headroom == null ? '' : c.headroom.toFixed(2), <Badge status={c.status} />])} />}</Card>
     <Card title="Loans (Loan module)">{loans.loading ? <Loading /> : !loans.data?.institutional?.length ? <Note tone="warn">No loan data in the Loan module.</Note> : <>
       <T head={['Lender / facility', 'Amount', 'EMI', 'Principal', 'Rate', 'Ends']} num={[1, 2, 3, 4]} rows={loans.data.institutional.map(l => [l.name, fmtVal(l.amount, 'nos'), fmtVal(l.emi, 'nos'), fmtVal(l.principal, 'nos'), `${l.rate}%`, l.endDateStr])} />
-      <div style={S.small}>As kept in the Loan module (its own units and dates); use it to enter the debt schedule above.</div></>}</Card>
+      <div style={S.small}>As kept in the Loan module (its own units and dates). "Add from Loan module" on Data Validation → Debt schedule & covenants copies these as facilities to complete.</div></>}</Card>
   </div>;
 }
 

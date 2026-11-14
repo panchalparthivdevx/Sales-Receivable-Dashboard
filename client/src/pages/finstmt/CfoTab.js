@@ -4,7 +4,8 @@ import { LineChart, Line, XAxis, YAxis, Tooltip, Legend, CartesianGrid, Responsi
 import { api } from '../../utils/api';
 import { fsApi } from './api';
 import { C, S, Card, Note, Badge, Loading, ErrorBox, SourceDrill, fmtVal, fmtAmt, unitLabel, pctTxt, useLoad, MissingInputs } from './ui';
-import { lineOfBudget, lineValue, rsToLakh } from './calc';
+import { rsToLakh } from './calc';
+import { BudgetVsActual, mLabel } from './BudgetSection';
 
 const chg = (cur, prev) => (cur == null || prev == null || prev === 0 ? null : (cur - prev) / Math.abs(prev));
 
@@ -44,9 +45,10 @@ export default function CfoTab({ F, onGoImport, goTab }) {
   const ar = useLoad(() => api.arAging().catch(() => null), []);
   const d = cfo.data;
   const p = d?.period?.id;
-  const pl = useLoad(() => (p ? fsApi.statement({ basis: F.basis, stmt: 'PL', periods: p, mode: F.mode }) : Promise.resolve(null)), [p, F.basis, F.mode]);
   const fyLabel = d?.period ? `${d.period.fy - 1}-${String(d.period.fy).slice(2)}` : null;
   const comp = useLoad(() => (fyLabel ? axios.get('/api/compliance/dashboard', { params: { fy: fyLabel } }).then(r => r.data).catch(e => ({ error: e?.response?.data?.error || e.message })) : Promise.resolve(null)), [fyLabel]);
+  const fc = useLoad(() => fsApi.forecast(undefined, 6).catch(() => null), []);
+  const debtDoc = useLoad(() => fsApi.debt().catch(() => null), []);
   const [drill, setDrill] = useState(null);
   const [ratioPop, setRatioPop] = useState(null);
 
@@ -63,13 +65,9 @@ export default function CfoTab({ F, onGoImport, goTab }) {
     if (row) setDrill({ label: ids.length > 1 ? `${row.label} (one of ${ids.length} lines in "${k.label}")` : row.label, p: v.periods[0], c: row.cells[per], files: v.files, unit: row.unit });
   };
 
-  // budget vs actual for this period (exact period match only)
-  const budgets = recs.filter(r => r.type === 'budget' && r.values.periodEnd === d.period.end && (!r.values.periodStart || r.values.periodStart === d.period.start) && (!F.budget || r.values.version === F.budget) && !r.branch);
-  const fcColl = recs.filter(r => r.type === 'collection_forecast'), fcPay = recs.filter(r => r.type === 'payment_forecast');
-  const debt = recs.filter(r => r.type === 'debt_schedule'), cov = recs.filter(r => r.type === 'covenant'), capex = recs.filter(r => r.type === 'capex');
-  const months = [...new Set([...fcColl, ...fcPay].map(r => r.periodEnd))].sort().slice(0, 6);
-  const cashNow = d.kpis.find(k => k.id === 'cash')?.v;
-  let run = cashNow;
+  const capex = recs.filter(r => r.type === 'capex');
+  const fcRows = fc.data?.table?.slice(0, 6) || [];
+  const facs = debtDoc.data?.facilities || [], covs = debtDoc.data?.covenants || [];
 
   return (
     <div>
@@ -112,9 +110,7 @@ export default function CfoTab({ F, onGoImport, goTab }) {
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(420px, 1fr))', gap: 16 }}>
         <Card title="Budget vs actual" right={<button style={S.btn('outline')} onClick={() => goTab('performance')}>Details</button>}>
-          {!budgets.length ? <Note tone="warn">No budget entered for {d.period.label}{F.budget ? ` (version "${F.budget}")` : ''}. Management Inputs → Budgets.</Note> :
-            <table style={{ width: '100%', borderCollapse: 'collapse' }}><thead><tr><th style={S.th}>Line</th><th style={{ ...S.th, ...S.num }}>Budget</th><th style={{ ...S.th, ...S.num }}>Actual</th><th style={{ ...S.th, ...S.num }}>Variance</th></tr></thead>
-              <tbody>{budgets.map(b => { const id = lineOfBudget(b.values.line); const a = id ? lineValue(pl.data, id, p) : null; return <tr key={b.id}><td style={S.td}>{b.values.line} <span style={S.small}>({b.values.version})</span></td><td style={{ ...S.td, ...S.num }}>{fmtAmt(b.values.amount, F.unit)}</td><td style={{ ...S.td, ...S.num }}>{a == null ? 'n/a' : fmtAmt(a, F.unit)}</td><td style={{ ...S.td, ...S.num }}>{a == null ? '' : `${fmtAmt(a - b.values.amount, F.unit)} (${pctTxt(chg(a, b.values.amount))})`}</td></tr>; })}</tbody></table>}
+          <BudgetVsActual F={F} period={p} goValidation={() => goTab('validation')} />
         </Card>
         <Card title="Receivables ageing (live, Sales module)" right={<button style={S.btn('outline')} onClick={() => goTab('ar')}>Details</button>}>
           {ar.loading ? <Loading /> : !ar.data ? <Note tone="warn">Receivables ageing is not available from the Sales module just now.</Note> : <>
@@ -128,19 +124,19 @@ export default function CfoTab({ F, onGoImport, goTab }) {
         <Card title="Occupancy & unit economics" right={<button style={S.btn('outline')} onClick={() => goTab('branch')}>Details</button>}>
           {['unit.occupancy', 'unit.rev_seat', 'unit.rev_occ_seat', 'unit.rev_sqft', 'unit.ebitda_seat'].map(id => { const r = d.ratios[id]; return <div key={id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', padding: '3px 0', borderBottom: `1px solid ${C.line}` }}><span>{{ 'unit.occupancy': 'Occupancy (time-weighted)', 'unit.rev_seat': 'Revenue / capacity seat / month', 'unit.rev_occ_seat': 'Revenue / occupied seat / month', 'unit.rev_sqft': 'Revenue / sq ft / month', 'unit.ebitda_seat': 'EBITDA / seat / month' }[id]}</span><span>{r?.v != null ? fmtVal(r.v, id === 'unit.occupancy' ? 'fraction' : 'inr', F.unit) : <Badge status={r?.status || 'Missing Input'} title={r?.note} />}</span></div>; })}
         </Card>
-        <Card title="Cash forecast & funding gap" right={<button style={S.btn('outline')} onClick={() => goTab('cash')}>Details</button>}>
-          {!months.length ? <Note tone="warn">No collection or payment forecast entered. Management Inputs → Collection forecast / Payment forecast.</Note> :
+        <Card title="Cash forecast & funding gap" right={<button style={S.btn('outline')} onClick={() => goTab('validation')}>Forecast</button>}>
+          {fc.loading ? <Loading /> : !fcRows.length ? <Note tone="warn">The collections & payments forecast is not available just now (Data Validation & Reconciliation → Collections & payments forecast).</Note> :
             <table style={{ width: '100%', borderCollapse: 'collapse' }}><thead><tr><th style={S.th}>Month</th><th style={{ ...S.th, ...S.num }}>Collections</th><th style={{ ...S.th, ...S.num }}>Payments</th><th style={{ ...S.th, ...S.num }}>Closing cash</th></tr></thead>
-              <tbody>{months.map(m => { const inn = fcColl.filter(r => r.periodEnd === m).reduce((s, r) => s + r.values.amount, 0); const out = fcPay.filter(r => r.periodEnd === m).reduce((s, r) => s + r.values.amount, 0); run = run == null ? null : run + inn - out; return <tr key={m}><td style={S.td}>{m}</td><td style={{ ...S.td, ...S.num }}>{fmtAmt(inn, F.unit)}</td><td style={{ ...S.td, ...S.num }}>{fmtAmt(out, F.unit)}</td><td style={{ ...S.td, ...S.num, color: run != null && run < 0 ? C.bad : C.ink }}>{run == null ? 'opening cash n/a' : fmtAmt(run, F.unit)}</td></tr>; })}</tbody></table>}
-          <div style={S.small}>Opening = cash, bank and liquid investments in the balance sheet at {d.period.end}{cashNow == null ? ' (not available)' : ''}. A negative closing balance is a funding gap.</div>
+              <tbody>{fcRows.map(r => <tr key={r.month}><td style={S.td}>{mLabel(r.month)}</td><td style={{ ...S.td, ...S.num }}>{fmtAmt(r.totalIn, F.unit)}</td><td style={{ ...S.td, ...S.num }}>{fmtAmt(r.totalOut, F.unit)}</td><td style={{ ...S.td, ...S.num, color: r.gap ? C.bad : C.ink }}>{r.closing == null ? 'opening cash n/a' : fmtAmt(r.closing, F.unit)}</td></tr>)}</tbody></table>}
+          {fc.data && <div style={S.small}>From today, forecast from Zoho (clients' and vendors' payment days over the last 12 months){fc.data.budget ? ` and the budget "${fc.data.budget.name}"` : ''}. Opening: {fc.data.opening ? `${fc.data.opening.source === 'entered' ? 'bank balance entered' : 'balance-sheet cash'} as at ${fc.data.opening.asAt}` : 'not available'}. A negative closing balance is a funding gap.</div>}
         </Card>
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: 16 }}>
         <Card title="Debt maturity & covenants" right={<button style={S.btn('outline')} onClick={() => goTab('debt')}>Details</button>}>
           <div style={{ fontSize: '0.8rem' }}>Borrowings at {d.period.end}: <b>{fmtVal(d.kpis.find(k => k.id === 'lev.debt')?.v, 'lakh', F.unit)}</b> {unitLabel(F.unit)}</div>
-          <div style={{ fontSize: '0.8rem' }}>Scheduled principal, next 12 months: {debt.length ? <b>{fmtAmt(debt.filter(r => r.periodEnd > d.period.end && r.periodEnd <= `${+d.period.end.slice(0, 4) + 1}${d.period.end.slice(4)}`).reduce((s, r) => s + r.values.principal, 0), F.unit)}</b> : <Badge status="Missing Input" title="Management Inputs → Debt schedule" />}</div>
-          <div style={{ fontSize: '0.8rem' }}>Covenants recorded: {cov.length ? cov.length : <Badge status="Missing Input" title="Management Inputs → Covenants" />}</div>
+          <div style={{ fontSize: '0.8rem' }}>Scheduled principal, next 12 months from today: {facs.some(x => x.scheduleRows) ? <b>{fmtAmt(rsToLakh(facs.reduce((t, x) => t + (x.next12Principal || 0), 0)), F.unit)}</b> : <Badge status="Missing Input" title="Data Validation → Debt schedule & covenants" />}</div>
+          <div style={{ fontSize: '0.8rem' }}>Covenants: {covs.length ? <>{covs.length} — {['Breach', 'Missing data', 'Within threshold'].map(st => [st, covs.filter(c => c.status === st).length]).filter(([, n]) => n).map(([st, n]) => `${n} ${st.toLowerCase()}`).join(', ')}</> : <Badge status="Missing Input" title="Data Validation → Debt schedule & covenants" />}</div>
         </Card>
         <Card title="Capex & expansion" right={<button style={S.btn('outline')} onClick={() => goTab('capex')}>Details</button>}>
           <div style={{ fontSize: '0.8rem' }}>Capex in the period (cash flow): <b>{d.ratios['cf.capex_rev']?.v != null ? fmtVal(d.ratios['cf.capex_rev'].v, 'fraction') + ' of revenue' : 'cash flow not available'}</b></div>
