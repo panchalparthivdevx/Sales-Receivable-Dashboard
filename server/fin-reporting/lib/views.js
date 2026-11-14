@@ -25,6 +25,19 @@ function noteRank(ctx, n, p) {
   return (role === 'primary' ? 300 : role === 'comparative' ? 200 : 0) + (ctx.mode === 'latest' ? date * 100 : -date * 10) - (n.hid ? 100 : 0);
 }
 
+// the same note item worded slightly differently in two workbooks (a typo, a plural): matched for derived periods only
+const normItem = s => String(s || '').toLowerCase().replace(/&/g, ' and ').replace(/[^a-z0-9]+/g, ' ').trim().split(' ').map(w => (w.length > 3 && w.endsWith('s') ? w.slice(0, -1) : w)).join(' ');
+function editDistance(a, b) {
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    prev = cur;
+  }
+  return prev[b.length];
+}
+const sameItem = (a, b) => { const x = normItem(a), y = normItem(b); return x === y || (Math.min(x.length, y.length) >= 10 && editDistance(x, y) <= 2); };
+
 function notesView(ctx, b, periodIds) {
   const notes = ctx.ix.version.notes.filter(n => n.b === b);
   const linked = notes.filter(n => n.lines?.length);
@@ -36,23 +49,79 @@ function notesView(ctx, b, periodIds) {
     const setKey = [...new Set(cands.flatMap(n => n.lines))].sort().join('+');
     if (seenLineSets.has(setKey + '|' + cands.map(n => n.title).join())) continue;
     seenLineSets.add(setKey + '|' + cands.map(n => n.title).join());
+    const lineSet = [...new Set(cands.flatMap(n => n.lines))];
+    const stmtOf = p => { const vals = lineSet.map(id => M.num(M.cell(ctx, b, id, p))); return vals.some(v => v != null) ? vals.reduce((s, v) => s + (v || 0), 0) : null; };
+    // two notes of one workbook can point to the same line (e.g. two notes numbered 12): the one whose total agrees
+    // with the statement line comes first, then the usual source priority
+    const agrees = (n, p) => { const t = n.items.filter(i => i.total).pop()?.v[p]; const st = stmtOf(p); return t && t.v != null && st != null && Math.abs(t.v - st) < 0.02 ? 1 : 0; };
+    const pick = p => { const withP = cands.filter(n => n.items.some(i => i.v[p])); return withP.length ? withP.sort((x, y) => agrees(y, p) - agrees(x, p) || noteRank(ctx, y, p) - noteRank(ctx, x, p))[0] : null; };
     const chosen = {};
+    for (const p of periodIds) { const n = pick(p); if (n) chosen[p] = n; }
+    // a flow period no workbook has a note for (e.g. Q2 when the workbooks give Q1 and H1) is derived item by item from
+    // the notes of the periods it is made of — shown as derived, never as reported; balance-sheet dates are never derived
+    const derivedP = {};
     for (const p of periodIds) {
-      const withP = cands.filter(n => n.items.some(i => i.v[p]));
-      if (withP.length) chosen[p] = withP.sort((x, y) => noteRank(ctx, y, p) - noteRank(ctx, x, p))[0];
+      if (chosen[p] || P.fromId(p)?.type === 'BS') continue;
+      for (const d of M.derivationsFor(p)) {
+        const parts = [...d.plus.map(q => ({ q, sign: 1 })), ...d.minus.map(q => ({ q, sign: -1 }))].map(x => ({ ...x, n: pick(x.q) }));
+        if (parts.every(x => x.n)) { derivedP[p] = { f: d.f, parts }; break; }
+      }
     }
-    if (!Object.keys(chosen).length) continue;
-    const primaryNote = Object.values(chosen)[0];
+    if (!Object.keys(chosen).length && !Object.keys(derivedP).length) continue;
+    // rows follow the note of the latest workbook; items only in other workbooks' notes go in above the total
+    const primaryNote = Object.values(chosen).sort((x, y) => (ctx.ix.fileDate[y.f] || '').localeCompare(ctx.ix.fileDate[x.f] || ''))[0] || Object.values(derivedP)[0].parts[0].n;
+    const kindOf = it => `${it.key}|${it.total ? 'T' : it.subhead ? 'S' : 'I'}`;
     const rows = [];
-    const keyIndex = new Map();
-    const addRow = (it) => { const k = `${it.key}|${it.total ? 'T' : it.subhead ? 'S' : 'I'}`; if (!keyIndex.has(k)) { keyIndex.set(k, rows.length); rows.push({ label: it.label, key: it.key, total: !!it.total, subhead: !!it.subhead, cells: {} }); } return rows[keyIndex.get(k)]; };
+    const byKey = new Map();
+    // p: the period being filled — an item worded slightly differently in another workbook joins the row that has no
+    // figure for that period yet
+    const addRow = (it, p) => {
+      const k = kindOf(it);
+      let row = byKey.get(k);
+      if (!row && p && !it.subhead) row = rows.find(r => !r.subhead && r.total === !!it.total && !r.cells[p] && sameItem(r.label, it.label));
+      if (!row) {
+        row = { label: it.label, key: it.key, total: !!it.total, subhead: !!it.subhead, cells: {} };
+        const lastTotal = rows.map(r => r.total).lastIndexOf(true);
+        if (!row.total && lastTotal >= 0) rows.splice(lastTotal, 0, row); else rows.push(row);
+      }
+      byKey.set(k, row);
+      return row;
+    };
     for (const it of primaryNote.items) addRow(it);
+    // each note's closing total sits on the main note's total row, whatever the workbook calls it
+    const mainTotal = byKey.get(kindOf(primaryNote.items.filter(i => i.total).pop() || {}));
     for (const [p, n] of Object.entries(chosen)) {
+      const closing = n.items.filter(i => i.total).pop();
       for (const it of n.items) {
-        const row = addRow(it);
+        if (it.subhead && n !== primaryNote) continue;      // other workbooks' headings would only repeat empty
+        const row = it === closing && mainTotal && !mainTotal.cells[p] && !byKey.has(kindOf(it)) ? mainTotal : addRow(it, p);
         const c = it.v[p];
         if (c) row.cells[p] = { v: c.st === 'ok' || c.st === 'dash' ? c.v : null, st: c.st, err: c.err, src: { f: n.f, sh: n.sheet, c: c.c, note: n.num, fx: c.fx } };
       }
+    }
+    const gaps = {};
+    for (const [p, d] of Object.entries(derivedP)) {
+      const used = d.parts.map(() => new Set());
+      gaps[p] = [];
+      d.parts.forEach((x, pi) => {
+        for (const it of x.n.items) {
+          if (it.subhead || used[pi].has(kindOf(it))) continue;
+          const found = d.parts.map((y, j) => {
+            if (j === pi) return it;
+            const free = y.n.items.filter(i => !i.subhead && !used[j].has(kindOf(i)));
+            return free.find(i => kindOf(i) === kindOf(it)) || free.find(i => !!i.total === !!it.total && sameItem(i.label, it.label)) || null;
+          });
+          found.forEach((fi, j) => fi && used[j].add(kindOf(fi)));
+          // every part must carry the item (a figure or a dash); an item missing from one part is left blank, not assumed nil
+          const ins = d.parts.map((y, j) => ({ x: y, c: found[j]?.v[y.q] }));
+          if (ins.some(({ c }) => !c || !(c.st === 'ok' || c.st === 'dash'))) {
+            if (ins.some(({ c }) => c?.st === 'ok' && c.v)) gaps[p].push({ label: it.label, only: ins.filter(({ c }) => c).map(({ x: y }) => y.q) });
+            continue;
+          }
+          const v = Math.round(ins.reduce((s, { x: y, c }) => s + y.sign * (Number(c.v) || 0), 0) * 1e6) / 1e6;
+          addRow(found[0], p).cells[p] = { v, st: 'derived', derived: { formula: d.f, inputs: ins.map(({ x: y, c }, j) => ({ p: y.q, sign: y.sign, v: c.v, f: y.n.f, sh: y.n.sheet, c: c.c, note: y.n.num, lbl: found[j].label })), mixedFiles: new Set(d.parts.map(y => y.n.f)).size > 1 } };
+        }
+      });
     }
     const stmtCells = {};
     for (const p of periodIds) {
@@ -61,7 +130,9 @@ function notesView(ctx, b, periodIds) {
       stmtCells[p] = vals.some(v => v != null) ? vals.reduce((s, v) => s + (v || 0), 0) : null;
     }
     groups.push({ lines: [...new Set(cands.flatMap(n => n.lines))], lineLabel: [...new Set(cands.flatMap(n => n.lines))].map(id => L.BY_ID[id]?.label || id).join(' + '), title: primaryNote.title,
-      sourceNotes: Object.fromEntries(Object.entries(chosen).map(([p, n]) => [p, { num: n.num, f: n.f, sheet: n.sheet, file: ctx.ix.version.files[n.f]?.name }])), rows: rows.filter(r => r.subhead || Object.keys(r.cells).length), statement: stmtCells,
+      derivedGaps: gaps,
+      sourceNotes: { ...Object.fromEntries(Object.entries(chosen).map(([p, n]) => [p, { num: n.num, f: n.f, sheet: n.sheet, file: ctx.ix.version.files[n.f]?.name }])),
+        ...Object.fromEntries(Object.entries(derivedP).map(([p, d]) => [p, { derived: d.f, from: d.parts.map(x => ({ p: x.q, num: x.n.num, file: ctx.ix.version.files[x.n.f]?.name })) }])) }, rows: rows.filter(r => r.subhead || Object.keys(r.cells).length), statement: stmtCells,
       text: primaryNote.text });
   }
   // notes not tied to a statement line (disclosures, sub-schedules) from the latest workbook of this basis

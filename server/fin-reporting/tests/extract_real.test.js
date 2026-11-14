@@ -119,3 +119,24 @@ test('source-side derivations and rounding plugs are recorded', { skip }, () => 
   assert.ok(issues.length >= 1);
   assert.ok(v.facts.some(f => f.plug));
 });
+
+test('notes: Q1, Q2 and H1 FY27 columns; Q2 derived item by item from H1 − Q1 and agreeing with the Q2 statement', { skip }, () => {
+  load();
+  const V = require('../lib/views');
+  const c = M.makeCtx(v, { ix: M.index(v) });
+  for (const b of ['SA', 'CO']) {
+    const cols = M.notesDefaultColumns(v, b);
+    for (const p of ['BS-2026-09-30', 'FY2027-Q1', 'FY2027-Q2', 'FY2027-H1']) assert.ok(cols.includes(p), `${b} notes columns include ${p}`);
+    assert.ok(!cols.includes('BS-2026-06-30'), 'no June balance sheet exists in the workbooks');
+    const nv = V.notesView(c, b, cols);
+    const emp = nv.groups.find(g => g.lines.includes('pl.exp_emp'));
+    assert.strictEqual(emp.sourceNotes['FY2027-Q2'].derived, 'H1 − Q1');
+    const tot = emp.rows.filter(r => r.total).pop().cells['FY2027-Q2'];
+    assert.strictEqual(tot.st, 'derived');
+    assert.ok(Math.abs(tot.v - emp.statement['FY2027-Q2']) < 0.02, `${b} employee note Q2 ${tot.v} vs statement ${emp.statement['FY2027-Q2']}`);
+    // reported periods keep their own note and cell
+    assert.ok(emp.sourceNotes['FY2027-Q1'].num && emp.rows.some(r => r.cells['FY2027-Q1']?.src));
+    // balance-sheet notes are never derived
+    assert.ok(nv.groups.every(g => !g.sourceNotes['BS-2026-09-30']?.derived));
+  }
+});

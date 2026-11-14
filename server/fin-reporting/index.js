@@ -198,6 +198,7 @@ router.get('/periods', wrap(async (req, res) => {
   const b = basisOf(req);
   const out = {};
   for (const st of ['PL', 'BS', 'CF', 'RT']) out[st] = { available: M.periodsFor(c.ctx.ix, b, st), defaults: M.defaultColumns(c.a.version, b, st === 'RT' ? 'PL' : st) };
+  out.notesDefaults = M.notesDefaultColumns(c.a.version, b);
   res.json(out);
 }));
 
@@ -218,7 +219,7 @@ router.get('/notes', wrap(async (req, res) => {
   const c = await ctxFor(req); if (!c) return noData(res);
   const b = basisOf(req);
   let periods = String(req.query.periods || '').split(',').filter(p => P.fromId(p));
-  if (!periods.length) periods = [...new Set([...M.defaultColumns(c.a.version, b, 'BS'), ...M.defaultColumns(c.a.version, b, 'CF')])];
+  if (!periods.length) periods = M.notesDefaultColumns(c.a.version, b);
   const view = V.notesView(c.ctx, b, periods);
   view.files = c.a.version.files.map(f => ({ f: f.f, name: f.name }));
   res.json(view);

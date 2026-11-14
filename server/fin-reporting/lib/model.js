@@ -154,6 +154,17 @@ function defaultColumns(version, b, stmt) {
   return latest.periods.filter(p => p.role !== 'working').map(p => p.period);
 }
 
+/** Notes columns: the latest balance-sheet columns, the quarters inside the latest half year / nine months (Q2 = H1 − Q1
+ *  where no workbook has it), then the latest cash-flow columns */
+function notesDefaultColumns(version, b) {
+  const bs = defaultColumns(version, b, 'BS');
+  const flow = defaultColumns(version, b, 'CF').length ? defaultColumns(version, b, 'CF') : defaultColumns(version, b, 'PL');
+  const latest = flow.map(P.fromId).filter(Boolean).sort(P.cmp).pop();
+  const qs = latest && (latest.type === 'H' && latest.h === 1 ? [1, 2] : latest.type === '9M' ? [1, 2, 3] : []);
+  const quarters = (qs || []).map(q => `FY${latest.fy}-Q${q}`).filter(id => !flow.includes(id));
+  return [...new Set([...bs, ...quarters, ...flow])];
+}
+
 /** Line order for a statement: canonical lines, plus extra rows (cash-flow items, unmapped rows) in their source order */
 function linesFor(ix, b, stmt) {
   const facts = ix.version.facts.filter(fc => fc.b === b && fc.s === stmt);
@@ -217,4 +228,4 @@ function makeCtx(version, opts = {}) {
   return { ix: opts.ix || index(version), mode: opts.mode || 'original', decisions: opts.decisions || {}, adjustments: opts.adjustments || [], withAdj: !!opts.withAdj };
 }
 
-module.exports = { index, makeCtx, cell, val, num, derive, derivationsFor, periodsFor, defaultColumns, statementView, linesFor, labelOf, factKey, additive, score };
+module.exports = { index, makeCtx, cell, val, num, derive, derivationsFor, periodsFor, defaultColumns, notesDefaultColumns, statementView, linesFor, labelOf, factKey, additive, score };

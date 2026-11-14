@@ -11,9 +11,9 @@ export default function NotesTab({ F, periodsInfo, onGoImport }) {
   const [open, setOpen] = useState({});
   const [drill, setDrill] = useState(null);
   const [filter, setFilter] = useState('');
-  useEffect(() => { setCols([...bsDefaults, ...flowDefaults.filter(p => !bsDefaults.includes(p))]); }, [F.basis, periodsInfo]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { setCols(periodsInfo?.notesDefaults || [...bsDefaults, ...flowDefaults.filter(p => !bsDefaults.includes(p))]); }, [F.basis, periodsInfo]); // eslint-disable-line react-hooks/exhaustive-deps
   const { loading, data, error } = useLoad(() => (cols.length ? fsApi.notes({ basis: F.basis, periods: cols.join(','), mode: F.mode }) : Promise.resolve(null)), [F.basis, cols.join(','), F.mode]);
-  const available = [...(periodsInfo?.BS?.available || []), ...(periodsInfo?.PL?.available || []).filter(p => p.availability === 'reported')];
+  const available = [...(periodsInfo?.BS?.available || []), ...(periodsInfo?.PL?.available || []).filter(p => p.availability !== 'working')];
   const files = data?.files || [];
   const groups = (data?.groups || []).filter(g => !filter || (g.title + g.lineLabel).toLowerCase().includes(filter.toLowerCase()));
   return (
@@ -29,7 +29,7 @@ export default function NotesTab({ F, periodsInfo, onGoImport }) {
           {cols.map(id => <span key={id} style={{ background: C.tint, borderRadius: 12, padding: '2px 4px 2px 10px', fontSize: '0.72rem', color: C.green }}>{available.find(p => p.id === id)?.short || id}<button onClick={() => setCols(cols.filter(x => x !== id))} style={{ border: 'none', background: 'none', cursor: 'pointer', color: C.ink2 }}>×</button></span>)}
           <select style={S.select} value="" onChange={e => e.target.value && setCols([...cols, e.target.value])}><option value="">+ add period…</option>{available.filter(p => !cols.includes(p.id)).map(p => <option key={p.id} value={p.id}>{p.label}</option>)}</select>
         </div>
-        <Note>Each note is shown against the statement line it supports. For every period the note is taken from the workbook chosen for that period (as for the statements); its own note number in that workbook is shown, because numbering differs between workbooks. The last row compares the note with the statement line.</Note>
+        <Note>Figures in blue italics are derived, not reported: a period with no note in any workbook (for example Q2, when the workbooks give Q1 and H1) is worked out item by item as H1 − Q1; click a figure for both source cells. Balance-sheet notes exist only for the dates the workbooks give (31 March and 30 September — the Q1 workbooks carry no 30 June balance sheet). Each note is shown against the statement line it supports. For every period the note is taken from the workbook chosen for that period (as for the statements); its own note number in that workbook is shown, because numbering differs between workbooks. The last row compares the note with the statement line.</Note>
         {loading ? <Loading /> : groups.map((g, gi) => {
           const isOpen = open[gi] ?? gi < 3;
           const periods = data.periods.filter(p => g.rows.some(r => r.cells[p.id]) || g.statement[p.id] != null);
@@ -37,21 +37,22 @@ export default function NotesTab({ F, periodsInfo, onGoImport }) {
             <div key={gi} style={{ border: `1px solid ${C.line}`, borderRadius: 8, marginBottom: 10 }}>
               <div onClick={() => setOpen(o => ({ ...o, [gi]: !isOpen }))} style={{ padding: '8px 12px', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', gap: 10, background: C.page, borderRadius: 8 }}>
                 <div><b style={{ fontSize: '0.84rem' }}>{g.title}</b> <span style={S.small}>→ {g.lineLabel}</span></div>
-                <div style={S.small}>{Object.entries(g.sourceNotes).map(([p, n]) => `${available.find(x => x.id === p)?.short || p}: note ${n.num}`).join(' · ')} {isOpen ? '▾' : '▸'}</div>
+                <div style={S.small}>{Object.entries(g.sourceNotes).map(([p, n]) => `${available.find(x => x.id === p)?.short || p}: ${n.derived ? `derived (${n.derived})` : `note ${n.num}`}`).join(' · ')} {isOpen ? '▾' : '▸'}</div>
               </div>
               {isOpen && <div style={{ overflowX: 'auto', padding: '0 4px 6px' }}>
                 <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                  <thead><tr><th style={{ ...S.th, minWidth: 300 }}>Particulars</th>{periods.map(p => <th key={p.id} style={{ ...S.th, ...S.num }}><div style={{ fontSize: '0.62rem', fontWeight: 500 }}>{p.colType}</div>{p.headerDate}<div style={{ fontSize: '0.62rem', fontWeight: 500 }}>{unitLabel(F.unit)}</div></th>)}</tr></thead>
+                  <thead><tr><th style={{ ...S.th, minWidth: 300 }}>Particulars</th>{periods.map(p => <th key={p.id} style={{ ...S.th, ...S.num }}><div style={{ fontSize: '0.62rem', fontWeight: 500 }}>{p.colType}</div>{p.headerDate}<div style={{ fontSize: '0.62rem', fontWeight: 500 }}>{g.sourceNotes[p.id]?.derived ? `derived: ${g.sourceNotes[p.id].derived}` : unitLabel(F.unit)}</div></th>)}</tr></thead>
                   <tbody>
                     {g.rows.map((r, ri) => r.subhead ? <tr key={ri}><td colSpan={1 + periods.length} style={{ ...S.td, fontStyle: 'italic', color: C.ink2 }}>{r.label}</td></tr> : (
                       <tr key={ri} style={{ background: r.total ? C.page : 'transparent' }}>
                         <td style={{ ...S.td, fontWeight: r.total ? 700 : 400 }}>{r.label}</td>
-                        {periods.map(p => { const c = r.cells[p.id]; return <td key={p.id} onClick={() => c && setDrill({ label: `${g.title} — ${r.label}`, p, c: { v: c.v, st: c.st, src: { f: c.src.f, sh: c.src.sh, c: c.src.c, fx: c.src.fx, role: `note ${c.src.note}`, lbl: r.label, err: c.err } } })}
-                          style={{ ...S.td, ...S.num, fontWeight: r.total ? 700 : 400, cursor: c ? 'pointer' : 'default', color: c?.st === 'error' ? C.bad : C.ink }}>{c ? (c.st === 'error' ? c.err : c.st === 'blank' ? '—' : fmtVal(c.v, 'lakh', F.unit)) : ''}</td>; })}
+                        {periods.map(p => { const c = r.cells[p.id]; return <td key={p.id} title={c?.derived ? `Derived: ${c.derived.formula} (no workbook has this period's note)` : ''} onClick={() => c && setDrill({ label: `${g.title} — ${r.label}`, p, c: c.derived ? { v: c.v, st: 'derived', derived: c.derived } : { v: c.v, st: c.st, src: { f: c.src.f, sh: c.src.sh, c: c.src.c, fx: c.src.fx, role: `note ${c.src.note}`, lbl: r.label, err: c.err } } })}
+                          style={{ ...S.td, ...S.num, fontWeight: r.total ? 700 : 400, cursor: c ? 'pointer' : 'default', color: c?.st === 'error' ? C.bad : c?.derived ? C.info : C.ink, fontStyle: c?.derived ? 'italic' : 'normal' }}>{c ? (c.st === 'error' ? c.err : c.st === 'blank' ? '—' : fmtVal(c.v, 'lakh', F.unit)) : ''}</td>; })}
                       </tr>))}
                     <tr><td style={{ ...S.td, color: C.green, fontWeight: 600 }}>Statement line: {g.lineLabel}</td>{periods.map(p => <td key={p.id} style={{ ...S.td, ...S.num, color: C.green, fontWeight: 600 }}>{fmtVal(g.statement[p.id], 'lakh', F.unit)}</td>)}</tr>
                   </tbody>
                 </table>
+                {Object.entries(g.derivedGaps || {}).filter(([, list]) => list.length).map(([pid, list]) => <div key={pid} style={{ ...S.small, marginTop: 6, color: C.warn }}>{available.find(x => x.id === pid)?.short || pid} not derived for: {list.map(x => `${x.label} (only in ${x.only.map(q => available.find(y => y.id === q)?.short || q).join(', ')})`).join('; ')} — the item is worded or classified differently in the two workbooks, so it is left blank rather than assumed nil. The total is derived from the note totals.</div>)}
                 {g.text?.length > 0 && <div style={{ ...S.small, marginTop: 6 }}>{g.text.join(' ')}</div>}
               </div>}
             </div>
