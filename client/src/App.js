@@ -46,7 +46,8 @@ class ErrorBoundary extends React.Component {
 
 function AppInner() {
   const { user, loading, hasModule } = useAuth();
-  const [page, setPage] = useState('sales');
+  // The link in a GSTR-2B reminder email (/?open=gstr2b) opens that module; everything else starts on Sales as before
+  const [page, setPage] = useState(() => (new URLSearchParams(window.location.search).get('open') === 'gstr2b' ? 'gstr2b' : 'sales'));
   const [sidebarOpen, setSidebarOpen] = useState(true);
 
   // Public vendor registration form — no auth required

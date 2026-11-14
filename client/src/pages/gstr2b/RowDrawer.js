@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { g, errMsg } from './gApi';
-import { S, Drawer, StatusPill, FlagTags, Tag, Field, Msg, ReasonModal, inr, dt, dtm, monthName, COMP } from './ui';
+import { S, Drawer, StatusPill, FlagTags, Tag, Field, Msg, ReasonModal, DueNote, OwnerSelect, ownerValue, ownerPatch, inr, dt, dtm, monthName, COMP } from './ui';
 
 const DQ = {
   bill_level_discount: 'A bill-level discount was taken off the taxable value.',
@@ -26,7 +26,8 @@ export default function RowDrawer({ rowKey, meta, onClose, onChanged }) {
   const [modal, setModal] = useState(null);
   const [edit, setEdit] = useState(null);
   const [noteText, setNoteText] = useState('');
-  const load = useCallback(() => g.row(rowKey).then(x => { setD(x); setEdit({ owner: x.row.owner || '', workflow: x.row.workflow || '', next_action: x.row.next_action || '', due: x.row.due || '' }); }).catch(e => setError(errMsg(e))), [rowKey]);
+  const people = meta.people || [];          // the owner is chosen from these; a server that does not send the list yet keeps the typed name
+  const load = useCallback(() => g.row(rowKey).then(x => { setD(x); setEdit({ owner: people.length ? ownerValue(x.row, people) : x.row.owner || '', workflow: x.row.workflow || '', next_action: x.row.next_action || '', due: x.row.due || '' }); }).catch(e => setError(errMsg(e))), [rowKey]); // eslint-disable-line
   useEffect(() => { load(); }, [load]);
   const { rights } = meta;
 
@@ -38,7 +39,7 @@ export default function RowDrawer({ rowKey, meta, onClose, onChanged }) {
   const tol = r.diffs ? r.within : null;
   const run = async fn => { setError(''); setOk(''); try { await fn(); } catch (e) { setError(errMsg(e)); throw e; } };
   const done = () => { setModal(null); onChanged(); onClose(); };                 // the row may no longer exist after a decision: reload the list
-  const save = () => run(async () => { await g.assign({ keys: [r.key], ...edit }); setOk('Saved.'); await load(); onChanged(); });
+  const save = () => run(async () => { const { owner, ...rest } = edit; await g.assign({ keys: [r.key], ...rest, ...(people.length ? ownerPatch(owner) : { owner }) }); setOk('Saved.'); await load(); onChanged(); });
   const addNote = () => run(async () => { await g.note({ key: r.key, text: noteText }); setNoteText(''); setOk('Note added.'); await load(); });
   const dl = d.claim_deadline;
 
@@ -125,10 +126,17 @@ export default function RowDrawer({ rowKey, meta, onClose, onChanged }) {
         <div style={S.cardHead}><span style={S.cardTitle}>Review</span><span style={S.small}>Owner, workflow and next action are tracked here — not in Zoho</span></div>
         <div style={S.cardBody}>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(190px, 1fr))', gap: 8 }}>
-            <Field label="Owner"><input list="g2b-owners2" style={{ ...S.input, width: '100%' }} value={edit.owner} disabled={!rights.prepare} onChange={e => setEdit({ ...edit, owner: e.target.value })} /><datalist id="g2b-owners2">{(meta.admin_users || []).map(u => <option key={u.id} value={u.name} />)}</datalist></Field>
+            <Field label="Owner">{people.length
+              ? <OwnerSelect people={people} value={edit.owner} disabled={!rights.prepare} onChange={v => setEdit({ ...edit, owner: v })} />
+              : <input style={{ ...S.input, width: '100%' }} value={edit.owner} disabled={!rights.prepare} onChange={e => setEdit({ ...edit, owner: e.target.value })} />}</Field>
             <Field label="Workflow"><select style={{ ...S.select, width: '100%' }} value={edit.workflow} disabled={!rights.prepare} onChange={e => setEdit({ ...edit, workflow: e.target.value })}><option value="">Not started</option>{Object.entries(meta.workflow).map(([k, v]) => <option key={k} value={k} disabled={['accepted', 'resolved'].includes(k) && !rights.review}>{v}</option>)}</select></Field>
             <Field label="Next action"><input style={{ ...S.input, width: '100%' }} value={edit.next_action} disabled={!rights.prepare} onChange={e => setEdit({ ...edit, next_action: e.target.value })} /></Field>
             <Field label="Due"><input type="date" style={{ ...S.input, width: '100%' }} value={edit.due} disabled={!rights.prepare} onChange={e => setEdit({ ...edit, due: e.target.value })} /></Field>
+          </div>
+          <div style={{ marginTop: 6 }}>
+            <DueNote due={r.due} state={r.due_state} days={r.due_days} />
+            {r.owner && r.assigned_at && <div style={S.small}>Given to {r.owner} by {r.assigned_by || '—'} on {dtm(r.assigned_at)}</div>}
+            {r.owner && r.open === false && <div style={S.small}>This row is no longer open (it is matched, excluded, or marked Accepted / Resolved), so it is not in the owner's "My rows" or reminders.</div>}
           </div>
           {rights.prepare && <button style={{ ...S.btn, marginTop: 8 }} onClick={save}>Save</button>}
           <div style={{ marginTop: 12 }}>

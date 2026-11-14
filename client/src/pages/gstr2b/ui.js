@@ -88,6 +88,36 @@ export function Field({ label, children, style, hint }) {
   return <label style={{ display: 'block', ...style }}><span style={S.label}>{label}</span>{children}{hint && <span style={{ ...S.small, display: 'block', marginTop: 2 }}>{hint}</span>}</label>;
 }
 
+/** A row's due date as it stands today: red when overdue, amber when due today (the server works this out in India time, for open rows only) */
+export function DueNote({ due, state, days, short }) {
+  if (!due) return null;
+  if (state === 'overdue') return <div style={{ fontSize: '0.72rem', fontWeight: 700, color: '#B91C1C' }}>Overdue by {-days} day{days === -1 ? '' : 's'}{short ? '' : ` · due ${dt(due)}`}</div>;
+  if (state === 'today') return <div style={{ fontSize: '0.72rem', fontWeight: 700, color: '#B45309' }}>Due today</div>;
+  if (short) return null;                                  // the short form is only for what needs attention now
+  return <div style={S.small}>Due {dt(due)}{state === 'soon' ? ` · in ${days} day${days === 1 ? '' : 's'}` : ''}</div>;
+}
+
+// An owner is one of the people who can open the module (meta.people). In a form the choice is '' (no owner), 'id:<user id>', or
+// 'name:<text>' for a name that was typed before owners were chosen from the list and belongs to nobody.
+export const ownerValue = (row, people) => {
+  if (!row.owner) return '';
+  if (row.owner_id && people.some(p => p.id === String(row.owner_id))) return `id:${row.owner_id}`;
+  const hit = people.find(p => p.name.trim().toLowerCase() === row.owner.trim().toLowerCase());
+  return hit ? `id:${hit.id}` : `name:${row.owner}`;
+};
+export const ownerPatch = v => (v.startsWith('id:') ? { owner_id: v.slice(3) } : v.startsWith('name:') ? { owner: v.slice(5) } : { owner: '' });
+export function OwnerSelect({ people, value, onChange, disabled, empty = 'No owner', first = [] }) {
+  const known = value === '' || people.some(p => `id:${p.id}` === value) || first.some(([k]) => k === value);
+  return (
+    <select style={{ ...S.select, width: '100%' }} disabled={disabled} value={value} onChange={e => onChange(e.target.value)}>
+      {first.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+      <option value="">{empty}</option>
+      {people.map(p => <option key={p.id} value={`id:${p.id}`}>{p.name}</option>)}
+      {!known && <option value={value}>{value.replace(/^name:/, '')} (not a dashboard user)</option>}
+    </select>
+  );
+}
+
 export function Msg({ error, ok, onClose }) {
   if (!error && !ok) return null;
   return (

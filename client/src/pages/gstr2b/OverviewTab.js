@@ -38,6 +38,7 @@ export default function OverviewTab({ meta, filters, stamp, onDrill, onChanged }
   const lastRun = data.runs[0];
   const unreconciled = data.registrations.filter(r => !r.reconciled);
   const dr = x => () => onDrill(x);
+  const tasks = s.tasks || { mine: { open: 0, overdue: 0, today: 0 }, all: { open: 0, overdue: 0, today: 0 } };      // absent from an older server
 
   return (
     <div>
@@ -72,6 +73,10 @@ export default function OverviewTab({ meta, filters, stamp, onDrill, onChanged }
         <Card title="Potential credit exposure" value={inr0(ex.books_only_gst + ex.mismatch_shortfall_gst)} tone={ex.closing_soon_gst || ex.time_barred_gst ? 'warn' : undefined} def={def.exposure} onDrill={dr({ queue: 'books_only' })}
           sub={<>Time-barred {inr0(ex.time_barred_gst)} · closing in {ex.soon_days} days {inr0(ex.closing_soon_gst)} · open {inr0(ex.open_gst)}<br />Mismatch shortfall {inr0(ex.mismatch_shortfall_gst)}</>} />
         <Card title="Pending review" value={s.pending_review} tone={s.pending_review ? 'warn' : undefined} def={def.pending_review} onDrill={dr({ queue: 'review' })} sub="Suggested, mismatched and flagged rows not yet accepted or resolved" />
+        <Card title="Assigned to me" value={tasks.mine.open} tone={tasks.mine.overdue ? 'bad' : tasks.mine.today ? 'warn' : undefined} def={def.assigned_to_me} onDrill={dr({ owner: '__me__', open: '1' })}
+          sub={`${tasks.mine.overdue} overdue · ${tasks.mine.today} due today`} />
+        <Card title="Overdue follow-ups" value={tasks.all.overdue} tone={tasks.all.overdue ? 'bad' : undefined} def={def.overdue} onDrill={dr({ due: 'overdue' })}
+          sub={`${tasks.all.today} due today · ${tasks.all.open} open row(s) have an owner`} />
         <Card title="Vendor follow-up" value={s.follow_up.vendors_with_issues} def={def.follow_up} sub={`${s.follow_up.open_followups} row(s) in vendor follow-up`} onDrill={() => onDrill({}, 'vendors')} />
         <Card title="Excluded" value={st.excluded.rows} def="Documents deliberately kept out of matching, each with its reason (below)." sub={s.excluded.map(e => `${e.text.split(' — ')[0]}: ${e.books_docs + e.portal_docs}`).slice(0, 2).join(' · ')} onDrill={dr({ status: 'excluded' })} />
       </div>

@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { g, errMsg } from './gApi';
 import { S, Tag, Field, Msg, Modal, dt, dtm } from './ui';
 
-const SECTIONS = [['companies', 'Companies & GSTINs'], ['matching', 'Matching & tolerances'], ['schedule', 'Schedule & sync limits'], ['access', 'Access'], ['coverage', 'Coverage'], ['rules', 'Rules & sources'], ['audit', 'Audit trail'], ['demo', 'Demo data']];
+const SECTIONS = [['companies', 'Companies & GSTINs'], ['matching', 'Matching & tolerances'], ['schedule', 'Schedule & sync limits'], ['reminders', 'Email reminders'], ['access', 'Access'], ['coverage', 'Coverage'], ['rules', 'Rules & sources'], ['audit', 'Audit trail'], ['demo', 'Demo data']];
 
 export default function SettingsTab({ meta, reloadMeta }) {
   const [sec, setSec] = useState(() => { try { return sessionStorage.getItem('g2b_settings') || 'companies'; } catch (_) { return 'companies'; } });
@@ -17,6 +17,7 @@ export default function SettingsTab({ meta, reloadMeta }) {
       {sec === 'companies' && <Companies meta={meta} reloadMeta={reloadMeta} />}
       {sec === 'matching' && <Matching meta={meta} reloadMeta={reloadMeta} />}
       {sec === 'schedule' && <Schedule meta={meta} reloadMeta={reloadMeta} />}
+      {sec === 'reminders' && <Reminders meta={meta} />}
       {sec === 'access' && <Access meta={meta} reloadMeta={reloadMeta} />}
       {sec === 'coverage' && <Coverage meta={meta} />}
       {sec === 'rules' && <Rules meta={meta} />}
@@ -235,6 +236,129 @@ function Schedule({ meta, reloadMeta }) {
         <p style={{ ...S.muted, lineHeight: 1.5 }}>Zoho counts every integration of the organisation against one daily allowance (90,000 calls on the current plan, starting again at midnight India time). This module reads Zoho's own count after every call: it never uses more than its own daily number above, and it also stops for the day if the organisation's remaining allowance falls to the number kept free — so the other integrations cannot be starved by a long sync. If Zoho answers "too many requests", the sync waits as long as Zoho asks and then carries on.</p>
         {canEdit && <button style={{ ...S.primary, marginTop: 12 }} onClick={save}>Save</button>}
       </div>
+    </div>
+  );
+}
+
+// ── Email reminders to the owners of open rows ───────────────────────────────
+const WEEK = [[1, 'Mon'], [2, 'Tue'], [3, 'Wed'], [4, 'Thu'], [5, 'Fri'], [6, 'Sat'], [0, 'Sun']];
+const MAIL_KIND = { digest: 'Daily reminder', assigned: 'Rows assigned', summary: 'Managers\' summary', test: 'Test email', connection: 'Could not connect' };
+
+function Reminders({ meta }) {
+  const canEdit = meta.rights.config;
+  const [d, setD] = useState(null);
+  const [f, setF] = useState(null);
+  const [error, setError] = useState('');
+  const [ok, setOk] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [testTo, setTestTo] = useState('');
+  const [preview, setPreview] = useState(null);
+  // the form: the saved settings, the addresses by person, and — until one is saved — this page's own address for the button in the emails
+  const fill = x => { setD(x); setF({ ...x.settings, summary_to: x.settings.summary_to.join(', '), emails: Object.fromEntries(x.people.map(p => [p.id, p.email])), app_url: x.settings.app_url || x.app_url || window.location.origin }); };
+  const load = () => g.reminders().then(fill).catch(e => setError(errMsg(e)));
+  useEffect(() => { if (canEdit) load(); }, [canEdit]); // eslint-disable-line
+  if (!canEdit) return <div style={S.info}>Email reminders tell each owner about their overdue, due and newly assigned rows. They are set up by someone with the "Configure" right.</div>;
+  if (!d || !f) return error ? <div style={S.error}>{error}</div> : <div style={S.center}>Loading…</div>;
+  const run = async fn => { setBusy(true); setError(''); setOk(''); try { await fn(); } catch (e) { setError(errMsg(e)); } finally { setBusy(false); } };
+  const save = () => run(async () => {
+    await g.saveReminders({ enabled: f.enabled, time: f.time, days: f.days, soon_days: +f.soon_days, undated: f.undated, on_assign: f.on_assign, summary_to: f.summary_to, emails: f.emails, app_url: f.app_url });
+    await load(); setOk('Saved.');
+  });
+  const sent = r => `${r.sent} email(s) sent${r.failed ? `, ${r.failed} failed` : ''}${r.no_email ? `; ${r.no_email} owner(s) have no address` : ''}${r.error ? ` — stopped: ${r.error}` : ''}.`;
+  const sendAll = () => { if (window.confirm('Send today\'s reminder emails now, to everyone who has something overdue, due or newly assigned?\n\nPeople who already got today\'s email are not sent it again.')) run(async () => { const r = await g.remindersSend({}); await load(); setOk(sent(r)); }); };
+  const sendOne = p => { if (window.confirm(`Send ${p.name} their reminder email now (to ${p.email})?`)) run(async () => { const r = await g.remindersSend({ user: p.id, again: true }); await load(); setOk(sent(r)); }); };
+  const { mail, today } = d;
+  const day = (n, on) => setF({ ...f, days: on ? [...f.days, n] : f.days.filter(x => x !== n) });
+
+  return (
+    <div>
+      <Msg error={error} ok={ok} onClose={() => { setError(''); setOk(''); }} />
+      <div style={S.card}>
+        <div style={S.cardHead}><span style={S.cardTitle}>Sending email</span>{mail.configured ? <Tag tone="green">Ready — {mail.label}, from {mail.from}</Tag> : <Tag tone="red">Not set up yet</Tag>}</div>
+        <div style={S.cardBody}>
+          {!mail.configured && <div style={{ ...S.notice, marginBottom: 0 }}>The dashboard cannot send email yet. Your Microsoft 365 administrator registers an app that may send mail from one mailbox, and four values are then entered in the dashboard's deployment settings (missing now: {mail.missing.join(', ')}). The steps are in the module's guide under "Email reminders". Until then everything below can be filled in and saved with reminders switched off.</div>}
+          {mail.configured && (
+            <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end', flexWrap: 'wrap' }}>
+              <Field label="Send a test email to"><input style={{ ...S.input, width: 280 }} value={testTo} placeholder="name@yourcompany.com" onChange={e => setTestTo(e.target.value)} /></Field>
+              <button style={S.btn} disabled={busy || !testTo.trim()} onClick={() => run(async () => { const r = await g.remindersTest(testTo.trim()); await load(); setOk(`Test email sent to ${r.to} from ${r.from}. Check that it arrived (look in the junk folder too).`); })}>Send test</button>
+            </div>)}
+        </div>
+      </div>
+
+      <div style={S.card}>
+        <div style={S.cardHead}><span style={S.cardTitle}>Reminders to the owners of open rows</span>
+          {d.settings.enabled ? <Tag tone="green">Switched on{d.next_at ? ` — next ${dtm(d.next_at)}` : ''}</Tag> : <Tag>Switched off</Tag>}</div>
+        <div style={S.cardBody}>
+          <p style={{ ...S.muted, marginTop: 0, lineHeight: 1.6 }}>Each owner gets one email a day listing their rows that are overdue, due today, due soon or newly assigned to them. Nobody is emailed when there is nothing to tell. A row leaves the emails when it becomes matched, or is marked "Accepted as is" or "Resolved".</p>
+          {today.connection_error && <div style={S.error}>Today's emails could not be sent: {today.connection_error.message}</div>}
+          {d.settings.enabled && !today.connection_error && <div style={S.small}>{today.finished_at ? `Today's emails went out at ${dtm(today.finished_at)}.` : today.due_now ? 'Today\'s emails are due now — they go out with the scheduler\'s next call (within 15 minutes online).' : ''}</div>}
+          <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', alignItems: 'flex-end', marginTop: 8 }}>
+            <Field label="Reminders"><label style={{ fontSize: '0.8rem', display: 'flex', gap: 6 }}><input type="checkbox" checked={!!f.enabled} onChange={e => setF({ ...f, enabled: e.target.checked })} /> On</label></Field>
+            <Field label="Time (India time)"><input type="time" style={S.input} value={f.time} onChange={e => setF({ ...f, time: e.target.value })} /></Field>
+            <Field label="Days">{WEEK.map(([n, label]) => <label key={n} style={{ fontSize: '0.78rem', marginRight: 8, whiteSpace: 'nowrap' }}><input type="checkbox" checked={f.days.includes(n)} onChange={e => day(n, e.target.checked)} /> {label}</label>)}</Field>
+            <Field label="Also list rows due within" hint="days before the due date; 0 = only overdue and due today"><input type="number" min="0" max="14" style={{ ...S.input, width: 90 }} value={f.soon_days} onChange={e => setF({ ...f, soon_days: e.target.value })} /></Field>
+            <Field label="Open rows without a due date"><select style={S.select} value={f.undated} onChange={e => setF({ ...f, undated: e.target.value })}><option value="weekly">Listed once a week</option><option value="daily">Listed every day</option><option value="never">Never listed</option></select></Field>
+            <Field label="When rows are assigned"><label style={{ fontSize: '0.8rem', display: 'flex', gap: 6 }}><input type="checkbox" checked={!!f.on_assign} onChange={e => setF({ ...f, on_assign: e.target.checked })} /> Email the new owner at once</label></Field>
+          </div>
+          <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginTop: 10 }}>
+            <Field label="One summary of everyone's overdue and due rows to" hint="email addresses separated by commas; leave empty for no summary"><input style={{ ...S.input, width: 380 }} value={f.summary_to} placeholder="cfo@yourcompany.com, …" onChange={e => setF({ ...f, summary_to: e.target.value })} /></Field>
+            <Field label="Dashboard address in the emails" hint="the button in an email opens this address"><input style={{ ...S.input, width: 320 }} value={f.app_url} onChange={e => setF({ ...f, app_url: e.target.value })} /></Field>
+          </div>
+        </div>
+      </div>
+
+      <div style={S.card}>
+        <div style={S.cardHead}><span style={S.cardTitle}>People and their email addresses</span><span style={S.small}>Everyone who can open GSTR-2B Reco. An owner without an address here is not emailed.</span></div>
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead><tr><th style={S.th}>Person</th><th style={S.th}>Email address</th><th style={{ ...S.th, ...S.thR }}>Open rows</th><th style={{ ...S.th, ...S.thR }}>Overdue</th><th style={{ ...S.th, ...S.thR }}>Due today</th><th style={S.th}>Last email</th><th style={S.th} /></tr></thead>
+            <tbody>{d.people.map(p => (
+              <tr key={p.id}>
+                <td style={{ ...S.td, fontWeight: 600 }}>{p.name}</td>
+                <td style={S.td}><input style={{ ...S.input, width: 270 }} value={f.emails[p.id] || ''} placeholder="name@yourcompany.com" onChange={e => setF({ ...f, emails: { ...f.emails, [p.id]: e.target.value } })} /></td>
+                <td style={{ ...S.td, ...S.num }}>{p.open}</td>
+                <td style={{ ...S.td, ...S.num, ...(p.overdue ? { color: '#B91C1C', fontWeight: 700 } : {}) }}>{p.overdue}</td>
+                <td style={{ ...S.td, ...S.num }}>{p.today}</td>
+                <td style={S.td}>{p.last ? <>{p.last.status === 'sent' ? <Tag tone="green">Sent</Tag> : <Tag tone="red" title={p.last.error}>Failed</Tag>}<span style={S.small}>{dtm(p.last.at)}</span></> : <span style={S.small}>—</span>}</td>
+                <td style={{ ...S.td, whiteSpace: 'nowrap' }}>
+                  {p.would_email && <button style={{ ...S.ghost, padding: '0.15rem 0.5rem', marginRight: 6 }} disabled={busy} onClick={() => run(async () => setPreview({ name: p.name, ...(await g.remindersPreview(p.id)) }))}>Preview</button>}
+                  {p.would_email && p.email && mail.configured && <button style={{ ...S.ghost, padding: '0.15rem 0.5rem' }} disabled={busy} onClick={() => sendOne(p)}>Send now</button>}
+                </td>
+              </tr>))}
+              {d.people.length === 0 && <tr><td colSpan={7} style={{ ...S.td, color: '#9BA8B0' }}>Nobody has been given access to GSTR-2B Reco yet (User Settings).</td></tr>}</tbody>
+          </table>
+        </div>
+        <div style={S.cardBody}>
+          {d.problems.length > 0 && <div style={S.notice}><b>Open rows whose owner will not be emailed:</b> {d.problems.map(x => `${x.who} ${x.why} (${x.rows} row${x.rows === 1 ? '' : 's'})`).join('; ')}.</div>}
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+            <button style={S.primary} disabled={busy} onClick={save}>{busy ? 'Working…' : 'Save'}</button>
+            {mail.configured && <button style={S.btn} disabled={busy} onClick={sendAll}>Send today's reminders now</button>}
+            <span style={S.small}>Sending uses the saved settings and addresses — save first.</span>
+          </div>
+        </div>
+      </div>
+
+      <div style={S.card}>
+        <div style={S.cardHead}><span style={S.cardTitle}>Emails sent</span><span style={S.small}>the latest {d.log.length}</span></div>
+        <div style={{ overflowX: 'auto', maxHeight: '40vh' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead><tr><th style={S.th}>When</th><th style={S.th}>What</th><th style={S.th}>To</th><th style={S.th}>Subject</th><th style={S.th}>Result</th></tr></thead>
+            <tbody>{d.log.length === 0 && <tr><td colSpan={5} style={{ ...S.td, textAlign: 'center', color: '#9BA8B0' }}>No email has been sent yet.</td></tr>}
+              {d.log.map((e, i) => <tr key={i}><td style={{ ...S.td, whiteSpace: 'nowrap' }}>{dtm(e.at)}</td><td style={S.td}>{MAIL_KIND[e.kind] || e.kind}</td><td style={S.td}>{e.name ? `${e.name} · ` : ''}{e.to}</td><td style={{ ...S.td, ...S.muted }}>{e.subject}</td>
+                <td style={S.td}>{e.ok ? <Tag tone="green">Sent</Tag> : <><Tag tone="red">Failed</Tag><div style={{ ...S.small, color: '#B91C1C' }}>{e.error}</div></>}</td></tr>)}</tbody>
+          </table>
+        </div>
+      </div>
+
+      {preview && (
+        <Modal title={`Email to ${preview.name}`} width={980} onClose={() => setPreview(null)}>
+          {preview.empty ? <p style={{ ...S.muted, margin: 0 }}>There is nothing to tell {preview.name} right now, so no email would be sent.</p> : (
+            <>
+              <div style={{ fontSize: '0.8rem', marginBottom: 8 }}><b>Subject:</b> {preview.subject}<br /><b>To:</b> {preview.to || <span style={{ color: '#B91C1C' }}>no address saved for this person</span>}</div>
+              <iframe title="Email preview" sandbox="" srcDoc={preview.html} style={{ width: '100%', height: '60vh', border: '1px solid #DFE7E3', borderRadius: 6, background: '#fff' }} />
+            </>)}
+        </Modal>
+      )}
     </div>
   );
 }

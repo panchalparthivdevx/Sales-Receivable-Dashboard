@@ -36,6 +36,13 @@ export default function FilterBar({ meta, filters, setFilters, locked = [], show
   useEffect(() => { g.options({ company: filters.company || 'all', gstin: filters.gstin }).then(setOpts).catch(() => {}); }, [filters.company, filters.gstin, meta.companies.length]);
   const dis = k => locked.includes(k);
   const active = Object.entries(filters).filter(([k, v]) => v && !['company', 'basis'].includes(k)).length;
+  // "My rows" = the rows whose owner is the person logged in and that are still open (see lib/tasks.js on the server)
+  const mine = filters.owner === '__me__' && !!filters.open;
+  const toggleMine = () => setFilters(f => { const { owner, open, ...rest } = f; return mine ? rest : { ...rest, owner: '__me__', open: '1' }; });
+  const people = meta.people || [];
+  const lower = s => String(s).trim().toLowerCase();
+  const otherOwners = (opts.owners || []).filter(n => !people.some(p => lower(p.name) === lower(n)));
+  const ownerKnown = !filters.owner || ['__me__', '__none__'].includes(filters.owner) || people.some(p => `id:${p.id}` === filters.owner) || otherOwners.includes(filters.owner);
 
   return (
     <div style={{ ...S.card, padding: '0.75rem 1rem' }}>
@@ -50,6 +57,7 @@ export default function FilterBar({ meta, filters, setFilters, locked = [], show
         <Field label="Custom period"><span style={{ display: 'flex', gap: 4 }}><input type="month" style={{ ...S.input, width: 130 }} value={filters.from || ''} onChange={e => set('from', e.target.value)} /><input type="month" style={{ ...S.input, width: 130 }} value={filters.to || ''} onChange={e => set('to', e.target.value)} /></span></Field>
         <Field label="Period basis"><select style={S.select} value={filters.basis || meta.settings.period_basis} onChange={e => set('basis', e.target.value)}>{Object.entries(meta.period_bases).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></Field>
         <button style={S.ghost} onClick={() => setMore(m => !m)}>{more ? 'Fewer filters' : 'More filters'}{active ? ` (${active})` : ''}</button>
+        <button style={mine ? S.primary : S.btn} title="Only the rows that are assigned to you and still open. Click again to see everything." onClick={toggleMine}>{mine ? '✓ My rows' : 'My rows'}</button>
       </div>
       {more && (
         <div style={{ display: 'flex', gap: '0.6rem', flexWrap: 'wrap', alignItems: 'flex-end', marginTop: 10, paddingTop: 10, borderTop: '1px solid #F0F2F1' }}>
@@ -61,7 +69,15 @@ export default function FilterBar({ meta, filters, setFilters, locked = [], show
           {showStatus && !dis('status') && <Field label="Reconciliation status"><Multi label="statuses" options={STATUS_ORDER.map(s => ({ value: s, label: meta.statuses[s] }))} value={filters.status || ''} onChange={v => set('status', v)} /></Field>}
           <Field label="Flag"><select style={S.select} value={filters.flag || ''} onChange={e => set('flag', e.target.value)}><option value="">Any</option>{Object.entries(meta.flags).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></Field>
           <Field label="ITC status" hint="Phase 2"><select style={S.select} disabled><option>—</option></select></Field>
-          <Field label="Owner"><input list="g2b-owners" style={{ ...S.input, width: 140 }} value={filters.owner || ''} onChange={e => set('owner', e.target.value)} /><datalist id="g2b-owners">{(meta.admin_users || []).map(u => <option key={u.id} value={u.name} />)}</datalist></Field>
+          <Field label="Owner"><select style={S.select} value={filters.owner || ''} onChange={e => set('owner', e.target.value)}>
+            <option value="">Anyone</option><option value="__me__">Me</option><option value="__none__">No owner</option>
+            {people.map(p => <option key={p.id} value={`id:${p.id}`}>{p.name}</option>)}
+            {otherOwners.length > 0 && <optgroup label="Names that are not dashboard users">{otherOwners.map(n => <option key={n} value={n}>{n}</option>)}</optgroup>}
+            {!ownerKnown && <option value={filters.owner}>{filters.owner}</option>}</select></Field>
+          <Field label="Due date"><select style={S.select} value={filters.due || ''} onChange={e => set('due', e.target.value)}>
+            <option value="">Any</option><option value="overdue">Overdue</option><option value="today">Due today</option><option value="week">Due today or in the next 7 days</option><option value="set">Has a due date</option><option value="none">No due date</option></select></Field>
+          <Field label="Open / closed"><select style={S.select} value={filters.open ? '1' : ''} onChange={e => set('open', e.target.value)}>
+            <option value="">All rows</option><option value="1">Open rows only</option></select></Field>
           <Field label="Workflow"><select style={S.select} value={filters.workflow || ''} onChange={e => set('workflow', e.target.value)}><option value="">Any</option><option value="__none__">Not started</option>{Object.entries(meta.workflow).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></Field>
           <Field label="Search"><input style={{ ...S.input, width: 200 }} value={filters.q || ''} onChange={e => set('q', e.target.value)} placeholder="Document no., supplier, GSTIN, branch" /></Field>
         </div>

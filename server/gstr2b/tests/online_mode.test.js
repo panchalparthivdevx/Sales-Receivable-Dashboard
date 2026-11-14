@@ -65,6 +65,9 @@ const { stmt, sup, inv } = require('./fixtures');
 const { FAST_SYNC } = require('./helpers');
 const store = require('../lib/store');
 const files = require('../lib/files');
+const RM = require('../lib/reminders');
+const CFG = require('../lib/config');
+const AUD = require('../lib/audit');
 
 const blobs = new Map();
 files.configure({ blob: { async exists(p) { return blobs.has(p); }, async save(p, buf) { blobs.set(p, Buffer.from(buf)); }, async read(p) { return blobs.get(p) || null; } } });
@@ -72,13 +75,13 @@ files.configure({ blob: { async exists(p) { return blobs.has(p); }, async save(p
 const USERS = [{ id: '1', username: 'cfo', name: 'CFO', role: 'admin', active: true, permissions: {} }];
 const COMPANY = { id: 'devx', name: 'Test Co', short: 'T', org_id: F.ORG, invoice_date_field: 'cf_vendor_bill_date', credit_date_field: 'cf_bill_date', credit_number_field: 'vendor_credit_number', registrations: [{ gstin: F.REC_A, label: 'GJ', branch_ids: ['br_a'] }, { gstin: F.REC_B, label: 'MH', branch_ids: ['br_b'] }] };
 
-async function boot(tc, { fast = false } = {}) {
+async function boot(tc, { fast = false, mailer = undefined } = {}) {
   mem.clear(); blobs.clear();                                                          // every test starts from an empty Neon and an empty Blob
   if (fast) await store.write('config', { sync: FAST_SYNC });                           // tests that sync: no waiting for a turn in the calls-per-minute queue
   const router = require('../index');
   const zr = F.makeFake();
   Object.assign(zr, { listOrganizations: async () => [], listBranches: async () => F.BRANCHES, checkAccess: async () => ({ ok: true, results: [] }) });
-  router.init({ zr, loadUsers: async () => USERS, log: { error() {} } });
+  const ctx = router.init({ zr, loadUsers: async () => USERS, log: { error() {} }, ...(mailer ? { mailer } : {}) });
   const app = express();
   app.use(express.json());
   app.use((req, res, next) => { req.user = { id: '1' }; next(); });
@@ -94,7 +97,7 @@ async function boot(tc, { fast = false } = {}) {
   let closed = false;
   const close = async () => { if (closed) return; closed = true; router.stopScheduler(); server.closeAllConnections && server.closeAllConnections(); await new Promise(r => server.close(r)); };
   if (tc && tc.after) tc.after(close);
-  return { call, zr, router };
+  return { call, zr, router, ctx };
 }
 const form = (buf, name) => { const f = new FormData(); f.append('file', new Blob([buf]), name); return f; };
 
@@ -192,7 +195,7 @@ test('online: first use — before anything is synced or uploaded every screen l
   const t = await boot(tc);
   assert.equal((await t.call('PUT', '/config/companies', { body: { companies: [COMPANY] } })).status, 200);   // the audit log writes its first entry into a database that has no log yet
   for (const p of ['/meta', '/sync/status?company=devx', '/imports?company=devx', '/recon/summary?company=devx', '/recon/rows?company=devx', '/recon/vendors?company=devx',
-    '/recon/bridge?company=devx', '/recon/options?company=devx', '/coverage?company=devx', '/itc', '/audit', '/audit/verify']) {
+    '/recon/bridge?company=devx', '/recon/options?company=devx', '/coverage?company=devx', '/itc', '/audit', '/audit/verify', '/reminders']) {
     const r = await t.call('GET', p);
     assert.equal(r.status, 200, `${p} answered ${r.status}: ${JSON.stringify(r.body).slice(0, 160)}`);
   }
@@ -209,6 +212,35 @@ test('online: first use — before anything is synced or uploaded every screen l
   assert.ok(audit.some(e => /^config\./.test(e.action)) && audit.some(e => e.action === 'sync.incremental'), 'saving the settings and the early sync click were both recorded in the audit log');
   assert.equal((await t.call('GET', '/audit/verify')).body.ok, true);
   assert.equal((await t.call('GET', '/export/xlsx?company=devx', { raw: true })).status, 200);
+  assert.deepEqual(touched, []);
+});
+
+test('online: the day\'s reminder emails go out from the scheduler\'s call — once, also when two instances are called in the same moment — and who was sent what is kept in Neon', async tc => {
+  const sent = [];
+  const mailer = { status: () => ({ provider: 'microsoft', label: 'Microsoft 365', configured: true, from: 'finance@example.test', missing: [] }), send: async m => { sent.push(m); return { ok: true }; } };
+  const t = await boot(tc, { fast: true, mailer });
+  await t.call('PUT', '/config/companies', { body: { companies: [COMPANY] } });
+  t.zr.put('bills', F.bill({ id: 'b1', no: 'XYZ-77', date: '2026-10-07', taxable: 500 }));
+  assert.equal((await t.call('POST', '/sync/run', { body: { company: 'devx', mode: 'period', from: '2026-10', to: '2026-10' } })).body.summary.status, 'completed');
+  const pv = (await t.call('POST', '/import/preview', { form: form(stmt({ b2b: [sup(F.SUP_GJ, [inv('QQ-1', '08-10-2026', 700, 63)])] }), 'GSTR2B.json') })).body;
+  assert.equal((await t.call('POST', '/import/commit', { body: { preview_id: pv.preview_id } })).status, 200);
+  const row = (await t.call('GET', '/recon/rows?company=devx&status=books_only')).body.rows[0];
+  const ist = n => new Date(Date.now() + 330 * 60000 + n * 86400000).toISOString().slice(0, 10);
+  assert.equal((await t.call('POST', '/recon/assign', { body: { keys: [row.key], owner_id: '1', due: ist(-2) } })).status, 200);
+  assert.equal((await t.call('GET', '/recon/rows?company=devx&owner=__me__&open=1')).body.rows[0].due_state, 'overdue');
+  assert.equal((await t.call('PUT', '/reminders', { body: { enabled: true, time: '00:00', days: [0, 1, 2, 3, 4, 5, 6], emails: { 1: 'cfo@example.test' } } })).status, 200);
+  const a = await t.router.cronTick({ source: 'Vercel\'s scheduler' });
+  assert.deepEqual(a.reminders, { sent: 1, failed: 0 });
+  assert.equal(sent.length, 1); assert.equal(sent[0].to, 'cfo@example.test'); assert.match(sent[0].subject, /1 overdue/);
+  assert.ok([...mem.keys()].includes('g2b_reminders'), 'the record of today\'s emails is in Neon');
+  assert.equal((await t.router.cronTick()).reminders, undefined); assert.equal(sent.length, 1);
+  // tomorrow two serverless instances are called in the same moment: each has its own memory and they share only Neon — one of them sends
+  const other = RM.create({ cfgNow: async () => CFG.merge(await store.read('config', null)), usersOf: async () => USERS, recon: t.ctx.recon, mailer, audit: AUD, log: { error() {} } });
+  const tomorrow = Date.now() + 86400000;
+  const both = await Promise.all([t.ctx.reminders.tick({ now: tomorrow }), other.tick({ now: tomorrow })]);
+  assert.deepEqual(both.map(r => r.ran).sort(), [false, true]); assert.equal(both.find(r => !r.ran).why, 'busy');
+  assert.equal(sent.length, 2, 'one email, not two');
+  assert.equal((await t.call('GET', '/reminders')).body.log.filter(e => e.kind === 'digest').length, 2);
   assert.deepEqual(touched, []);
 });
 

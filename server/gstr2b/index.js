@@ -9,8 +9,9 @@
  *   g2b_config    "Configure"                         companies, GSTINs, branches, tolerances, schedule, access
  * Admins have every right. A user may be limited to some companies and GSTINs (Settings → Access).
  *
- * This module only READS from Zoho Books (lib/zohoRead.js has no write method) and never files, sends or posts anything.
- * Logic lives in ./lib — see README.md and DESIGN.md.
+ * This module only READS from Zoho Books (lib/zohoRead.js has no write method) and never files or posts anything there or on the GST
+ * portal. The one thing it sends is email to the dashboard's own users: reminders about the rows assigned to them (lib/reminders.js,
+ * off until switched on in Settings → Email reminders). Logic lives in ./lib — see README.md and DESIGN.md.
  */
 
 'use strict';
@@ -36,6 +37,9 @@ const RC = require('./lib/recon');
 const EX = require('./lib/exporter');
 const RULES = require('./lib/rules');
 const DEMO = require('./lib/demo');
+const T = require('./lib/tasks');
+const RM = require('./lib/reminders');
+const MAILER = require('./lib/mailer');
 const { uid } = require('./lib/util');
 
 const router = express.Router();
@@ -50,7 +54,9 @@ router.init = (deps = {}) => {
   const zr = deps.zr || ZR.create({ zoho: deps.zoho });
   const recon = RC.create({ cfgNow, audit: AUD, log: deps.log || console });
   const sync = BS.create({ zr, cfgNow, readSynced: deps.readSynced || (async () => null), audit: AUD, log: deps.log || console, useLease: IS_VERCEL });
-  ctx = { zr, recon, sync };
+  const mailer = deps.mailer || MAILER.create();
+  const reminders = RM.create({ cfgNow, usersOf: () => usersOf(), recon, mailer, audit: AUD, log: deps.log || console });
+  ctx = { zr, recon, sync, reminders, mailer };
   return ctx;
 };
 const need = () => ctx || router.init();
@@ -68,7 +74,7 @@ async function rights(req) {
   const p = u.permissions?.gstr2b;
   const view = admin || p?.enabled === true;
   const sec = k => admin || (view && p?.sections?.[k] === true);
-  return { user: u, admin, view, prepare: sec('g2b_prepare'), review: sec('g2b_review'), approve: sec('g2b_approve'), config: sec('g2b_config') };
+  return { user: u, users, admin, view, prepare: sec('g2b_prepare'), review: sec('g2b_review'), approve: sec('g2b_approve'), config: sec('g2b_config') };
 }
 const WHY = { prepare: 'This needs the "Prepare" right (sync, upload statements, run reconciliation).', review: 'This needs the "Review" right (link, approve, exclude).', approve: 'This needs the "Approve / lock" right.',
   config: 'This needs the "Configure" right (companies, GSTINs, settings).', admin: 'Only an administrator can do this.' };
@@ -125,20 +131,30 @@ async function loadScope(req, q = req.query) {
 const metaOf = (reviews, r) => (reviews[r.company] && reviews[r.company].meta[r.books_ids[0] || r.portal_ids[0]]) || {};
 const reviewForFilter = reviews => ({ meta: Object.assign({}, ...Object.values(reviews).map(x => x.meta)) });
 const rowKey = r => `${r.company}|${r.recipient_gstin}|${r.id}`;
+// Who is asking and what day it is in India: what "my rows" and "overdue" are measured against (lib/tasks.js)
+const whoOf = req => ({ me: req.g2b.user, users: req.g2b.users, today: N.todayIST() });
+const rowsFor = (req, rows, reviews, f = filtersOf(req.query)) => D.filterRows(rows, f, reviewForFilter(reviews), undefined, whoOf(req));
 
-function listView(r, reviews) {
+function listView(r, reviews, today = N.todayIST()) {
   const m = metaOf(reviews, r), notes = ((reviews[r.company] || {}).notes || {})[r.books_ids[0] || r.portal_ids[0]] || [];
+  const due = T.dueOf(r, m, today);
   return {
     key: rowKey(r), id: r.id, company: r.company, gstin: r.recipient_gstin, status: r.status, rule: r.rule, identity: r.identity || null, decision: r.decision, flags: r.flags,
     supplier_gstin: r.supplier_gstin, supplier: r.supplier_name, doc_type: r.doc_type, b: r.b, p: r.p, diffs: r.diffs, within: r.within, periods: r.periods, exclusion: r.exclusion || null,
-    related: r.related || null, owner: m.owner || '', workflow: m.workflow || '', next_action: m.next_action || '', due: m.due || '', notes: notes.length,
+    related: r.related || null, owner: m.owner || '', owner_id: m.owner_id || '', workflow: m.workflow || '', next_action: m.next_action || '', due: m.due || '', notes: notes.length,
+    open: T.isOpen(r, m), due_state: due.state, due_days: due.days, assigned_at: m.assigned_at || '', assigned_by: m.assigned_by || '',
     summary: (r.explain && r.explain[0]) || '', candidates: (r.candidates || []).length,
   };
 }
 const STATUS_ORDER = { mismatched: 0, suggested: 1, portal_only: 2, books_only: 3, tolerance: 4, exact: 5, excluded: 6 };
-function sortRows(rows, sort, dir) {
+function sortRows(rows, sort, dir, reviews = {}) {
   const k = sort || 'status', sign = dir === 'desc' ? -1 : 1;
   const name = r => String(r.supplier_name || r.supplier || '').toLowerCase();
+  if (k === 'due') {
+    // rows with a due date first (earliest first, or latest first); rows without one always come last
+    const due = r => metaOf(reviews, r).due || '';
+    return rows.sort((a, b) => { const x = due(a), y = due(b); if (!x || !y) return x ? -1 : y ? 1 : 0; return x === y ? name(a).localeCompare(name(b)) : (x < y ? -1 : 1) * sign; });
+  }
   const val = {
     status: r => [STATUS_ORDER[r.status], name(r), (r.b[0] || r.p[0] || {}).date || ''],
     supplier: r => [name(r), (r.b[0] || r.p[0] || {}).date || ''],
@@ -169,6 +185,7 @@ router.get('/meta', gate(), wrap(async (req, res) => {
     integrations: { zoho: need().zr.identity(), zoho_dedicated: need().zr.dedicated(), read_only: true, vercel: IS_VERCEL, scheduler: !IS_VERCEL, max_upload_mb: IS_VERCEL ? 4 : 40 },
     phases: { implemented: ['Zoho read-only sync', 'GSTR-2B JSON / Excel import with versions', 'Matching engine and review', 'Dashboards, vendor summary, bridge', 'Excel export', 'Audit trail'],
       planned: ['Phase 2: ITC register, approvals, vendor message drafts, period locks, evidence attachments', 'Phase 3: authorised GSTN / IMS connectivity, advanced analytics'] },
+    people: T.people(r.users),                                       // who a row can be given to: the users that can open this module (names only)
     admin_users: r.admin ? (await usersOf()).filter(u => u.active !== false).map(u => ({ id: u.id, name: u.name || u.username, role: u.role })) : undefined,
     access: r.admin ? cfg.access : undefined,
   });
@@ -418,7 +435,7 @@ router.post('/recon/run', gate('prepare'), wrap(async (req, res) => {
   catch (e) { bad(res, 400, e.message); }
 }));
 
-const FILTER_KEYS = ['company', 'gstin', 'branch', 'vendor', 'project', 'fy', 'month', 'quarter', 'half', 'from', 'to', 'basis', 'doc_type', 'status', 'flag', 'owner', 'workflow', 'queue', 'q'];
+const FILTER_KEYS = ['company', 'gstin', 'branch', 'vendor', 'project', 'fy', 'month', 'quarter', 'half', 'from', 'to', 'basis', 'doc_type', 'status', 'flag', 'owner', 'workflow', 'open', 'due', 'queue', 'q'];
 const filtersOf = q => Object.fromEntries(FILTER_KEYS.filter(k => q[k] !== undefined && q[k] !== '').map(k => [k, q[k]]));
 const soon = req => req.cfg.settings.closing_soon_days;
 const regLookup = req => g => { for (const co of req.cfg.companies) { const r = co.registrations.find(x => x.gstin === g); if (r) return r; } return null; };
@@ -426,17 +443,18 @@ const regLookup = req => g => { for (const co of req.cfg.companies) { const r = 
 router.get('/recon/summary', gate(), wrap(async (req, res) => {
   const { regs, rows, docs, reviews } = await loadScope(req);
   const f = filtersOf(req.query);
-  const sel = D.filterRows(rows, f, reviewForFilter(reviews));
-  const summary = D.summarize(sel, { regOf: regLookup(req), soonDays: soon(req), reviewDoc: reviewForFilter(reviews) });
+  const sel = rowsFor(req, rows, reviews, f);
+  const summary = D.summarize(sel, { regOf: regLookup(req), soonDays: soon(req), reviewDoc: reviewForFilter(reviews), me: req.g2b.user });
   const last = docs.map(x => ({ company: x.co.id, gstin: x.reg.gstin, version: x.d.version, ran_at: x.d.ran_at, changes: x.d.changes, stale_links: x.d.stale_links, inputs: x.d.inputs })).sort((a, b) => String(b.ran_at).localeCompare(String(a.ran_at)));
   res.json({ filters: f, registrations: regs.map(x => ({ company: x.co.id, gstin: x.reg.gstin, reconciled: docs.some(d => d.reg.gstin === x.reg.gstin) })), summary, runs: last, bridge_ties: D.bridge(sel).ties });
 }));
 
 router.get('/recon/rows', gate(), wrap(async (req, res) => {
   const { rows, reviews } = await loadScope(req);
-  const sel = sortRows(D.filterRows(rows, filtersOf(req.query), reviewForFilter(reviews)), req.query.sort, req.query.dir);
+  const sel = sortRows(rowsFor(req, rows, reviews), req.query.sort, req.query.dir, reviews);
   const per = Math.min(500, Math.max(10, parseInt(req.query.per || '100', 10))), page = Math.max(1, parseInt(req.query.page || '1', 10));
-  res.json({ total: sel.length, page, per, rows: sel.slice((page - 1) * per, page * per).map(r => listView(r, reviews)) });
+  const today = N.todayIST();
+  res.json({ total: sel.length, page, per, rows: sel.slice((page - 1) * per, page * per).map(r => listView(r, reviews, today)) });
 }));
 
 router.get('/recon/row', gate(), wrap(async (req, res) => {
@@ -460,15 +478,17 @@ router.get('/recon/row', gate(), wrap(async (req, res) => {
 
 router.get('/recon/vendors', gate(), wrap(async (req, res) => {
   const { rows, reviews } = await loadScope(req);
-  res.json({ vendors: D.vendors(D.filterRows(rows, filtersOf(req.query), reviewForFilter(reviews))).slice(0, 1000) });
+  res.json({ vendors: D.vendors(rowsFor(req, rows, reviews)).slice(0, 1000) });
 }));
 router.get('/recon/bridge', gate(), wrap(async (req, res) => {
   const { rows, reviews } = await loadScope(req);
-  res.json(D.bridge(D.filterRows(rows, filtersOf(req.query), reviewForFilter(reviews))));
+  res.json(D.bridge(rowsFor(req, rows, reviews)));
 }));
 router.get('/recon/options', gate(), wrap(async (req, res) => {
-  const { rows } = await loadScope(req);
-  res.json(D.options(rows));
+  const { rows, reviews } = await loadScope(req);
+  // every owner name in scope — also names typed before owners were chosen from the user list — for the Owner filter
+  const owners = [...new Set(rows.map(r => metaOf(reviews, r).owner).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  res.json({ ...D.options(rows), owners });
 }));
 
 /** The rows of one recon document named by "company|gstin|rowid" keys (all in one registration) */
@@ -544,17 +564,55 @@ router.post('/recon/exclude', gate('review'), wrap(async (req, res) => {
 router.post('/recon/assign', gate('prepare'), wrap(async (req, res) => {
   const { co, reg, rows } = await pickRows(req, req.body?.keys);
   const patch = {};
-  for (const k of ['owner', 'workflow', 'next_action', 'due']) if (req.body?.[k] !== undefined) patch[k] = req.body[k];
+  for (const k of ['workflow', 'next_action', 'due']) if (req.body?.[k] !== undefined) patch[k] = req.body[k];
+  // the owner is a dashboard user: chosen from the list (owner_id), or a typed name that is looked up — a name nobody has is kept as typed
+  if (req.body?.owner_id !== undefined || req.body?.owner !== undefined) {
+    try { Object.assign(patch, T.resolveOwner(req.g2b.users, { owner_id: req.body.owner_id, owner: req.body.owner })); } catch (e) { return bad(res, 400, e.message); }
+  }
+  if (patch.due && !(/^\d{4}-\d{2}-\d{2}$/.test(String(patch.due)) && Number.isFinite(Date.parse(`${patch.due}T00:00:00Z`)))) return bad(res, 400, 'The due date is not a valid date');
   if (patch.workflow && ['accepted', 'resolved'].includes(patch.workflow) && !req.g2b.review) return bad(res, 403, 'Marking a row Accepted or Resolved needs the "Review" right');
-  try { await RV.assign(co.id, rows.map(r => RV.anchorOf(r)), patch, byName(req)); } catch (e) { return bad(res, 400, e.message); }
+  let given = [];
+  try { ({ given } = await RV.assign(co.id, rows.map(r => RV.anchorOf(r)), patch, byName(req))); } catch (e) { return bad(res, 400, e.message); }
   await AUD.log({ by: byName(req), action: 'recon.assign', company: co.id, gstin: reg.gstin, detail: `${rows.length} row(s): ${JSON.stringify(patch)}`.slice(0, 300) });
-  res.json({ ok: true, rows: rows.length });
+  // rows handed to somebody else: tell them by email at once, after the answer has gone (only when reminders are switched on)
+  if (given.length && patch.owner_id) background(need().reminders.notifyAssigned({ company: co.id, gstin: reg.gstin, anchors: given, owner_id: patch.owner_id, by: req.g2b.user }));
+  res.json({ ok: true, rows: rows.length, owner: patch.owner, owner_id: patch.owner_id });
 }));
 
 router.post('/recon/note', gate('prepare'), wrap(async (req, res) => {
   const { co, rows } = await pickRows(req, [req.body?.key]);
   try { await RV.note(co.id, RV.anchorOf(rows[0]), req.body?.text, byName(req)); } catch (e) { return bad(res, 400, e.message); }
   res.json({ ok: true });
+}));
+
+// ── Email reminders to the owners of open rows (lib/reminders.js) ─────────────
+// Settings, the people's addresses, who would be emailed now, a test email and "send now" — all need the "Configure" right.
+router.get('/reminders', gate('config'), wrap(async (req, res) => res.json(await need().reminders.view())));
+
+router.put('/reminders', gate('config'), wrap(async (req, res) => {
+  const v = CFG.validateReminders(req.body || {}, req.cfg.reminders, req.g2b.users);
+  if (v.error) return bad(res, 400, v.error);
+  const mail = need().mailer.status();
+  if (v.reminders.enabled && !mail.configured) return bad(res, 400, `Reminders cannot be switched on yet: email sending is not set up (missing: ${mail.missing.join(', ')}). Everything else can be saved with reminders switched off.`);
+  const r = v.reminders;
+  const next = await saveConfig({ reminders: r }, byName(req), 'config.reminders', `${r.enabled ? 'on' : 'off'}; ${r.time} India time on days ${r.days.join(',')}; ${Object.keys(r.emails).length} address(es); summary to ${r.summary_to.length}; on assignment ${r.on_assign ? 'yes' : 'no'}`);
+  res.json({ reminders: next.reminders });
+}));
+
+router.get('/reminders/preview', gate('config'), wrap(async (req, res) => res.json(await need().reminders.preview({ user: String(req.query.user || '') }))));
+
+router.post('/reminders/test', gate('config'), wrap(async (req, res) => {
+  try { res.json(await need().reminders.test({ to: req.body?.to, by: byName(req) })); }
+  catch (e) { bad(res, e.status || 500, e.message); }
+}));
+
+/** "Send now": today's emails without waiting for the time of day (also when reminders are switched off); `user` = one person, `again` = even if already sent today */
+router.post('/reminders/send', gate('config'), wrap(async (req, res) => {
+  const mail = need().mailer.status();
+  if (!mail.configured) return bad(res, 400, `Email sending is not set up yet (missing: ${mail.missing.join(', ')})`);
+  const r = await need().reminders.tick({ force: true, only: req.body?.user ? String(req.body.user) : null, again: !!req.body?.again, by: byName(req), maxMs: 120000 });
+  if (!r.ran) return bad(res, 409, r.why === 'busy' ? 'Reminders are being sent right now — look again in a minute.' : `Nothing was sent (${r.why}).`);
+  res.json(r);
 }));
 
 // ── Coverage, ITC (planned), audit, export, demo ──────────────────────────────
@@ -592,9 +650,11 @@ router.get('/audit/verify', gate('config'), wrap(async (req, res) => res.json(aw
 router.get('/export/xlsx', gate(), wrap(async (req, res) => {
   const { regs, rows, reviews } = await loadScope(req);
   const f = filtersOf(req.query);
-  const sel = D.filterRows(rows, f, reviewForFilter(reviews));
+  const sel = rowsFor(req, rows, reviews, f);
   const regL = regLookup(req);
-  const summary = D.summarize(sel, { regOf: regL, soonDays: soon(req), reviewDoc: reviewForFilter(reviews) });
+  const summary = D.summarize(sel, { regOf: regL, soonDays: soon(req), reviewDoc: reviewForFilter(reviews), me: req.g2b.user });
+  // the filters as a person reads them on the first sheet ("owner=Asha", not "owner=__me__" or a user id)
+  const shown = ([k, v]) => `${k}=${k === 'owner' ? (v === '__me__' ? byName(req) : v === '__none__' ? '(no owner)' : String(v).startsWith('id:') ? ((T.userById(req.g2b.users, String(v).slice(3)) || {}).name || v) : v) : v}`;
   const ok = new Set(regs.map(x => x.reg.gstin));
   const stmts = (await ST.list()).filter(s => ok.has(s.gstin) && s.is_current).sort((a, b) => a.gstin.localeCompare(b.gstin) || a.period.localeCompare(b.period));
   const syncInfo = [];
@@ -602,7 +662,7 @@ router.get('/export/xlsx', gate(), wrap(async (req, res) => {
   const meta = Object.assign({}, ...Object.values(reviews).map(x => x.meta)), notes = Object.assign({}, ...Object.values(reviews).map(x => x.notes));
   const out = EX.build({
     rows: sel, filters: f, summary, bridge: D.bridge(sel), vendors: D.vendors(sel), statements: stmts, companies: req.cfg.companies, regOf: regL, meta, notes, workflow: RV.WORKFLOW,
-    syncInfo, generatedBy: byName(req), today: N.todayIST(), scopeText: `${scopeText(req, regs)}${Object.keys(f).length ? ` · filters: ${Object.entries(f).filter(([k]) => !['company', 'gstin'].includes(k)).map(([k, v]) => `${k}=${v}`).join(', ') || 'none'}` : ''}`,
+    syncInfo, generatedBy: byName(req), today: N.todayIST(), scopeText: `${scopeText(req, regs)}${Object.keys(f).length ? ` · filters: ${Object.entries(f).filter(([k]) => !['company', 'gstin'].includes(k)).map(shown).join(', ') || 'none'}` : ''}`,
     basisText: CFG.PERIOD_BASES[f.basis || req.cfg.settings.period_basis] || '',
   });
   await AUD.log({ by: byName(req), action: 'export.xlsx', company: req.query.company && req.query.company !== 'all' ? req.query.company : '', detail: `${sel.length} row(s); filters ${JSON.stringify(f).slice(0, 200)}` });
@@ -648,6 +708,13 @@ router.cronTick = async ({ mode = 'incremental', maxMs = 170000, source = 'a sch
   const seen = new Date().toISOString();
   const mark = extra => store.write('auto', { last_seen_at: seen, source, mode, ...extra }).catch(e => console.error('[gstr2b] could not record the scheduler call:', e.message));
   await mark({});
+  // the day's reminder emails go out from this same call: reminders.tick() does nothing until their time of day has come, and a failure
+  // there never stops the sync
+  let mails = null;
+  const t0 = Date.now();
+  try { mails = await need().reminders.tick({ maxMs: 40000 }); } catch (e) { console.error('[gstr2b] reminders:', e.message); }
+  // the time the emails took comes out of the sync step, so the call still ends well inside Vercel's 300 s (never below a minute, never above what was given)
+  maxMs = Math.max(Math.min(maxMs, 60000), maxMs - (Date.now() - t0));
   const cfg = await cfgNow();
   const companies = cfg.companies.filter(c => c.active && !c.demo && c.registrations.some(r => r.active !== false));
   const results = [];
@@ -668,7 +735,7 @@ router.cronTick = async ({ mode = 'incremental', maxMs = 170000, source = 'a sch
   // "more" = asking again at once would get further (a step that was cut short AND got somewhere — never a step that is stuck or paused for the day)
   const more = results.some(x => x.status === 'partial' && x.progress > 0);
   await mark({ more, results: results.map(x => ({ company: x.company, status: x.status, mode: x.mode || null, fetched: x.fetched || 0, changed: x.changed || 0 })) });
-  return { ok: true, mode, more, results };
+  return { ok: true, mode, more, results, ...(mails && mails.ran ? { reminders: { sent: mails.sent, failed: mails.failed, ...(mails.error ? { error: mails.error } : {}) } } : {}) };
 };
 const cronSource = req => (req.query && req.query.src === 'github' ? 'the GitHub job' : /vercel-cron/i.test(String((req.headers || {})['user-agent'] || '')) ? 'Vercel\'s scheduler' : 'a scheduler call');
 const cronHandler = fixed => async (req, res) => {
@@ -683,11 +750,13 @@ router.cronRecheck = cronHandler('recheck');
 let timer = null;
 router.startScheduler = () => {
   if (timer || IS_VERCEL) return;
-  let ticking = false, lastStamp = '';
+  let ticking = false, lastStamp = '', lastMail = 0;
   timer = setInterval(async () => {
     if (ticking) return;
     try {
       const cfg = await cfgNow();
+      // reminder emails have their own time of day: asked every few minutes, reminders.tick() itself decides whether anything is due
+      if (cfg.reminders.enabled && Date.now() - lastMail > 5 * 60000) { lastMail = Date.now(); need().reminders.tick().catch(e => console.error('[gstr2b] reminders:', e.message)); }
       if (!cfg.schedule.enabled || !cfg.companies.some(c => c.active && !c.demo && c.registrations.length)) return;
       const ist = new Date(Date.now() + 330 * 60000).toISOString();
       const hhmm = ist.slice(11, 16), stamp = ist.slice(0, 16);

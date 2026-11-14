@@ -11,6 +11,7 @@ const N = require('./normalize');
 const { COMPONENTS, zeroAmounts, addAmounts } = require('./money');
 const { claimDeadline, exposureClass } = require('./rules');
 const { STATUS } = require('./match');
+const T = require('./tasks');
 
 const DEFINITIONS = {
   books_gst: 'GST (IGST + CGST + SGST + cess) on Books documents that can be matched against GSTR-2B in the selected scope: bills with a supplier GSTIN, vendor credits (negative) and GST-bearing expenses. Excluded documents are shown separately. Not reduced for TDS.',
@@ -22,6 +23,8 @@ const DEFINITIONS = {
   exposure: 'Potential credit exposure = GST on Books documents (not credit notes, not reverse charge) that are NOT in GSTR-2B. It is unresolved, not lost: the supplier may still report it. It is split into confirmed time-barred (past the Section 16(4) deadline), closing soon, and still open. Mismatched documents add the shortfall where GSTR-2B shows less GST than Books.',
   pending_review: 'Suggested and mismatched rows, plus rows flagged ambiguous, duplicate, wrong supplier / recipient GSTIN or number collision, that are not yet marked Accepted or Resolved.',
   follow_up: 'Suppliers with at least one Books-only, mismatched or suggested document in scope.',
+  assigned_to_me: 'Rows whose owner is you and that are still open: mismatched, suggested, Books-only or GSTR-2B-only, and not marked Accepted or Resolved. A row that has become matched is no longer open.',
+  overdue: 'Open rows — anyone\'s, or without an owner — whose due date has passed (India time). A row stops counting when it becomes matched or is marked Accepted or Resolved.',
 };
 
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -33,13 +36,18 @@ const sumSide = (views, sign) => views.reduce((a, v) => { for (const c of COMPON
 const MATCHED = new Set(['exact', 'tolerance']);
 const ATTENTION_FLAGS = ['ambiguous', 'duplicate_suspected', 'wrong_supplier_gstin', 'wrong_recipient_gstin', 'normalization_collision'];
 
-/** Filter rows by scope. `f` comes from the query string; `reviewDoc` supplies owner / workflow. */
-function filterRows(rows, f = {}, reviewDoc = null, anchorOf = r => r.books_ids[0] || r.portal_ids[0]) {
+/**
+ * Filter rows by scope. `f` comes from the query string; `reviewDoc` supplies owner / workflow / due date. `who` = { me, users, today }:
+ * the user asking (for "my rows"), the dashboard's users (an owner is a user) and today's date in India (for "overdue").
+ */
+function filterRows(rows, f = {}, reviewDoc = null, anchorOf = r => r.books_ids[0] || r.portal_ids[0], who = {}) {
   const list = v => (v === undefined || v === null || v === '' ? null : (Array.isArray(v) ? v : String(v).split(',')).filter(Boolean));
   const gstins = list(f.gstin), status = list(f.status), flags = list(f.flag), types = list(f.doc_type), months = list(f.month);
   const basis = ['record', 'books', 'portal', 'invoice'].includes(f.basis) ? f.basis : 'record';
   const q = f.q ? String(f.q).trim().toLowerCase() : '';
   const meta = (reviewDoc && reviewDoc.meta) || {};
+  const today = who.today || N.todayIST();
+  const openOnly = !!f.open && f.open !== '0' && f.open !== 'false';
   return rows.filter(r => {
     if (gstins && !gstins.includes(r.recipient_gstin)) return false;
     if (f.queue === 'books_only' && r.status !== 'books_only') return false;
@@ -63,10 +71,12 @@ function filterRows(rows, f = {}, reviewDoc = null, anchorOf = r => r.books_ids[
       if (f.to && per > f.to) return false;
       if (months && !months.includes(per)) return false;
     }
-    if (f.owner || f.workflow) {
+    if (f.owner || f.workflow || openOnly || f.due) {
       const m = meta[anchorOf(r)] || {};
-      if (f.owner && (m.owner || '') !== f.owner) return false;
+      if (f.owner && !T.ownerMatches(m, f.owner, who)) return false;
       if (f.workflow && (f.workflow === '__none__' ? !!m.workflow : (m.workflow || '') !== f.workflow)) return false;
+      if (openOnly && !T.isOpen(r, m)) return false;
+      if (f.due && !T.dueMatches(r, m, f.due, today)) return false;
     }
     if (q) {
       const hay = [r.supplier_gstin, r.supplier_name, ...r.b.map(v => v.no), ...r.p.map(v => v.no), ...r.b.map(v => v.supplier), ...r.b.map(v => v.branch)].join(' ').toLowerCase();
@@ -76,8 +86,8 @@ function filterRows(rows, f = {}, reviewDoc = null, anchorOf = r => r.books_ids[
   });
 }
 
-/** The cards. `regOf(gstin)` returns the registration config (for GSTR-9 dates). */
-function summarize(rows, { regOf = () => null, today = N.todayIST(), soonDays = 60, reviewDoc = null } = {}) {
+/** The cards. `regOf(gstin)` returns the registration config (for GSTR-9 dates); `me` is the user asking (for "assigned to me"). */
+function summarize(rows, { regOf = () => null, today = N.todayIST(), soonDays = 60, reviewDoc = null, me = null } = {}) {
   const by = {};
   for (const s of Object.keys(STATUS)) by[s] = { rows: 0, books_docs: 0, portal_docs: 0, books: zeroAmounts(), portal: zeroAmounts() };
   for (const r of rows) {
@@ -125,6 +135,16 @@ function summarize(rows, { regOf = () => null, today = N.todayIST(), soonDays = 
   for (const r of rows) for (const f of r.flags) flagCounts[f] = (flagCounts[f] || 0) + 1;
   const vendorsWithIssues = new Set(rows.filter(r => ['books_only', 'mismatched', 'suggested', 'portal_only'].includes(r.status)).map(r => r.supplier_gstin || r.supplier_name)).size;
   const followupOpen = rows.filter(r => { const w = (meta[anchor(r)] || {}).workflow; return w === 'vendor_followup' || w === 'waiting_vendor'; }).length;
+  // assignments: open rows by owner and by due date (lib/tasks.js holds the definitions)
+  const tasks = { mine: { open: 0, overdue: 0, today: 0 }, all: { open: 0, overdue: 0, today: 0 } };
+  for (const r of rows) {
+    const m = meta[anchor(r)] || {};
+    if (!T.isOpen(r, m)) continue;
+    const state = T.dueOf(r, m, today).state, mine = T.ownedBy(m, me);
+    if (m.owner) tasks.all.open++;
+    if (mine) tasks.mine.open++;
+    if (state === 'overdue' || state === 'today') { tasks.all[state]++; if (mine) tasks.mine[state]++; }
+  }
   const excluded = {};
   for (const r of rows.filter(r => r.status === 'excluded')) {
     const text = r.exclusion.text.replace(/^Excluded by .*?: /, '');
@@ -138,7 +158,7 @@ function summarize(rows, { regOf = () => null, today = N.todayIST(), soonDays = 
     portal: { docs: pSide('docs'), gst: pSide('gst'), amounts: live.reduce((a, k) => addAmounts(a, by[k].portal), zeroAmounts()) },
     matched: { rows: by.exact.rows + by.tolerance.rows, books_docs: matchedB, portal_docs: matchedP, books_gst: matchedBg, portal_gst: matchedPg },
     rates: { doc_books: rate(matchedB, bSide('docs')), tax_books: rate(matchedBg, bSide('gst')), doc_portal: rate(matchedP, pSide('docs')) },
-    exposure: ex, pending_review: pending, follow_up: { vendors_with_issues: vendorsWithIssues, open_followups: followupOpen },
+    exposure: ex, pending_review: pending, follow_up: { vendors_with_issues: vendorsWithIssues, open_followups: followupOpen }, tasks,
     excluded: Object.values(excluded), flags: flagCounts, definitions: DEFINITIONS,
     phase2: ['Proposed eligible ITC', 'Deferred ITC', 'Ineligible ITC', 'Claimed', 'Reversed', 'Reclaimed'],
   };

@@ -5,7 +5,7 @@
  *   links       manual links { books_ids, portal_ids, by, at, reason, approved_tol_p, approved_from }
  *   blocks      "not a match" decisions   { 'booksId|portalId': { by, at, reason } }
  *   exclusions  manual exclusions of one document { docId: { side, reason, by, at } }
- *   meta        per document (anchor)     { owner, workflow, next_action, due, updated_at, updated_by }
+ *   meta        per document (anchor)     { owner, owner_id, workflow, next_action, due, assigned_at, assigned_by, updated_at, updated_by }
  *   notes       per anchor                [{ at, by, text }]
  *   history     per anchor                [{ at, by, action, detail }]   (last 100)
  *
@@ -72,17 +72,32 @@ async function include(co, { doc_id, by }) {
   await mutate(co, doc => { delete doc.exclusions[doc_id]; addHistory(doc, doc_id, by, 'include', ''); return doc; });
 }
 
+/**
+ * Owner, workflow, next action and due date of the given rows. `patch.owner_id` is the dashboard user behind the owner's name (see
+ * lib/tasks.js); a name alone is kept as typed. Resolves to { given }: the anchors that now have a (different) owner — the rows somebody
+ * was just handed, which is what the "assigned to you" email is about.
+ */
 async function assign(co, anchors, patch, by) {
   const clean = {};
-  if (patch.owner !== undefined) clean.owner = String(patch.owner || '').slice(0, 80);
+  if (patch.owner !== undefined) { clean.owner = String(patch.owner || '').slice(0, 80); clean.owner_id = clean.owner && patch.owner_id ? String(patch.owner_id) : ''; }
   if (patch.workflow !== undefined) { if (patch.workflow && !WORKFLOW[patch.workflow]) throw new Error('Unknown workflow status'); clean.workflow = patch.workflow || ''; }
   if (patch.next_action !== undefined) clean.next_action = String(patch.next_action || '').slice(0, 200);
   if (patch.due !== undefined) clean.due = patch.due ? String(patch.due).slice(0, 10) : '';
+  const given = [];
   await mutate(co, doc => {
-    for (const a of anchors) doc.meta[a] = { ...(doc.meta[a] || {}), ...clean, updated_at: nowIso(), updated_by: by };
-    addHistory(doc, anchors, by, 'assign', Object.entries(clean).map(([k, v]) => `${k}=${v}`).join(', '));
+    const at = nowIso();
+    for (const a of anchors) {
+      const prev = doc.meta[a] || {};
+      const next = { ...prev, ...clean, updated_at: at, updated_by: by };
+      if (clean.owner !== undefined && (clean.owner !== (prev.owner || '') || clean.owner_id !== (prev.owner_id || ''))) {
+        if (clean.owner) { next.assigned_at = at; next.assigned_by = by; given.push(a); } else { delete next.assigned_at; delete next.assigned_by; }
+      }
+      doc.meta[a] = next;
+    }
+    addHistory(doc, anchors, by, 'assign', Object.entries(clean).filter(([k]) => k !== 'owner_id').map(([k, v]) => `${k}=${v}`).join(', '));
     return doc;
   });
+  return { given };
 }
 
 async function note(co, anchor, text, by) {

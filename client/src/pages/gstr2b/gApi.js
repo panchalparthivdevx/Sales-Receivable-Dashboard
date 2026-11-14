@@ -66,6 +66,12 @@ export const g = {
   note:        body         => axios.post(`${B}/recon/note`, body).then(d),
   exportXlsx:  params       => download(`${B}/export/xlsx`, params, 'GSTR2B_Reco.xlsx'),
 
+  reminders:        ()      => axios.get(`${B}/reminders`, { timeout: 120000 }).then(d),
+  saveReminders:    body    => axios.put(`${B}/reminders`, body).then(d),
+  remindersPreview: user    => axios.get(`${B}/reminders/preview`, { params: { user }, timeout: 120000 }).then(d),
+  remindersTest:    to      => axios.post(`${B}/reminders/test`, { to }, { timeout: 120000 }).then(d),
+  remindersSend:    body    => axios.post(`${B}/reminders/send`, body || {}, { timeout: 300000 }).then(d),
+
   coverage:    company      => axios.get(`${B}/coverage`, { params: { company } }).then(d),
   audit:       month        => axios.get(`${B}/audit`, { params: { month } }).then(d),
   auditVerify: ()           => axios.get(`${B}/audit/verify`).then(d),

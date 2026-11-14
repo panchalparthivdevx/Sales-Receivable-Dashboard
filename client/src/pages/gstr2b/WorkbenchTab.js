@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { g, errMsg } from './gApi';
-import { S, StatusPill, FlagTags, Tag, Field, Msg, Modal, ReasonModal, inr, dt, monthName, COMP } from './ui';
+import { S, StatusPill, FlagTags, Tag, Field, Msg, Modal, ReasonModal, DueNote, OwnerSelect, ownerPatch, inr, dt, monthName, COMP } from './ui';
 import RowDrawer from './RowDrawer';
 
 // Books and GSTR-2B side by side: invoice details, each tax component, the differences, why, source links, owner and next action.
@@ -61,7 +61,7 @@ export default function WorkbenchTab({ meta, filters, stamp, onChanged, title, q
         <div><span style={{ fontWeight: 700, fontSize: '0.95rem' }}>{title}</span> <span style={S.muted}>{data ? `${total.toLocaleString('en-IN')} row${total === 1 ? '' : 's'}` : ''}</span></div>
         <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
           <select style={S.select} value={`${sort}:${dir}`} onChange={e => { const [a, b] = e.target.value.split(':'); setSort(a); setDir(b); }}>
-            <option value="status:asc">Sort: needs attention first</option><option value="gst:asc">Sort: largest GST first</option><option value="supplier:asc">Sort: supplier A–Z</option><option value="date:desc">Sort: newest document first</option><option value="date:asc">Sort: oldest document first</option></select>
+            <option value="status:asc">Sort: needs attention first</option><option value="gst:asc">Sort: largest GST first</option><option value="supplier:asc">Sort: supplier A–Z</option><option value="date:desc">Sort: newest document first</option><option value="date:asc">Sort: oldest document first</option><option value="due:asc">Sort: due date, earliest first</option></select>
           <select style={S.select} value={per} onChange={e => { setPer(+e.target.value); setPage(1); }}>{[50, 100, 250, 500].map(n => <option key={n} value={n}>{n} per page</option>)}</select>
           <button style={S.ghost} disabled={busy} onClick={exportXlsx}>Export this view to Excel</button>
         </div>
@@ -113,7 +113,10 @@ export default function WorkbenchTab({ meta, filters, stamp, onChanged, title, q
                       <td style={S.td} onClick={e => { e.stopPropagation(); toggle(r); }}><input type="checkbox" checked={!!sel[r.key]} readOnly /></td>
                       <td style={S.td}><StatusPill status={r.status} statuses={meta.statuses} small />
                         <div style={S.small}>{r.rule ? (r.rule === 'R3' && r.identity ? `R3 · ${r.identity}` : r.rule) : ''}{r.decision.mode === 'manual' ? ' · manual' : ''}</div>
-                        {r.doc_type !== 'INV' && <Tag tone="blue">{r.doc_type === 'CRN' ? 'Credit note' : 'Debit note'}</Tag>}</td>
+                        {r.doc_type !== 'INV' && <Tag tone="blue">{r.doc_type === 'CRN' ? 'Credit note' : 'Debit note'}</Tag>}
+                        {/* whose row it is, and whether it is late — here too, because the full column is far to the right of a wide table */}
+                        {r.owner && <div style={{ ...S.small, color: '#5D6C7B', marginTop: 2 }} title={`Owner: ${r.owner}`}>{r.owner}</div>}
+                        <DueNote due={r.due} state={r.due_state} days={r.due_days} short /></td>
                       <td style={{ ...S.td, minWidth: 190 }}><div style={{ fontWeight: 600 }}>{r.supplier || '—'}</div><div style={S.small}>{r.supplier_gstin}</div><div style={S.small}>→ {r.gstin}{meta.companies.length > 1 || company.demo ? ` · ${company.short || company.name}` : ''}</div></td>
                       <td style={{ ...S.td, minWidth: 150 }}>{bv ? <><div style={{ fontWeight: 600 }}>{bv.no || '—'}{r.b.length > 1 ? ` +${r.b.length - 1}` : ''}</div><div style={S.small}>{dt(bv.date)}{bv.date_assumed ? ' *' : ''} · {bv.branch}</div></> : <span style={{ color: '#C7D0D4' }}>—</span>}</td>
                       {COMP.map(([c]) => amt(b[c], c, r, 'b'))}
@@ -124,7 +127,8 @@ export default function WorkbenchTab({ meta, filters, stamp, onChanged, title, q
                         : <td key={c} style={{ ...S.td, ...S.num, color: '#C7D0D4' }}>—</td>))}
                       <td style={{ ...S.td, minWidth: 190 }}><FlagTags flags={r.flags.filter(f => !['zero_tax'].includes(f))} text={meta.flags} max={4} />
                         {r.exclusion && <div style={S.small}>{r.exclusion.text}</div>}</td>
-                      <td style={{ ...S.td, minWidth: 150 }}>{r.owner && <div style={{ fontWeight: 600 }}>{r.owner}</div>}{r.workflow && <Tag tone={WF[r.workflow] || 'grey'}>{meta.workflow[r.workflow]}</Tag>}{r.next_action && <div style={S.small}>{r.next_action}{r.due ? ` · ${dt(r.due)}` : ''}</div>}{r.notes > 0 && <div style={S.small}>{r.notes} note{r.notes > 1 ? 's' : ''}</div>}</td>
+                      <td style={{ ...S.td, minWidth: 170 }}>{r.owner && <div style={{ fontWeight: 600 }}>{r.owner}</div>}{r.workflow && <Tag tone={WF[r.workflow] || 'grey'}>{meta.workflow[r.workflow]}</Tag>}{r.next_action && <div style={S.small}>{r.next_action}</div>}
+                        <DueNote due={r.due} state={r.due_state} days={r.due_days} />{r.notes > 0 && <div style={S.small}>{r.notes} note{r.notes > 1 ? 's' : ''}</div>}</td>
                       <td style={{ ...S.td, minWidth: 110 }} onClick={e => e.stopPropagation()}>
                         {bv && bv.url && !company.demo && <a href={bv.url} target="_blank" rel="noreferrer" style={{ color: '#1C4942', fontSize: '0.74rem', display: 'block' }}>Zoho ↗</a>}
                         {pv && <span style={S.small}>{pv.src_id ? pv.src_id.replace(/^st_/, '') : ''}</span>}
@@ -164,13 +168,18 @@ export default function WorkbenchTab({ meta, filters, stamp, onChanged, title, q
   );
 }
 
+const KEEP = '__keep__';
 function AssignModal({ meta, picked, onCancel, onDone, setError }) {
-  const [f, setF] = useState({ owner: '', workflow: '', next_action: '', due: '' });
+  const people = meta.people || [];
+  // the owner is chosen from the people who can open the module; with a server that does not send that list yet, the name is typed as before
+  const [f, setF] = useState({ owner: people.length ? KEEP : '', workflow: '', next_action: '', due: '' });
   const [busy, setBusy] = useState(false);
+  const changed = [f.workflow, f.next_action, f.due].some(Boolean) || (people.length ? f.owner !== KEEP : !!f.owner);     // "no owner" is a change too
   const submit = async () => {
     setBusy(true);
     try {
-      const patch = Object.fromEntries(Object.entries(f).filter(([, v]) => v !== ''));
+      const { owner, ...rest } = f;
+      const patch = { ...Object.fromEntries(Object.entries(rest).filter(([, v]) => v !== '')), ...(people.length ? (owner === KEEP ? {} : ownerPatch(owner)) : (owner ? { owner } : {})) };
       const groups = {};
       for (const r of picked) (groups[`${r.company}|${r.gstin}`] = groups[`${r.company}|${r.gstin}`] || []).push(r.key);
       for (const keys of Object.values(groups)) await g.assign({ keys, ...patch });
@@ -179,14 +188,16 @@ function AssignModal({ meta, picked, onCancel, onDone, setError }) {
   };
   return (
     <Modal title={`Assign ${picked.length} row(s)`} onClose={onCancel}>
-      <p style={{ ...S.muted, marginTop: 0 }}>Leave a field empty to keep what each row has.</p>
+      <p style={{ ...S.muted, marginTop: 0 }}>Leave a field empty to keep what each row has. The owner finds these rows under "My rows" and, when email reminders are switched on, is told by email.</p>
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-        <Field label="Owner"><input list="g2b-owners3" style={{ ...S.input, width: '100%' }} value={f.owner} onChange={e => setF({ ...f, owner: e.target.value })} /><datalist id="g2b-owners3">{(meta.admin_users || []).map(u => <option key={u.id} value={u.name} />)}</datalist></Field>
+        <Field label="Owner">{people.length
+          ? <OwnerSelect people={people} value={f.owner} onChange={v => setF({ ...f, owner: v })} first={[[KEEP, '(keep)']]} empty="— no owner (clear) —" />
+          : <input style={{ ...S.input, width: '100%' }} value={f.owner} onChange={e => setF({ ...f, owner: e.target.value })} />}</Field>
         <Field label="Workflow"><select style={{ ...S.select, width: '100%' }} value={f.workflow} onChange={e => setF({ ...f, workflow: e.target.value })}><option value="">(keep)</option>{Object.entries(meta.workflow).map(([k, v]) => <option key={k} value={k} disabled={['accepted', 'resolved'].includes(k) && !meta.rights.review}>{v}</option>)}</select></Field>
         <Field label="Next action"><input style={{ ...S.input, width: '100%' }} value={f.next_action} onChange={e => setF({ ...f, next_action: e.target.value })} /></Field>
         <Field label="Due"><input type="date" style={{ ...S.input, width: '100%' }} value={f.due} onChange={e => setF({ ...f, due: e.target.value })} /></Field>
       </div>
-      <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 12 }}><button style={S.ghost} onClick={onCancel}>Cancel</button><button style={S.primary} disabled={busy || !Object.values(f).some(Boolean)} onClick={submit}>{busy ? 'Saving…' : 'Save'}</button></div>
+      <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 12 }}><button style={S.ghost} onClick={onCancel}>Cancel</button><button style={S.primary} disabled={busy || !changed} onClick={submit}>{busy ? 'Saving…' : 'Save'}</button></div>
     </Modal>
   );
 }

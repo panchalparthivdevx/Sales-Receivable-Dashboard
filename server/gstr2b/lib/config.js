@@ -26,6 +26,15 @@ const DEFAULT_CONFIG = {
   //   slice_seconds  online only: a Vercel request may run 300 s, and after the step the run still saves and reconciles (a step is capped at 180 s)
   sync: { rate_per_min: 90, concurrency: 4, daily_budget: 30000, zoho_reserve: 15000, slice_seconds: 180 },
   access: {},                      // userId → { companies: [id] | null, gstins: [gstin] | null }  (null / missing = everything the right allows)
+  // Email reminders to the owners of open rows (lib/reminders.js). Off until switched on in Settings → Email reminders.
+  //   time / days    when the daily email goes out, India time (days: 0 = Sunday … 6 = Saturday)
+  //   soon_days      rows due within this many days are listed too (0 = only overdue and due today)
+  //   undated        open rows without a due date: listed 'weekly' (on the first sending day of the week), 'daily' or 'never'
+  //   on_assign      an email at once to the person rows are given to (not when they assign rows to themselves)
+  //   summary_to     addresses that get one summary of everybody's overdue and due rows
+  //   emails         user id → address. The dashboard's user list has no email addresses, so they are kept here
+  //   app_url        the dashboard's address, for the button in the email
+  reminders: { enabled: false, time: '10:00', days: [1, 2, 3, 4, 5, 6], soon_days: 2, undated: 'weekly', on_assign: true, summary_to: [], emails: {}, app_url: '' },
 };
 
 const PERIOD_BASES = { record: 'Reconciliation record (GSTR-2B period, else Books month)', books: 'Books accounting month', portal: 'GSTR-2B return period', invoice: 'Invoice date month' };
@@ -51,6 +60,7 @@ function merge(raw) {
     sync: syncLimits(c.sync),
     companies: c.companies || [],
     access: c.access || {},
+    reminders: { ...DEFAULT_CONFIG.reminders, ...(c.reminders || {}) },
   };
 }
 
@@ -145,6 +155,48 @@ function validateSyncLimits(input, current) {
   return { sync: syncLimits({ ...s, rate_per_min: s.rate_per_min ?? DEFAULT_CONFIG.sync.rate_per_min }) };
 }
 
+const EMAIL = /^[^\s@<>,;"']+@[^\s@<>,;"']+\.[^\s@<>,;"'.]{2,}$/;
+const isEmail = s => typeof s === 'string' && s.length <= 254 && EMAIL.test(s);
+
+/** Email reminders: when they go out, what they list and where to (addresses are per user id — only for users that exist) */
+function validateReminders(input, current, users = []) {
+  const s = { ...current, emails: { ...(current.emails || {}) } };
+  try {
+    if (input.enabled !== undefined) s.enabled = !!input.enabled;
+    if (input.on_assign !== undefined) s.on_assign = !!input.on_assign;
+    if (input.time !== undefined) { if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(String(input.time))) throw new Error(`"${input.time}" is not a time (use 24-hour HH:MM, India time)`); s.time = String(input.time); }
+    if (input.days !== undefined) {
+      const d = [...new Set((Array.isArray(input.days) ? input.days : []).map(Number))].filter(n => Number.isInteger(n) && n >= 0 && n <= 6).sort();
+      if (!d.length) throw new Error('Choose at least one day of the week for the reminders');
+      s.days = d;
+    }
+    if (input.soon_days !== undefined) { const n = Math.round(Number(input.soon_days)); if (!Number.isFinite(n) || n < 0 || n > 14) throw new Error('"Days before the due date" must be between 0 and 14'); s.soon_days = n; }
+    if (input.undated !== undefined) { if (!['never', 'weekly', 'daily'].includes(input.undated)) throw new Error('Rows without a due date: choose never, weekly or daily'); s.undated = input.undated; }
+    if (input.summary_to !== undefined) {
+      const list = [...new Set((Array.isArray(input.summary_to) ? input.summary_to : String(input.summary_to || '').split(/[,;\s]+/)).map(x => String(x).trim().toLowerCase()).filter(Boolean))];
+      if (list.length > 10) throw new Error('The summary can go to at most 10 addresses');
+      for (const e of list) if (!isEmail(e)) throw new Error(`"${e}" is not an email address`);
+      s.summary_to = list;
+    }
+    if (input.emails !== undefined) {
+      for (const [uid, raw] of Object.entries(input.emails || {})) {
+        const e = String(raw || '').trim().toLowerCase();
+        if (!e) { delete s.emails[uid]; continue; }
+        const u = users.find(x => String(x.id) === String(uid));
+        if (!u) throw new Error(`Unknown user ${uid}`);
+        if (!isEmail(e)) throw new Error(`"${e}" is not an email address (${u.name || u.username})`);
+        s.emails[uid] = e;
+      }
+    }
+    if (input.app_url !== undefined) {
+      const u = String(input.app_url || '').trim().replace(/\/+$/, '');
+      if (u && !/^https?:\/\/[^\s/]+(\/[^\s]*)?$/i.test(u)) throw new Error('The dashboard address must start with https:// (or http://)');
+      s.app_url = u;
+    }
+  } catch (e) { return err(e.message); }
+  return { reminders: s };
+}
+
 /** Which companies / GSTINs a user may see: null = unrestricted. */
 function accessOf(cfg, user) {
   if (!user || user.role === 'admin') return { companies: null, gstins: null };
@@ -171,4 +223,4 @@ function validateAccess(input, users) {
   return { access: out };
 }
 
-module.exports = { DEFAULT_CONFIG, PERIOD_BASES, ONLINE_SCHEDULE, syncLimits, merge, validateCompanies, validateSettings, validateSchedule, validateSyncLimits, validateAccess, accessOf, canSeeCompany, canSeeGstin, visibleRegistrations };
+module.exports = { DEFAULT_CONFIG, PERIOD_BASES, ONLINE_SCHEDULE, syncLimits, merge, validateCompanies, validateSettings, validateSchedule, validateSyncLimits, validateReminders, isEmail, validateAccess, accessOf, canSeeCompany, canSeeGstin, visibleRegistrations };

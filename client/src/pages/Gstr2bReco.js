@@ -27,17 +27,34 @@ const TABS = [
 const SCOPED = ['overview', 'workbench', 'books', 'portal', 'review', 'vendors'];
 const FILTER_KEY = 'g2b_filters';
 const readSession = (k, d) => { try { return JSON.parse(sessionStorage.getItem(k)) ?? d; } catch (_) { return d; } };
+// The button in a reminder email opens the dashboard at /?open=gstr2b&g2b=mine: this module (see App.js), the workbench, "My rows"
+const MINE = { company: 'all', owner: '__me__', open: '1' };
+let fromEmail = (() => { try { return new URLSearchParams(window.location.search).get('g2b') === 'mine'; } catch (_) { return false; } })();   // true until the module has opened once
+// A figure that was clicked, said the way a person would say it ("owner = __me__" means nothing to anyone)
+const DRILL_TEXT = { 'owner=__me__': 'assigned to me', 'owner=__none__': 'no owner', 'open=1': 'open rows only', 'due=overdue': 'overdue', 'due=today': 'due today' };
+const drillText = d => Object.entries(d).map(([k, v]) => DRILL_TEXT[`${k}=${v}`] || `${k.replace('_', ' ')} = ${v}`).join(' · ');
 
 export default function Gstr2bReco() {
   const [meta, setMeta] = useState(null);
   const [error, setError] = useState('');
-  const [tab, setTab] = useState(() => readSession('g2b_tab', 'overview'));
-  const [filters, setFilters] = useState(() => readSession(FILTER_KEY, { company: 'all' }));
+  const [tab, setTab] = useState(() => (fromEmail ? 'workbench' : readSession('g2b_tab', 'overview')));
+  const [filters, setFilters] = useState(() => (fromEmail ? MINE : readSession(FILTER_KEY, { company: 'all' })));
   const [drill, setDrill] = useState(null);                       // filters chosen by clicking a figure; applied on top of the scope
   const [stamp, setStamp] = useState(0);                          // bumps when data changes elsewhere, so lists reload
 
   const loadMeta = useCallback(() => g.meta().then(m => { setMeta(m); setError(''); }).catch(e => setError(errMsg(e))), []);
   useEffect(() => { loadMeta(); }, [loadMeta]);
+  // the email's link has done its work once the module is open: it is taken out of the address, so that a refresh does not force
+  // "My rows" again, and it applies to this first opening only — coming back to the module later shows what was last looked at
+  useEffect(() => {
+    fromEmail = false;
+    try {
+      const q = new URLSearchParams(window.location.search);
+      if (!q.has('open') && !q.has('g2b')) return;
+      q.delete('open'); q.delete('g2b');
+      window.history.replaceState(null, '', window.location.pathname + (q.toString() ? `?${q.toString()}` : ''));
+    } catch (_) { /* optional */ }
+  }, []);
   // Keep the Books data fresh while the module is open: every few minutes the server is asked whether a sync step is due — a change check,
   // or the rest of a sync that is still going (POST /sync/kick). Online such a step runs inside that request, so it is simply left to
   // finish; when it says there is more, the next one follows at once. The scheduler does the same when nobody has the module open.
@@ -92,7 +109,7 @@ export default function Gstr2bReco() {
 
       {SCOPED.includes(current) && !empty && <FilterBar meta={meta} filters={filters} setFilters={f => { setFilters(f); setDrill(null); }} />}
       {drill && SCOPED.includes(current) && (
-        <div style={S.info}>Showing: {Object.entries(drill).map(([k, v]) => `${k.replace('_', ' ')} = ${v}`).join(' · ')} <button style={{ ...S.ghost, marginLeft: 8, padding: '0.15rem 0.55rem' }} onClick={() => setDrill(null)}>Show everything in scope</button></div>
+        <div style={S.info}>Showing: {drillText(drill)} <button style={{ ...S.ghost, marginLeft: 8, padding: '0.15rem 0.55rem' }} onClick={() => setDrill(null)}>Show everything in scope</button></div>
       )}
 
       {/* `stamp` makes a tab re-read its data after a change elsewhere; the tab itself is kept, so its messages and selections survive */}

@@ -267,6 +267,61 @@ test('demo data loads as a clearly separate company, reconciles every scenario, 
   await t.close();
 });
 
+test('assignments over HTTP: the owner is one of the people who can open the module; "my rows", due dates, sorting and the Overview figures follow', async tc => {
+  const t = await boot(tc);
+  await t.call('PUT', '/config/companies', { user: '6', body: { companies: [COMPANY] } });
+  const C = require('../lib/canonBooks');
+  const cfg = (await t.call('GET', '/meta', { user: '6' })).body;
+  const ctx = { company: cfg.companies[0], branches: new Map(F.BRANCHES.map(b => [b.id, { name: b.name, gstin: b.gstin, state: b.state_code }])), vendors: new Map() };
+  const mk = s => { const x = F.bill(s); return C.fromDetail(x.detail, x.row, ctx, 'bill'); };
+  await books.upsertMany('devx', [mk({ id: 'b1', no: 'INV/001', date: '2026-10-05', taxable: 1000 }), mk({ id: 'b2', no: 'INV/002', date: '2026-10-06', taxable: 2000 }), mk({ id: 'b3', no: 'XYZ-77', date: '2026-10-07', taxable: 500 })]);
+  const pv = (await t.call('POST', '/import/preview', { user: '2', form: form(stmt({ b2b: [sup(F.SUP_GJ, [inv('INV/001', '05-10-2026', 1000, 90), inv('INV/002', '06-10-2026', 2000, 190), inv('QQ-1', '08-10-2026', 700, 63)])] }), 's.json') })).body;
+  await t.call('POST', '/import/commit', { user: '2', body: { preview_id: pv.preview_id } });
+  const rows = (await t.call('GET', '/recon/rows?company=devx', { user: '4' })).body.rows;
+  const key = no => rows.find(r => [...r.b, ...r.p].some(v => v.no === no)).key;
+  const ist = n => new Date(Date.now() + 330 * 60000 + n * 86400000).toISOString().slice(0, 10);          // a date n days from today in India
+  // every module user sees who a row can be given to — names only; the full user list stays with administrators
+  const meta = (await t.call('GET', '/meta', { user: '4' })).body;
+  assert.deepEqual(meta.people, [{ id: '1', name: 'Admin' }, { id: '6', name: 'CFO' }, { id: '2', name: 'Preparer' }, { id: '4', name: 'Reader' }, { id: '3', name: 'Reviewer' }]);
+  assert.equal(meta.admin_users, undefined);
+  // chosen from the list; typed in other capitals; somebody who cannot open the module; a date that is not one
+  const a = await t.call('POST', '/recon/assign', { user: '2', body: { keys: [key('INV/002')], owner_id: '4', workflow: 'vendor_followup', due: ist(-3) } });
+  assert.deepEqual([a.status, a.body.owner, a.body.owner_id], [200, 'Reader', '4']);
+  assert.equal((await t.call('POST', '/recon/assign', { user: '2', body: { keys: [key('XYZ-77')], owner: 'rEADER', due: ist(0) } })).body.owner_id, '4');
+  assert.equal((await t.call('POST', '/recon/assign', { user: '2', body: { keys: [key('INV/001')], owner_id: '4', due: ist(-9) } })).status, 200);       // an exact match: never open
+  assert.match((await t.call('POST', '/recon/assign', { user: '2', body: { keys: [key('QQ-1')], owner_id: '5' } })).body.error, /cannot open GSTR-2B Reco/);
+  for (const due of ['14/11/2026', '2026-13-45', 'soon']) assert.equal((await t.call('POST', '/recon/assign', { user: '2', body: { keys: [key('QQ-1')], due } })).status, 400, due);
+  assert.equal((await t.call('POST', '/recon/assign', { user: '4', body: { keys: [key('QQ-1')], owner_id: '4' } })).status, 403, 'assigning needs the Prepare right');
+  // "My rows": mine and still open, the overdue one first
+  const mine = (await t.call('GET', '/recon/rows?company=devx&owner=__me__&open=1&sort=due&dir=asc', { user: '4' })).body;
+  assert.equal(mine.total, 2);
+  assert.deepEqual(mine.rows.map(r => [r.owner, r.owner_id, r.open, r.due_state, r.due_days, r.assigned_by]), [['Reader', '4', true, 'overdue', -3, 'Preparer'], ['Reader', '4', true, 'today', 0, 'Preparer']]);
+  assert.equal((await t.call('GET', '/recon/rows?company=devx&owner=__me__', { user: '4' })).body.total, 3, 'without "open only" the matched row is there too');
+  assert.equal((await t.call('GET', '/recon/rows?company=devx&owner=__me__', { user: '3' })).body.total, 0, 'somebody else\'s "my rows"');
+  for (const [q, n] of [['owner=id:4', 3], ['owner=READER', 3], ['owner=__none__', 1], ['due=overdue', 1], ['due=today', 1], ['due=week', 1], ['due=set', 3], ['due=none', 1], ['open=1', 3], ['owner=id:4&due=overdue&workflow=vendor_followup', 1]])
+    assert.equal((await t.call('GET', `/recon/rows?company=devx&${q}`, { user: '3' })).body.total, n, q);
+  // sorted by due date: rows without one come last, whichever way round
+  const byDue = async dir => (await t.call('GET', `/recon/rows?company=devx&sort=due&dir=${dir}`, { user: '4' })).body.rows.map(r => r.due);
+  assert.deepEqual(await byDue('asc'), [ist(-9), ist(-3), ist(0), '']); assert.deepEqual(await byDue('desc'), [ist(0), ist(-3), ist(-9), '']);
+  // the Overview's figures use the same definitions; the detail of a row carries who gave it
+  assert.deepEqual((await t.call('GET', '/recon/summary?company=devx', { user: '4' })).body.summary.tasks, { mine: { open: 2, overdue: 1, today: 1 }, all: { open: 2, overdue: 1, today: 1 } });
+  assert.deepEqual((await t.call('GET', '/recon/summary?company=devx', { user: '3' })).body.summary.tasks.mine, { open: 0, overdue: 0, today: 0 });
+  assert.equal((await t.call('GET', '/recon/summary?company=devx&owner=__me__&open=1', { user: '4' })).body.summary.rows, 2, 'the cards follow "My rows"');
+  const det = (await t.call('GET', `/recon/row?key=${encodeURIComponent(key('INV/002'))}`, { user: '4' })).body.row;
+  assert.deepEqual([det.owner_id, det.assigned_by, det.due_state], ['4', 'Preparer', 'overdue']);
+  assert.deepEqual((await t.call('GET', '/recon/options?company=devx', { user: '4' })).body.owners, ['Reader']);
+  // the Excel names the person, not "__me__"
+  const res = await t.call('GET', '/export/xlsx?company=devx&owner=__me__&open=1', { user: '4', raw: true });
+  const wb = XLSX.read(Buffer.from(await res.arrayBuffer()), { type: 'buffer' });
+  assert.equal(XLSX.utils.sheet_to_json(wb.Sheets['Detailed reconciliation']).length, 2);
+  assert.match(JSON.stringify(XLSX.utils.sheet_to_json(wb.Sheets['Executive summary'], { header: 1 })), /owner=Reader, open=1/);
+  // taking the owner off again
+  await t.call('POST', '/recon/assign', { user: '2', body: { keys: [key('XYZ-77')], owner: '' } });
+  const now = (await t.call('GET', '/recon/rows?company=devx&owner=__none__', { user: '4' })).body.rows.find(r => r.key === key('XYZ-77'));
+  assert.deepEqual([now.owner, now.owner_id, now.assigned_by, now.due], ['', '', '', ist(0)]);
+  await t.close();
+});
+
 test('the ITC register is reported as planned, not silently missing', async tc => {
   const t = await boot(tc);
   const r = (await t.call('GET', '/itc', { user: '4' })).body;
