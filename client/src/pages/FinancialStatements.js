@@ -1,5 +1,16 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { api } from '../utils/api';
+import { fsApi } from './finstmt/api';
+import { FilterBar } from './finstmt/ui';
+import StatementTab from './finstmt/StatementTab';
+import NotesTab from './finstmt/NotesTab';
+import CfoTab from './finstmt/CfoTab';
+import CompareTab from './finstmt/CompareTab';
+import PerformanceTab from './finstmt/PerformanceTab';
+import RatiosTab from './finstmt/RatiosTab';
+import InputsTab from './finstmt/InputsTab';
+import ValidationTab from './finstmt/ValidationTab';
+import { BranchTab, ArTab, ApTab, CashTab, DebtTab, CapexTab, ClientTab, ComplianceTab } from './finstmt/OpsTabs';
 
 // ─── Period definitions (5 periods, configurable) ─────────────────────────────
 const PERIODS_DEFAULT = [
@@ -1385,6 +1396,16 @@ function MappingTab({ mappings, coa, onSaveMapping, fetchZohoStatus, onFetchZoho
 }
 
 // ─── Main Component ───────────────────────────────────────────────────────────
+// Tabs: the statements (imported from the results workbooks by default; the earlier Zoho-mapped P&L and trial-balance
+// balance sheet stay available through "Source"), the analytical reports, then Chart of Accounts / Account Mapping.
+const TAB_GROUPS = [
+  ['Statements', [['bs', 'Balance Sheet'], ['pl', 'P&L Statement'], ['cf', 'Cash Flow'], ['notes', 'Notes to Accounts']]],
+  ['Analysis', [['cfo', 'CFO Overview'], ['compare', 'Financial Comparisons'], ['performance', 'Financial Performance'], ['ratios', 'Ratio Analytics'], ['branch', 'Branch Performance'], ['ar', 'AR & Collections'], ['ap', 'AP & Payments'], ['cash', 'Cash & Treasury'], ['debt', 'Debt & Covenants'], ['capex', 'Capex & Expansion'], ['client', 'Client & Revenue Analytics'], ['compliance', 'Compliance & Controls'], ['inputs', 'Management Inputs'], ['validation', 'Data Validation & Reconciliation']]],
+  ['Setup', [['coa', 'Chart of Accounts'], ['mapping', 'Account Mapping']]],
+];
+const FILTERS_FOR = { bs: {}, pl: { display: true }, cf: {}, rt: {}, notes: {}, cfo: { period: true, budget: true }, compare: {}, performance: { period: true, comparator: true, budget: true, display: false }, ratios: { period: true },
+  branch: { branch: true }, ar: {}, ap: {}, cash: {}, debt: {}, capex: {}, client: {}, compliance: { period: true }, inputs: null, validation: {} };
+
 export default function FinancialStatements() {
   const [tab, setTab]           = useState('bs');
   const [periods, setPeriods]   = useState(PERIODS_DEFAULT);
@@ -1400,87 +1421,88 @@ export default function FinancialStatements() {
   const [fetchStatus, setFetchStatus] = useState('');
   const [showPeriodModal, setShowPeriodModal] = useState(false);
   const [loading, setLoading]   = useState(true);
+  // imported financial statements (server/fin-reporting)
+  const [fsStatus, setFsStatus] = useState(null);
+  const [periodsInfo, setPeriodsInfo] = useState(null);
+  const [source, setSource]     = useState({ bs: 'imported', pl: 'imported', notes: 'imported' });
+  const [F, setF] = useState({ basis: 'SA', mode: 'original', unit: 'lakh', fy: null, period: null, cmp: 'auto', budget: '', branch: '', display: 'amount', withAdj: false });
 
-  // Initial data load + auto-fetch for periods with mappings but no data
+  const reloadStatus = useCallback(() => fsApi.status().then(s => { setFsStatus(s); return s; }).catch(() => setFsStatus({ active: null, versions: [], staging: [], rights: {} })), []);
+  useEffect(() => { reloadStatus(); }, [reloadStatus]);
+  useEffect(() => {
+    if (!fsStatus?.active) { setPeriodsInfo(null); return; }
+    fsApi.periods(F.basis, F.mode).then(pi => {
+      setPeriodsInfo(pi);
+      setF(f => {
+        const ids = new Set(pi.PL.available.map(p => p.id));
+        if (f.period && ids.has(f.period)) return f;
+        const latestQ = pi.PL.available.filter(p => p.type === 'Q' && p.availability === 'reported').sort((a, b) => (a.end < b.end ? 1 : -1))[0];
+        return { ...f, period: latestQ?.id || pi.PL.available[0]?.id, fy: latestQ?.fy || pi.PL.available[0]?.fy };
+      });
+    }).catch(() => setPeriodsInfo(null));
+  }, [fsStatus?.active?.id, F.basis, F.mode]); // eslint-disable-line react-hooks/exhaustive-deps
+  // keep the chosen period inside the chosen financial year
+  useEffect(() => {
+    if (!periodsInfo || !F.fy) return;
+    const cur = periodsInfo.PL.available.find(p => p.id === F.period);
+    if (cur && cur.fy === F.fy) return;
+    const inFy = periodsInfo.PL.available.filter(p => p.fy === F.fy && p.type !== 'BS').sort((a, b) => (a.end < b.end ? 1 : -1));
+    if (inFy.length) setF(f => ({ ...f, period: (inFy.find(p => p.type === 'Q') || inFy[0]).id }));
+  }, [F.fy, periodsInfo]); // eslint-disable-line react-hooks/exhaustive-deps
+  const imported = !!fsStatus?.active;
+  const isImported = k => imported && source[k] === 'imported';
+
+  // Initial data load + auto-fetch for periods with mappings but no data (Zoho-mapped P&L)
   useEffect(() => {
     let alive = true;
     api.finBsData().then(d => { if (alive) setBsData(d || { lines: {}, values: {} }); }).catch(() => {});
     Promise.all([api.finPlData(), api.finMappings()]).then(([plData, maps]) => {
       if (!alive) return;
-
-      // Always merge stored periods with PERIODS_DEFAULT so newly added periods (c0, etc.) are present
       const storedPeriods = (plData.periods && plData.periods.length > 0) ? plData.periods : [];
       const mergedPeriods = PERIODS_DEFAULT.map(defP => storedPeriods.find(p => p.key === defP.key) || defP);
       setPeriods(mergedPeriods);
-
-      const loadedValues   = plData.values || {};
-      const loadedMappings = maps || {};
-      setValues(loadedValues);
-      setMappings(loadedMappings);
+      setValues(plData.values || {});
+      setMappings(maps || {});
       setLoading(false);
-
-      // Auto-fetch any configured period that has mappings but no data yet
-      const hasMappings = Object.values(loadedMappings).some(ids => Array.isArray(ids) && ids.length > 0);
-      if (!hasMappings) return;
-
-      const allPeriodKeys = [...new Set([...PL_COL_KEYS, ...NOTE_COL_KEYS])];
-      const needFetch = allPeriodKeys
-        .map(k => mergedPeriods.find(p => p.key === k))
-        .filter(p => {
-          if (!p) return false;
-          // Period needs fetch if none of the mapped items have data for it
-          return !Object.keys(loadedMappings).some(
-            itemId => Array.isArray(loadedMappings[itemId]) && loadedMappings[itemId].length > 0 && loadedValues[itemId]?.[p.key] != null
-          );
-        });
-
-      if (needFetch.length === 0) return;
-
-      // Auto-fetch periods one at a time so the UI gets data progressively.
-      // Start with c0 (most recent) first, then continue with older periods.
-      const ordered = ['c0', 'c1', 'c2', 'c3', 'c4', 'c5']
-        .map(k => needFetch.find(p => p.key === k))
-        .filter(Boolean);
-
-      let accumulated = { ...loadedValues };
-
-      const fetchNext = (idx) => {
-        if (!alive || idx >= ordered.length) {
-          setFetchStatus('');
-          return;
-        }
-        const p = ordered[idx];
-        setFetchStatus(`Fetching ${p.label}… (${idx + 1}/${ordered.length})`);
-        api.finFetchZoho([{ key: p.key, from: p.from, to: p.to }])
-          .then(result => {
-            if (!alive) return;
-            const lineAmts = result[p.key] || {};
-            if (!lineAmts._error) {
-              for (const [itemId, amt] of Object.entries(lineAmts)) {
-                if (!accumulated[itemId]) accumulated[itemId] = {};
-                // Expense items come as negative (debit > credit); negate so they display as positive costs
-                accumulated[itemId][p.key] = EXPENSE_ITEM_IDS.has(itemId) ? -amt : amt;
-              }
-              setValues({ ...accumulated });
-              api.finSavePlData({ periods: mergedPeriods, values: accumulated });
-              setSaveMsg(`Fetched ${p.label}`);
-              setTimeout(() => setSaveMsg(''), 2000);
-            } else {
-              console.warn('Auto-fetch error for', p.key, lineAmts._error);
-            }
-            fetchNext(idx + 1);
-          })
-          .catch(e => {
-            if (!alive) return;
-            console.error('Auto-fetch error:', e);
-            fetchNext(idx + 1);
-          });
-      };
-
-      fetchNext(0);
     }).catch(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
   }, []);
+
+  // Zoho-mapped P&L: periods that have mappings but no data are fetched from Zoho, one at a time, the first time that
+  // view is opened in a session (it used to run on every page load; the imported statements are now the default view)
+  const autoFetched = useRef(false);
+  useEffect(() => {
+    if (loading || autoFetched.current || !(tab === 'pl' && !isImported('pl'))) return;
+    autoFetched.current = true;
+    const hasMappings = Object.values(mappings).some(ids => Array.isArray(ids) && ids.length > 0);
+    if (!hasMappings) return;
+    const allPeriodKeys = [...new Set([...PL_COL_KEYS, ...NOTE_COL_KEYS])];
+    const needFetch = ['c0', 'c1', 'c2', 'c3', 'c4', 'c5'].filter(k => allPeriodKeys.includes(k)).map(k => periods.find(p => p.key === k)).filter(p => p && !Object.keys(mappings).some(
+      itemId => Array.isArray(mappings[itemId]) && mappings[itemId].length > 0 && values[itemId]?.[p.key] != null));
+    if (!needFetch.length) return;
+    let accumulated = { ...values };
+    (async () => {
+      for (let idx = 0; idx < needFetch.length; idx++) {
+        const p = needFetch[idx];
+        setFetchStatus(`Fetching ${p.label}… (${idx + 1}/${needFetch.length})`);
+        try {
+          const result = await api.finFetchZoho([{ key: p.key, from: p.from, to: p.to }]);
+          const lineAmts = result[p.key] || {};
+          if (lineAmts._error) { console.warn('Auto-fetch error for', p.key, lineAmts._error); continue; }
+          for (const [itemId, amt] of Object.entries(lineAmts)) {
+            if (!accumulated[itemId]) accumulated[itemId] = {};
+            // Expense items come as negative (debit > credit); negate so they display as positive costs
+            accumulated[itemId][p.key] = EXPENSE_ITEM_IDS.has(itemId) ? -amt : amt;
+          }
+          setValues({ ...accumulated });
+          api.finSavePlData({ periods, values: accumulated });
+          setSaveMsg(`Fetched ${p.label}`);
+          setTimeout(() => setSaveMsg(''), 2000);
+        } catch (e) { console.error('Auto-fetch error:', e); }
+      }
+      setFetchStatus('');
+    })();
+  }, [tab, source.pl, loading, imported]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Load COA when tab switches to coa or mapping
   useEffect(() => {
@@ -1501,16 +1523,10 @@ export default function FinancialStatements() {
     }
   }, []);
 
-  const handleFilterChange = (f) => {
-    setCoaFilter(f);
-    loadCoa(f);
-  };
+  const handleFilterChange = (f) => { setCoaFilter(f); loadCoa(f); };
 
   const handleValueChange = (itemId, periodKey, val) => {
-    setValues(prev => ({
-      ...prev,
-      [itemId]: { ...prev[itemId], [periodKey]: val === '' ? null : parseFloat(val) },
-    }));
+    setValues(prev => ({ ...prev, [itemId]: { ...prev[itemId], [periodKey]: val === '' ? null : parseFloat(val) } }));
   };
 
   const handleSave = async () => {
@@ -1540,9 +1556,7 @@ export default function FinancialStatements() {
     const fetchPeriods  = ['c0', 'c1', 'c2', 'c3', 'c4', 'c5']
       .map(k => allPeriodKeys.includes(k) ? periods.find(p => p.key === k) : null)
       .filter(Boolean);
-
     let accumulated = { ...values };
-
     for (let idx = 0; idx < fetchPeriods.length; idx++) {
       const p = fetchPeriods[idx];
       setFetchStatus(`Fetching ${p.label}… (${idx + 1}/${fetchPeriods.length})`);
@@ -1573,25 +1587,38 @@ export default function FinancialStatements() {
     setTimeout(() => setSaveMsg(''), 3000);
   };
 
-  if (loading) return (
+  if (loading || !fsStatus) return (
     <div style={{ ...S.page, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
       <div style={{ color: '#5D6C7B' }}>Loading financial data…</div>
+    </div>
+  );
+
+  const goImport = () => setTab('validation');
+  const plPeriods = periodsInfo?.PL?.available || [];
+  const showFilters = FILTERS_FOR[tab] !== null && FILTERS_FOR[tab] !== undefined && !['coa', 'mapping'].includes(tab) && !((tab === 'pl' || tab === 'bs' || tab === 'notes') && !isImported(tab));
+  const SourceSwitch = ({ k, other }) => (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
+      <span style={{ fontSize: '0.72rem', color: '#5D6C7B', fontWeight: 600 }}>SOURCE</span>
+      {[['imported', `Published results workbooks${imported ? '' : ' (not imported yet)'}`], ['legacy', other]].map(([v, l]) => (
+        <button key={v} disabled={v === 'imported' && !imported} onClick={() => setSource(s => ({ ...s, [k]: v }))} style={{ ...S.tab(source[k] === v && (v !== 'imported' || imported)), opacity: v === 'imported' && !imported ? 0.5 : 1 }}>{l}</button>
+      ))}
+      {!imported && <button onClick={goImport} style={S.btn('primary', true)}>Import the workbooks</button>}
     </div>
   );
 
   return (
     <div style={S.page}>
       {/* Header */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20, flexWrap: 'wrap', gap: 12 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14, flexWrap: 'wrap', gap: 12 }}>
         <div>
           <h1 style={S.h1}>Financial Statements</h1>
           <div style={{ fontSize: '0.75rem', color: '#5D6C7B', marginTop: 3 }}>
-            SEBI Format — Profit & Loss Account with Notes to Accounts
+            SEBI-format statements imported from the published results workbooks, notes, comparisons, ratios and CFO analytics{fsStatus.active ? ` · import ${fsStatus.active.id} (${new Date(fsStatus.active.builtAt).toLocaleDateString('en-IN')})` : ''}
           </div>
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
           {saveMsg && <span style={{ fontSize: '0.78rem', color: saveMsg.includes('Error') ? '#DC2626' : '#15803D', padding: '4px 10px' }}>{saveMsg}</span>}
-          {tab === 'pl' && (
+          {tab === 'pl' && !isImported('pl') && (
             <>
               <button onClick={() => setShowPeriodModal(true)} style={S.btn('secondary', true)}>Configure Periods</button>
               <button onClick={() => setEditMode(m => !m)} style={S.btn(editMode ? 'success' : 'secondary', true)}>
@@ -1600,83 +1627,96 @@ export default function FinancialStatements() {
               {editMode && <button onClick={handleSave} disabled={saving} style={S.btn('primary', true)}>{saving ? 'Saving…' : 'Save'}</button>}
             </>
           )}
+          {['bs', 'pl', 'cf'].includes(tab) && isImported(tab === 'cf' ? 'pl' : tab) && (
+            <label style={{ fontSize: '0.75rem', color: '#5D6C7B', display: 'flex', alignItems: 'center', gap: 4 }} title="Recorded statement-level adjustments (Data Validation tab) — stored apart from the imported figures">
+              <input type="checkbox" checked={F.withAdj} onChange={e => setF(f => ({ ...f, withAdj: e.target.checked }))} />Include recorded adjustments
+            </label>
+          )}
         </div>
       </div>
 
       {/* Tabs */}
-      <div style={S.tabs}>
-        {[
-          { id: 'bs',      label: 'Balance Sheet' },
-          { id: 'pl',      label: 'P&L Statement' },
-          { id: 'notes',   label: 'Notes to Accounts' },
-          { id: 'coa',     label: 'Chart of Accounts' },
-          { id: 'mapping', label: 'Account Mapping' },
-        ].map(t => (
-          <button key={t.id} onClick={() => setTab(t.id)} style={S.tab(tab === t.id)}>{t.label}</button>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 14 }}>
+        {TAB_GROUPS.map(([g, list]) => (
+          <div key={g} style={{ display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
+            <span style={{ fontSize: '0.62rem', fontWeight: 700, color: '#9BA8B0', textTransform: 'uppercase', letterSpacing: '0.06em', width: 74 }}>{g}</span>
+            {list.map(([id, label]) => <button key={id} onClick={() => setTab(id)} style={S.tab(tab === id)}>{label}</button>)}
+          </div>
         ))}
       </div>
 
+      {showFilters && imported && <FilterBar F={F} setF={setF} show={FILTERS_FOR[tab] || {}} periods={plPeriods} budgetVersions={[]} branches={[]} />}
+
       {/* Balance Sheet */}
-      {tab === 'bs' && <BsTab lines={bsData.lines || {}} values={bsData.values || {}} />}
+      {tab === 'bs' && <>
+        <SourceSwitch k="bs" other="Trial-balance figures entered earlier (31 Mar 2026 / 2025)" />
+        {isImported('bs') ? <StatementTab stmt="BS" F={F} periodsInfo={periodsInfo} onGoImport={goImport} /> : <BsTab lines={bsData.lines || {}} values={bsData.values || {}} />}
+      </>}
 
       {/* P&L Statement */}
       {tab === 'pl' && (
         <div>
-          {/* Company header */}
-          <div style={{ textAlign: 'center', marginBottom: 16 }}>
-            <div style={{ fontWeight: 700, fontSize: '1rem', color: '#18191B', letterSpacing: '0.04em', textTransform: 'uppercase' }}>
-              Dev Accelerator Ltd
+          <SourceSwitch k="pl" other="Zoho account mapping (live, editable)" />
+          {isImported('pl') ? <>
+            <StatementTab stmt="PL" F={F} periodsInfo={periodsInfo} onGoImport={goImport} />
+            <StatementTab stmt="RT" F={F} periodsInfo={periodsInfo} onGoImport={goImport} />
+          </> : <>
+            <div style={{ textAlign: 'center', marginBottom: 16 }}>
+              <div style={{ fontWeight: 700, fontSize: '1rem', color: '#18191B', letterSpacing: '0.04em', textTransform: 'uppercase' }}>Dev Accelerator Ltd</div>
+              <div style={{ fontSize: '0.8rem', color: '#9BA8B0', marginTop: 2 }}>CIN: L74999GJ2020PLC115984 · Statement of Profit and Loss from Zoho account mapping · (₹ in Lakhs)</div>
+              <div style={{ fontSize: '0.72rem', color: '#B45309', marginTop: 4 }}>These figures depend on the Account Mapping tab and differ from the published results where the mapping is incomplete — see Data Validation → Legacy module data.</div>
             </div>
-            <div style={{ fontSize: '0.8rem', color: '#9BA8B0', marginTop: 2 }}>
-              CIN: [Your CIN] · Statement of Profit and Loss · (₹ in Lakhs)
-            </div>
-          </div>
-          <div style={S.card}>
-            <PLTable periods={periods} values={values} editMode={editMode} onValueChange={handleValueChange} />
-          </div>
+            <div style={S.card}><PLTable periods={periods} values={values} editMode={editMode} onValueChange={handleValueChange} /></div>
+          </>}
         </div>
       )}
+
+      {/* Cash Flow */}
+      {tab === 'cf' && (imported ? <StatementTab stmt="CF" F={F} periodsInfo={periodsInfo} onGoImport={goImport} /> : <SourceSwitch k="pl" other="—" />)}
 
       {/* Notes to Accounts */}
-      {tab === 'notes' && (
-        <div>
-          {/* Balance Sheet Notes section */}
-          <div style={{ marginBottom: 28 }}>
-            <div style={{ fontWeight: 700, color: '#1C4942', fontSize: '0.82rem', padding: '6px 0', borderBottom: '2px solid #DFE7E3', marginBottom: 12, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-              Balance Sheet Notes
-            </div>
-            <div style={{ fontSize: '0.75rem', color: '#5D6C7B', marginBottom: 12 }}>
-              Columns: As at 31/03/2026 · As at 31/03/2025
-            </div>
-            {BS_NOTES_DEF.map(note => (
-              <div key={note.num} style={S.card}>
-                <NoteTable note={note} periods={BS_PERIODS} values={bsData.values || {}} editMode={false} onValueChange={() => {}} colKeys={BS_COL_KEYS} />
-              </div>
-            ))}
-          </div>
-
-          {/* P&L Notes section */}
+      {tab === 'notes' && <>
+        <SourceSwitch k="notes" other="Zoho-mapped notes and trial-balance notes (earlier)" />
+        {isImported('notes') ? <NotesTab F={F} periodsInfo={periodsInfo} onGoImport={goImport} /> : (
           <div>
-            <div style={{ fontWeight: 700, color: '#1C4942', fontSize: '0.82rem', padding: '6px 0', borderBottom: '2px solid #DFE7E3', marginBottom: 12, textTransform: 'uppercase', letterSpacing: '0.06em', display: 'flex', alignItems: 'center', gap: 12 }}>
-              <span>Profit & Loss Notes</span>
-              <div style={{ display: 'flex', gap: 6 }}>
-                <button onClick={() => setEditMode(m => !m)} style={S.btn(editMode ? 'success' : 'secondary', true)}>
-                  {editMode ? 'Exit Edit Mode' : 'Edit Values'}
-                </button>
-                {editMode && <button onClick={handleSave} disabled={saving} style={S.btn('primary', true)}>{saving ? 'Saving…' : 'Save'}</button>}
-              </div>
+            <div style={{ marginBottom: 28 }}>
+              <div style={{ fontWeight: 700, color: '#1C4942', fontSize: '0.82rem', padding: '6px 0', borderBottom: '2px solid #DFE7E3', marginBottom: 12, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Balance Sheet Notes</div>
+              <div style={{ fontSize: '0.75rem', color: '#5D6C7B', marginBottom: 12 }}>Columns: As at 31/03/2026 · As at 31/03/2025</div>
+              {BS_NOTES_DEF.map(note => (<div key={note.num} style={S.card}><NoteTable note={note} periods={BS_PERIODS} values={bsData.values || {}} editMode={false} onValueChange={() => {}} colKeys={BS_COL_KEYS} /></div>))}
             </div>
-            <div style={{ fontSize: '0.75rem', color: '#5D6C7B', marginBottom: 12 }}>
-              Columns: {NOTE_COL_KEYS.map(k => periods.find(p=>p.key===k)?.label).filter(Boolean).join(' · ')}
-            </div>
-            {NOTES_DEF.map(note => (
-              <div key={note.num} style={S.card}>
-                <NoteTable note={note} periods={periods} values={values} editMode={editMode} onValueChange={handleValueChange} />
+            <div>
+              <div style={{ fontWeight: 700, color: '#1C4942', fontSize: '0.82rem', padding: '6px 0', borderBottom: '2px solid #DFE7E3', marginBottom: 12, textTransform: 'uppercase', letterSpacing: '0.06em', display: 'flex', alignItems: 'center', gap: 12 }}>
+                <span>Profit & Loss Notes</span>
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <button onClick={() => setEditMode(m => !m)} style={S.btn(editMode ? 'success' : 'secondary', true)}>{editMode ? 'Exit Edit Mode' : 'Edit Values'}</button>
+                  {editMode && <button onClick={handleSave} disabled={saving} style={S.btn('primary', true)}>{saving ? 'Saving…' : 'Save'}</button>}
+                </div>
               </div>
-            ))}
+              <div style={{ fontSize: '0.75rem', color: '#5D6C7B', marginBottom: 12 }}>Columns: {NOTE_COL_KEYS.map(k => periods.find(p => p.key === k)?.label).filter(Boolean).join(' · ')}</div>
+              {NOTES_DEF.map(note => (<div key={note.num} style={S.card}><NoteTable note={note} periods={periods} values={values} editMode={editMode} onValueChange={handleValueChange} /></div>))}
+            </div>
           </div>
-        </div>
+        )}
+      </>}
+
+      {/* Analysis */}
+      {!imported && !['bs', 'pl', 'notes', 'cf', 'coa', 'mapping', 'validation', 'inputs', 'branch', 'client', 'compliance'].includes(tab) && (
+        <div style={S.card}><div style={{ color: '#5D6C7B', fontSize: '0.85rem', marginBottom: 10 }}>No financial statements have been imported yet. The analysis is built from the imported, validated figures.</div><button onClick={goImport} style={S.btn('primary')}>Go to Data Validation & Reconciliation → Import</button></div>
       )}
+      {imported && tab === 'cfo' && <CfoTab F={F} onGoImport={goImport} goTab={setTab} />}
+      {imported && tab === 'compare' && <CompareTab F={F} periodsInfo={periodsInfo} onGoImport={goImport} />}
+      {imported && tab === 'performance' && <PerformanceTab F={F} onGoImport={goImport} />}
+      {imported && tab === 'ratios' && <RatiosTab F={F} periodsInfo={periodsInfo} onGoImport={goImport} />}
+      {tab === 'branch' && <BranchTab F={F} />}
+      {imported && tab === 'ar' && <ArTab F={F} onGoImport={goImport} />}
+      {imported && tab === 'ap' && <ApTab F={F} onGoImport={goImport} />}
+      {imported && tab === 'cash' && <CashTab F={F} onGoImport={goImport} />}
+      {imported && tab === 'debt' && <DebtTab F={F} onGoImport={goImport} />}
+      {imported && tab === 'capex' && <CapexTab F={F} onGoImport={goImport} />}
+      {tab === 'client' && <ClientTab F={F} />}
+      {tab === 'compliance' && <ComplianceTab F={F} goTab={setTab} />}
+      {tab === 'inputs' && <InputsTab rights={fsStatus.rights} />}
+      {tab === 'validation' && <ValidationTab F={F} status={fsStatus} reloadStatus={reloadStatus} />}
 
       {/* Chart of Accounts */}
       {tab === 'coa' && (
@@ -1688,14 +1728,7 @@ export default function FinancialStatements() {
       {/* Account Mapping */}
       {tab === 'mapping' && (
         <div style={S.card}>
-          <MappingTab
-            mappings={mappings}
-            coa={coa}
-            onSaveMapping={handleSaveMapping}
-            fetchZohoStatus={fetchStatus}
-            onFetchZoho={handleFetchZoho}
-            periods={periods}
-          />
+          <MappingTab mappings={mappings} coa={coa} onSaveMapping={handleSaveMapping} fetchZohoStatus={fetchStatus} onFetchZoho={handleFetchZoho} periods={periods} />
         </div>
       )}
 

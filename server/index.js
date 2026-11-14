@@ -16120,6 +16120,13 @@ app.use('/api/gstr2b', gstr2b);
 app.get('/api/cron/gstr2b', cronAuth, gstr2b.cron);
 app.get('/api/cron/gstr2b-recheck', cronAuth, gstr2b.cronRecheck);
 
+// ─── Financial Reporting (Financial Statements page: imported workbooks → statements, reconciliation, analytics) ─
+// Self-contained module — see server/fin-reporting/README.md. It never writes to Zoho; the balance sheet and P&L already in
+// this module (financial_bs_data / financial_pl_data) are read only to compare them with the imported figures.
+const finReporting = require('./fin-reporting');
+finReporting.init({ readLegacy: async () => ({ bs: await readFinBsData(), pl: await readFinData() }) });
+app.use('/api/fin-reporting', finReporting);
+
 // ─── Serve React build (must be after all API routes) ─────────────────────────
 
 const buildPath = path.join(__dirname, '..', 'client', 'build');

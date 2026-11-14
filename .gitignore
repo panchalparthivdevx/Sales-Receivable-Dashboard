@@ -29,6 +29,8 @@ server/bill-booking/data/
 # GSTR-2B Reco: Books documents synced from Zoho, uploaded GSTR-2B statements (originals), reconciliation results, audit trail
 server/gstr2b/files/
 server/gstr2b/data/
+# Financial Reporting: imported statement versions, adjustments, decisions, management inputs
+server/fin-reporting/data/
 
 # Company documents and data — stay on this PC, never in git (deployed data lives in Neon)
 Client Agreements/
@@ -38,6 +40,8 @@ Loan Module/
 GST/
 MSME/
 /*.xlsx
+# Source financial workbooks and presentations (trial balances, workings) — confidential
+Financials & Presentations/
 /*.pdf
 Self Client Generated Code*.txt
 server/*.json

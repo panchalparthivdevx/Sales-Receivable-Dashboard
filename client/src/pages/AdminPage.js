@@ -72,7 +72,14 @@ const MODULES = {
   payroll:      { label: 'Payroll Dashboard',          sections: {} },
   loan:         { label: 'Loan Module',                sections: {} },
   pocm:         { label: 'POCM Dashboard',             sections: {} },
-  fin_stmt:     { label: 'Financial Statements',       sections: {} },
+  fin_stmt: {
+    label: 'Financial Statements',
+    sections: {
+      fs_import: 'Import workbooks (stage, commit and roll back import versions)',
+      fs_adjust: 'Adjustments & source decisions (statement-level adjustments, resolving conflicting source figures)',
+      fs_inputs: 'Management inputs (budgets, seats, schedules, covenants, share data, thresholds)',
+    },
+  },
   budget:       { label: 'Budget vs. Actual',          sections: {} },
   portal:       { label: 'Finance Portal',             sections: {} },
   activity:     { label: 'Activity Tracker',           sections: {} },
@@ -88,7 +95,7 @@ function emptyPerms() {
 }
 
 // Edit rights (not just viewing): ticked one by one — never by "All" or a new user's default access
-const GRANT_ONLY = new Set(['vpr_purchase_team', 'vpr_accounts_team', 'bb_review', 'bb_create_draft', 'bb_config', 'g2b_prepare', 'g2b_review', 'g2b_approve', 'g2b_config']);
+const GRANT_ONLY = new Set(['vpr_purchase_team', 'vpr_accounts_team', 'bb_review', 'bb_create_draft', 'bb_config', 'g2b_prepare', 'g2b_review', 'g2b_approve', 'g2b_config', 'fs_import', 'fs_adjust', 'fs_inputs']);
 
 function fullPerms() {
   const p = {};

@@ -85,7 +85,15 @@ const MODULES = {
   compliance:  { label: 'Compliance Dashboard', sections: {} },
   loan:        { label: 'Loan Module', sections: {} },
   pocm:        { label: 'POCM Dashboard', sections: {} },
-  fin_stmt:    { label: 'Financial Statements', sections: {} },
+  // Financial Statements: viewing follows the module tick; each edit right is ticked one by one (see server/fin-reporting/index.js `rights`)
+  fin_stmt:    {
+    label: 'Financial Statements',
+    sections: {
+      fs_import: 'Import workbooks (stage, commit and roll back import versions)',
+      fs_adjust: 'Adjustments & source decisions (statement-level adjustments, resolving conflicting source figures)',
+      fs_inputs: 'Management inputs (budgets, seats, schedules, covenants, share data, thresholds)',
+    },
+  },
   budget:      { label: 'Budget vs. Actual', sections: {} },
   portal:      { label: 'Finance Portal', sections: {} },
   activity:    { label: 'Activity Tracker', sections: {} },
