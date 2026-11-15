@@ -16,8 +16,12 @@ const DE = require('./dueEngine');
 const AC = require('./access');
 
 const SPACES = ['live', 'demo'];
-const keys = sp => ({ org: `${sp}_org`, rules: `${sp}_rules`, applic: `${sp}_applic`, events: `${sp}_events`, docs: `${sp}_docs`, team: `${sp}_team`, meta: `${sp}_meta` });
-const DEF = { org: ORG.EMPTY, rules: RU.EMPTY, applic: () => ({ records: [] }), events: () => ({ events: [] }), docs: () => ({ documents: [] }), team: () => ({ rows: [] }), meta: () => ({}) };
+const WORKSPACE = ['payments', 'tds', 'recon', 'imports', 'taxaudit', 'updates', 'files'];
+const keys = sp => ({ org: `${sp}_org`, rules: `${sp}_rules`, applic: `${sp}_applic`, events: `${sp}_events`, docs: `${sp}_docs`, team: `${sp}_team`, meta: `${sp}_meta`,
+  ...Object.fromEntries(WORKSPACE.map(n => [n, `${sp}_${n}`])) });
+const DEF = { org: ORG.EMPTY, rules: RU.EMPTY, applic: () => ({ records: [] }), events: () => ({ events: [] }), docs: () => ({ documents: [] }), team: () => ({ rows: [] }), meta: () => ({}),
+  payments: () => ({ payments: [] }), tds: () => ({ sections: [], challans: [], allocations: [] }), recon: () => ({ records: [] }), imports: () => ({ batches: [] }),
+  taxaudit: () => ({ lots: [], payments: [], settings: {} }), updates: () => ({ updates: [], sources: [], runs: [], actions: [], user_state: {}, settings: { enabled: false, time: '09:00', extra_domains: [] } }), files: () => ({ files: [] }) };
 const SETTINGS_DEF = () => ({ access: {}, soon_days: 7, retention_years: 8, max_upload_mb: 25, link_ttl_seconds: 120 });
 
 const get = (src, key, def) => (src.get ? src.get(key, def) : src.read(key, def));
@@ -128,4 +132,4 @@ function scopedOrg(org, actor) {
   };
 }
 
-module.exports = { SPACES, keys, DEF, load, set, settings, taskFys, taskDocs, flat, findTask, todayFor, parseFilters, filter, docsByTask, visibleEntities, scopedOrg, get };
+module.exports = { SPACES, WORKSPACE, keys, DEF, load, set, settings, taskFys, taskDocs, flat, findTask, todayFor, parseFilters, filter, docsByTask, visibleEntities, scopedOrg, get };

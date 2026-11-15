@@ -1,122 +1,149 @@
 import React, { useEffect, useState } from 'react';
 import { api, errMsg } from './api';
-import { C, S, Section, Kpi, Donut, StackBar, Note, Table, StatusBadge, Flags, Btn, dt, ratioText, inr, Empty } from './ui';
+import { C, S, Note, StatusBadge, Flags, Btn, dt, Empty } from './ui';
+import { Hero, Panel, Badge, fyLabel } from './ui2';
 
-// CFO overview. Every figure is computed by the server from the tasks that pass the current filters. Workflow states (each
-// task is in exactly one) and flags (overdue, evidence missing … can overlap) are shown separately. Completion says nothing
-// about legal compliance or timeliness: those have their own measures, each with its numerator and denominator.
+// CFO overview (V5). Every figure is computed by the server from the tasks that pass the current filters. Workflow states
+// (exclusive) and flags (overdue, evidence missing … can overlap) are reported separately. Completion is progress, not a
+// statement of legal compliance; a category with no tasks is "not configured", never 100 %.
 
-const METRICS = [
-  { id: 'overdue', label: 'Overdue', tone: 'red', flags: ['overdue'], get: o => o.totals.overdue, sub: 'not filed and past the effective statutory date' },
-  { id: 'due_soon', label: 'Due soon', tone: 'amber', flags: ['due_soon'], get: o => o.totals.due_soon, sub: o => `next ${o.soon_days} days, not filed` },
-  { id: 'review', label: 'Review queue', tone: 'lav', flags: ['review'], get: o => o.totals.review, sub: 'ready for review + filed awaiting verification' },
-  { id: 'evidence', label: 'Missing evidence', tone: 'red', flags: ['evidence_missing'], get: o => o.totals.missing_evidence, sub: 'filed / closed without mandatory documents' },
-  { id: 'no_due', label: 'No due date', tone: 'amber', flags: ['no_due_date'], get: o => o.totals.no_due_date, sub: 'rule, state rule or event date missing — never counted overdue' },
-  { id: 'completed', label: 'Completed', tone: 'green', statuses: ['completed'], get: o => o.totals.completed, sub: 'verified and closed' },
+const GROUPS = [
+  ['Indirect tax', ['GST']], ['Direct tax', ['Income Tax', 'TDS/TCS']], ['Company law', ['ROC/LLP']], ['Payroll & labour', ['Provident Fund', 'ESIC', 'Professional Tax', 'Labour & Payroll']],
+  ['SEBI & FEMA', ['SEBI/Exchange', 'FEMA/RBI']], ['Other & controls', ['State & Licences', 'Notices & Litigation', 'Internal Controls']],
+];
+const QUEUE = [['open', 'Open'], ['overdue', 'Overdue'], ['due_soon', 'Due soon'], ['review', 'Review'], ['completed', 'Completed']];
+const KPIS = [
+  { id: 'all', label: 'Total obligations', color: '#202C45', get: o => o.totals.obligations, sub: () => 'Across current filters' },
+  { id: 'completed', label: 'Completed', color: '#249D98', get: o => o.totals.completed, sub: o => (o.completion.denominator ? `${o.completion.pct}% of tracked obligations` : 'No obligations in this filter') },
+  { id: 'overdue', label: 'Overdue', color: '#D85D70', get: o => o.totals.overdue, sub: () => 'Requires immediate attention' },
+  { id: 'due_soon', label: `Due in 7 days`, color: '#C58C2B', get: o => o.totals.due_soon, sub: o => `${dt(o.as_of)} + ${o.soon_days} days, inclusive` },
+  { id: 'review', label: 'Awaiting review', color: '#6554C5', get: o => o.totals.review, sub: () => 'Preparation or filing verification' },
 ];
 
-export default function OverviewTab({ params, stamp, onOpenTask, onDrill, meta, demo }) {
+export default function OverviewTab({ params, stamp, onOpenTask, onDrill, meta, demo, onGoto }) {
   const [ov, setOv] = useState(null);
+  const [extra, setExtra] = useState(null);
   const [err, setErr] = useState('');
-  const [sel, setSel] = useState(null);
-  const [cat, setCat] = useState(null);
-  useEffect(() => { setOv(null); api.overview(params).then(setOv).catch(e => setErr(errMsg(e))); }, [params, stamp]);
+  const [q, setQ] = useState('open');
+  const [group, setGroup] = useState(null);
+  const [done, setDone] = useState(null);
+  useEffect(() => {
+    setOv(null); setDone(null);
+    api.overview(params).then(setOv).catch(e => setErr(errMsg(e)));
+    Promise.all([api.reportTasks(params).catch(() => null), api.updates({}).catch(() => null)]).then(([t, u]) => setExtra({ t, u }));
+  }, [params, stamp]);
+  useEffect(() => { if (q === 'completed' && !done) api.tasks({ ...params, statuses: 'completed' }).then(r => setDone(r.tasks)).catch(e => setErr(errMsg(e))); }, [q, done, params]);
   if (err) return <Note tone="error">{err}</Note>;
   if (!ov) return <Empty>Loading…</Empty>;
-
-  const metric = METRICS.find(m => m.id === sel);
-  const queue = ov.queue_tasks.filter(t => (!metric || (metric.flags ? metric.flags.every(f => (f === 'review' ? ['ready_for_review', 'filed_awaiting_verification'].includes(t.status) : t.flags.includes(f))) : metric.statuses.includes(t.status))) && (!cat || t.category === cat));
   const t = ov.totals;
+  const cats = new Map(ov.categories.map(c => [c.category, c]));
+  const groupCats = group ? GROUPS.find(g => g[0] === group)[1] : null;
+  const base = q === 'completed' ? (done || []) : ov.queue_tasks;
+  const queue = base.filter(x => (q === 'open' || q === 'completed' ? true : q === 'review' ? ['ready_for_review', 'filed_awaiting_verification'].includes(x.status) : x.flags.includes(q)) && (!groupCats || groupCats.includes(x.category)));
+  const withTasks = ov.companies.filter(c => c.total > 0).length;
+  const fy = params.fy || '';
   return (
     <div>
-      {demo && <Note tone="demo"><b>DEMO snapshot as of {dt(ov.snapshot)}</b> — illustrative entities and sample filings. Sample evidence is not a verified real document and sample amounts are not real payments.</Note>}
-      {/* executive summary */}
-      <div style={{ background: `linear-gradient(120deg, ${C.navy} 0%, ${C.navy2} 100%)`, color: '#fff', borderRadius: 16, padding: '1.1rem 1.3rem', marginBottom: '1rem', display: 'flex', gap: '1.5rem', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between' }}>
-        <div style={{ minWidth: 240 }}>
-          <div style={{ fontSize: '0.72rem', textTransform: 'uppercase', letterSpacing: '0.06em', opacity: 0.75 }}>As of {dt(ov.as_of)} {demo ? '(demo snapshot)' : '(Asia/Kolkata)'}</div>
-          <div style={{ fontSize: '1.9rem', fontWeight: 800, marginTop: 4 }}>{t.obligations} <span style={{ fontSize: '0.95rem', fontWeight: 600, opacity: 0.85 }}>statutory obligations in this filter</span></div>
-          <div style={{ fontSize: '0.8rem', opacity: 0.85, marginTop: 4 }}>{t.open} open · {t.filed} filed · {t.internal_controls} internal controls counted separately{t.revisions_in_progress ? ` · ${t.revisions_in_progress} revision(s) in progress` : ''}</div>
-        </div>
-        <div style={{ display: 'flex', gap: '1.6rem', flexWrap: 'wrap' }}>
-          {[['Completion', ov.completion], ['Filed on time', ov.on_time], ['Review completion', ov.review_completion]].map(([l, r]) => (
-            <div key={l} title={r.note}><div style={{ fontSize: '0.7rem', opacity: 0.75, textTransform: 'uppercase', letterSpacing: '0.04em' }}>{l}</div>
-              <div style={{ fontSize: '1.35rem', fontWeight: 800 }}>{r.denominator ? `${r.pct}%` : '—'}</div>
-              <div style={{ fontSize: '0.72rem', opacity: 0.8 }}>{r.denominator ? `${r.numerator} of ${r.denominator}` : 'no records'}</div></div>
-          ))}
-        </div>
+      <Hero eyebrow="EXECUTIVE OVERVIEW" title="Your compliance, at a glance." sub={`Group-wide visibility · ${t.obligations} tracked obligations · ${t.open} awaiting completion${t.internal_controls ? ` · ${t.internal_controls} internal controls counted separately` : ''}`}
+        tag={`${fy ? fyLabel(fy) : 'All years'} · ${demo ? 'Demo snapshot' : 'Live'}`} tagSub={`${dt(ov.as_of)} / India`} />
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: 14, marginBottom: 18 }}>
+        {KPIS.map(k => (
+          <button key={k.id} type="button" onClick={() => { setQ(k.id === 'all' ? 'open' : k.id); setGroup(null); }} style={{ textAlign: 'left', background: '#fff', border: `1px solid ${C.border}`, borderRadius: 12, padding: 18, fontSize: 12, color: '#738097', cursor: 'pointer', fontFamily: 'inherit' }}>
+            <div>{k.label}</div>
+            <div style={{ color: k.color, fontSize: 30, fontWeight: 800, letterSpacing: -1, margin: '8px 0' }}>{k.get(ov)}</div>
+            <div>{k.sub(ov)}</div>
+          </button>
+        ))}
       </div>
 
-      <div style={{ ...S.grid(165), marginBottom: '1rem' }}>
-        {METRICS.map(m => <Kpi key={m.id} label={m.label} value={m.get(ov)} tone={m.tone} sub={typeof m.sub === 'function' ? m.sub(ov) : m.sub} active={sel === m.id} onClick={() => setSel(sel === m.id ? null : m.id)} />)}
-      </div>
-
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '1rem' }}>
-        <Section title="Completion" sub="Completed ÷ statutory obligations in the filter — not a statement of legal compliance">
-          <Donut numerator={ov.completion.numerator} denominator={ov.completion.denominator} label={ov.completion.note} />
-          <div style={{ marginTop: 12, ...S.muted }}>
-            <div><b>Filed on time:</b> {ratioText(ov.on_time)} — {ov.on_time.note}</div>
-            <div><b>Review completion:</b> {ratioText(ov.review_completion)}</div>
-            <div><b>Internal controls:</b> {ov.internal.total ? `${ov.internal.completed} of ${ov.internal.total} done, ${ov.internal.overdue} overdue` : 'none in this filter'}</div>
+      <div className="c2-three" style={{ display: 'grid', gap: 16, alignItems: 'start' }}>
+        <Panel title="Completion health" right={<span style={S.small}>Task status</span>}>
+          <Ring pct={ov.completion.denominator ? ov.completion.pct : null} />
+          <div style={{ fontSize: 13, marginTop: 14 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}><span><span style={{ color: '#7865D6' }}>●</span> Completed</span><b>{t.completed}</b></div>
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span><span style={{ color: '#D9DCE8' }}>●</span> Open</span><b>{t.open}</b></div>
           </div>
-          <div style={{ marginTop: 12 }}>
-            <div style={S.label}>Workflow state (exclusive)</div>
-            <StackBar parts={[['not_started', '#98A2B3'], ['in_progress', C.blue], ['ready_for_review', C.amber], ['changes_requested', '#C4320A'], ['approved_to_file', C.lav], ['filed_awaiting_verification', C.teal], ['completed', C.green]].map(([k, color]) => ({ value: ov.states[k], color, label: meta.constants.statuses[k] }))} />
-            <div style={{ ...S.small, marginTop: 6, lineHeight: 1.6 }}>{Object.entries(ov.states).filter(([, v]) => v).map(([k, v]) => `${meta.constants.statuses[k]} ${v}`).join(' · ') || 'no tasks'}</div>
-            <div style={{ ...S.label, marginTop: 10 }}>Flags (can overlap)</div>
-            <div style={{ ...S.small, lineHeight: 1.6 }}>{Object.entries(ov.flags).map(([k, v]) => `${k.replace(/_/g, ' ')} ${v}`).join(' · ')}</div>
-          </div>
-        </Section>
+          <p style={{ ...S.muted, marginTop: 12 }}>{ov.completion.denominator ? `${ov.completion.numerator} / ${ov.completion.denominator} tracked tasks.` : 'No tasks in this filter.'} This is completion progress, not a legal-compliance score. Filed on time: {ov.on_time.denominator ? `${ov.on_time.numerator} of ${ov.on_time.denominator} (${ov.on_time.pct}%)` : 'no filed tasks with a due date'}.</p>
+          <div style={{ ...S.small, lineHeight: 1.6 }}>States (exclusive): {Object.entries(ov.states).filter(([, v]) => v).map(([k, v]) => `${meta.constants.statuses[k]} ${v}`).join(' · ') || '—'}<br />Flags (can overlap): {Object.entries(ov.flags).filter(([, v]) => v).map(([k, v]) => `${k.replace(/_/g, ' ')} ${v}`).join(' · ') || 'none'}</div>
+        </Panel>
 
-        <Section title="By category" sub="Click a category to narrow the action list. No tasks = not configured (never 100%).">
-          {ov.categories.map(c => (
-            <button key={c.category} type="button" onClick={() => setCat(cat === c.category ? null : c.category)} aria-pressed={cat === c.category}
-              style={{ display: 'block', width: '100%', textAlign: 'left', border: `1px solid ${cat === c.category ? C.lav : 'transparent'}`, background: cat === c.category ? C.lavSoft : 'transparent', borderRadius: 10, padding: '6px 8px', marginBottom: 4, cursor: 'pointer', fontFamily: 'inherit' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', marginBottom: 4 }}>
-                <b style={{ color: C.text }}>{c.category}{c.internal_only ? ' (internal)' : ''}</b>
-                <span style={{ color: c.configured ? C.muted : C.faint }}>{c.configured ? `${c.completed}/${c.total} · ${c.overdue} overdue` : 'Not configured'}</span>
-              </div>
-              {c.configured && <StackBar total={c.total} parts={[{ value: c.completed, color: C.green, label: 'completed' }, { value: c.overdue, color: C.red, label: 'overdue' }, { value: c.due_soon, color: C.amber, label: 'due soon' }]} />}
+        <Panel title="Compliance by category" right={<span style={S.small}>Completed / total</span>} note="Select a category to focus the action queue. Categories without tasks are not assumed compliant.">
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(165px, 1fr))', gap: 10 }}>
+            {GROUPS.map(([g, list]) => {
+              const cs = list.map(c => cats.get(c)).filter(Boolean);
+              const total = cs.reduce((a, c) => a + c.total, 0), completed = cs.reduce((a, c) => a + c.completed, 0), overdue = cs.reduce((a, c) => a + c.overdue, 0), nodate = cs.reduce((a, c) => a + c.no_due_date, 0);
+              const on = group === g;
+              return (
+                <button key={g} type="button" aria-pressed={on} onClick={() => setGroup(on ? null : g)} style={{ textAlign: 'left', border: `1px solid ${on ? '#9A86E4' : '#E4E7EF'}`, background: on ? '#FAF8FF' : '#fff', borderRadius: 10, padding: 12, cursor: 'pointer', fontFamily: 'inherit' }}>
+                  <b style={{ fontSize: 13, color: '#202C45' }}>{g}</b>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: total ? '#6554C5' : '#98A0B8', margin: '8px 0 6px' }}><span>{total ? `${total - completed} open` : 'Not configured'}</span><b>{completed} / {total}</b></div>
+                  <div style={{ background: '#EEF0F6', borderRadius: 6, height: 5 }}><div style={{ width: `${total ? (completed / total) * 100 : 0}%`, height: 5, borderRadius: 6, background: '#7865D6' }} /></div>
+                  <div style={{ fontSize: 11, color: '#8590A3', marginTop: 8 }}>{total ? `${overdue} overdue · ${nodate} missing dates` : 'No tasks within current filters'}</div>
+                </button>
+              );
+            })}
+          </div>
+        </Panel>
+
+        <Panel title="Control checks" right={<span style={S.small}>Review flags</span>} note={`Flags may overlap. Sample documents do not count as real evidence. Updates are ${demo ? 'curated reference entries, not a live feed' : 'reviewed before they change anything'}.`}>
+          {[['Filed / closed without real uploaded evidence', extra?.t ? extra.t.exceptions[0].count : '…', () => onGoto('reports', 'evidence')],
+            ['Due-date rules awaiting confirmation', t.no_due_date + (ov.flags.rule_unverified || 0), () => onGoto('coverage')],
+            ['Companies with tasks, group-wide', `${withTasks} / ${ov.companies.length}`, () => onGoto('masters')],
+            [demo ? 'Curated updates unread by you' : 'Updates unread by you', extra?.u ? extra.u.counts.unread : '…', () => onGoto('updates')]].map(([l, v, go]) => (
+            <button key={l} type="button" onClick={go} style={{ width: '100%', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, padding: '12px 0', border: 'none', borderBottom: '1px solid #EEF0F6', background: 'none', cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left', fontSize: 13, color: '#34415B' }}>
+              <span>{l}</span><span style={{ background: '#F0EFFA', color: '#6554C5', borderRadius: 6, padding: '2px 8px', fontWeight: 700, fontSize: 12 }}>{v}</span>
             </button>
           ))}
-        </Section>
+        </Panel>
       </div>
 
-      <Section title="Action queue" sub={`${metric ? metric.label : 'Highest priority first'}${cat ? ` · ${cat}` : ''} — ${queue.length} task(s)`} right={<>
-        {(sel || cat) && <Btn kind="onNavy" small onClick={() => { setSel(null); setCat(null); }}>Clear selection</Btn>}
-        <Btn kind="onNavy" small onClick={() => onDrill({ ...(metric?.flags ? { flags: metric.flags } : {}), ...(metric?.statuses ? { statuses: metric.statuses } : {}), ...(cat ? { categories: [cat] } : {}) })}>Open in register</Btn>
-      </>} flush>
-        <Table rows={queue} onRow={r => onOpenTask(r.id)} maxHeight={420} empty="Nothing needs action in this selection"
-          cols={[
-            { label: 'Due', render: r => (r.effective_due ? <span className="c2-nowrap" style={{ color: r.overdue ? C.red : C.text, fontWeight: r.overdue ? 700 : 400 }}>{dt(r.effective_due)}{r.overdue ? ` (+${r.days_overdue}d)` : ''}</span> : <i style={{ color: C.faint }}>no date</i>) },
-            { label: 'Obligation', render: r => <><b>{r.rule_name}</b><div style={S.small}>{r.period_label}</div></> },
-            { label: 'Scope', render: r => r.scope_label, hideSm: true },
-            { label: 'Status', render: r => <StatusBadge status={r.status} label={r.status_label} /> },
-            { label: 'Flags', render: r => <Flags flags={r.flags} skip={['sample', 'rule_unverified']} />, hideSm: true },
-            { label: 'Owner', render: r => r.owner_name || <i style={{ color: C.faint }}>unassigned</i>, hideSm: true },
-          ]} />
-      </Section>
+      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1.7fr) minmax(280px, 1fr)', gap: 16, alignItems: 'start' }} className="c2-two">
+        <Panel title="Priority action queue" right={<><Btn small kind="ghost" onClick={() => onDrill({ ...(q === 'review' ? { flags: ['review'] } : q === 'completed' ? { statuses: ['completed'] } : q !== 'open' ? { flags: [q] } : { flags: ['open'] }), ...(groupCats ? { categories: groupCats } : {}) })}>Full register ↗</Btn>{group && <Btn small kind="ghost" onClick={() => setGroup(null)}>Clear category</Btn>}</>}
+          note={`Showing ${Math.min(queue.length, 12)} of ${queue.length} matching tasks${group ? ` in ${group}` : ''}. Highest priority first; tasks without a due date appear last.`}>
+          <div style={{ ...S.row, marginBottom: 10 }}>{QUEUE.map(([k, l]) => <button key={k} type="button" aria-pressed={q === k} onClick={() => setQ(k)} style={{ border: `1px solid ${q === k ? '#C9BFEE' : '#E4E7EF'}`, background: q === k ? '#EEEBFC' : '#fff', color: q === k ? '#5543B2' : '#485570', borderRadius: 7, padding: '6px 12px', fontSize: 12, cursor: 'pointer', fontFamily: 'inherit' }}>{l}</button>)}</div>
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead><tr>{['Obligation / entity', 'Due date', 'Status', ''].map(h => <th key={h} style={{ ...S.th, background: '#F8F9FD' }}>{h}</th>)}</tr></thead>
+            <tbody>
+              {queue.length === 0 && <tr><td colSpan={4} style={{ ...S.td, textAlign: 'center', color: C.muted, padding: 20 }}>{q === 'completed' && !done ? 'Loading…' : 'Nothing in this selection.'}</td></tr>}
+              {queue.slice(0, 12).map(x => (
+                <tr key={x.id}>
+                  <td style={{ ...S.td, padding: '12px 8px' }}><b style={{ fontWeight: 600 }}>{x.rule_name}{x.period_label ? ` · ${x.period_label}` : ''}</b><div style={S.small}>{x.scope_label}</div></td>
+                  <td style={{ ...S.td, padding: '12px 8px', whiteSpace: 'nowrap' }}>{x.effective_due ? dt(x.effective_due) : <i style={{ color: C.faint }}>Not scheduled</i>}<div style={S.small}>{x.revised_due ? 'Revised date' : x.internal ? 'Internal target' : 'Statutory date'}</div></td>
+                  <td style={{ ...S.td, padding: '12px 8px' }}>{x.overdue && <Badge tone="red">Overdue</Badge>}<StatusBadge status={x.status} label={x.status_label} /><div><Flags flags={x.flags} skip={['sample', 'overdue', 'rule_unverified']} /></div></td>
+                  <td style={{ ...S.td, padding: '12px 8px' }}><Btn small kind="ghost" onClick={() => onOpenTask(x.id)}>Open ↗</Btn></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Panel>
+        <Panel title="Company progress" right={<span style={S.small}>Filtered tasks</span>} note="Entities without tasks stay visible in Companies & GSTINs. Registration coverage = registrations with tasks ÷ active registrations.">
+          {ov.companies.length === 0 && <span style={S.muted}>No companies in this filter.</span>}
+          {ov.companies.map(c => (
+            <div key={c.entity_id} style={{ marginBottom: 14 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13 }}><span>{c.name}</span><b>{c.completed}/{c.total}</b></div>
+              <div style={{ background: '#EEF0F6', borderRadius: 6, height: 5, margin: '6px 0' }}><div style={{ width: `${c.total ? (c.completed / c.total) * 100 : 0}%`, height: 5, borderRadius: 6, background: '#249D98' }} /></div>
+              <div style={{ fontSize: 11, color: '#8590A3' }}>{c.overdue} overdue · {c.no_due_date} missing dates · {c.missing_evidence} missing evidence · registrations {c.registrations.denominator ? `${c.registrations.numerator}/${c.registrations.denominator}` : '—'}{c.data_status !== 'approved' ? ` · ${c.data_status === 'illustrative' ? 'illustrative' : 'master data not approved'}` : ''}</div>
+            </div>
+          ))}
+          <div style={{ ...S.row, borderTop: '1px solid #EEF0F6', paddingTop: 12 }}>
+            <Btn small kind="ghost" onClick={() => onGoto('tds')}>TDS deposits ↗</Btn><Btn small kind="ghost" onClick={() => onGoto('folders')}>Document folders ↗</Btn><Btn small kind="ghost" onClick={() => onGoto('coverage')}>Coverage &amp; rules ↗</Btn><Btn small kind="ghost" onClick={() => onGoto('reports')}>Reports ↗</Btn>
+          </div>
+        </Panel>
+      </div>
+    </div>
+  );
+}
 
-      <Section title="Company health" sub="Per entity in the filter; registration coverage = registrations that have tasks ÷ active registrations" flush>
-        <Table rows={ov.companies} rowKey={r => r.entity_id} empty="No entities in this filter"
-          cols={[
-            { label: 'Entity', render: r => <><b>{r.short_code}</b> {r.name}{r.data_status !== 'approved' && <div style={S.small}>{r.data_status === 'illustrative' ? 'illustrative (demo)' : 'master data not approved'}</div>}</> },
-            { label: 'Obligations', num: true, render: r => r.total },
-            { label: 'Completed', num: true, render: r => (r.completion ? `${r.completed} (${r.completion.pct}%)` : '—') },
-            { label: 'Overdue', num: true, render: r => <span style={{ color: r.overdue ? C.red : C.text }}>{r.overdue}</span> },
-            { label: 'Due soon', num: true, render: r => r.due_soon },
-            { label: 'Missing evidence', num: true, render: r => r.missing_evidence, hideSm: true },
-            { label: 'No due date', num: true, render: r => r.no_due_date, hideSm: true },
-            { label: 'Registrations covered', num: true, render: r => (r.registrations.denominator ? `${r.registrations.numerator}/${r.registrations.denominator}` : '—'), hideSm: true },
-          ]} />
-      </Section>
-
-      <Section title="Payments recorded" sub={ov.payments.note}>
-        {ov.payments.count ? (
-          <div style={S.row}>{Object.entries(ov.payments.by_category).map(([k, v]) => <div key={k} style={{ ...S.card, padding: '0.6rem 0.8rem', marginBottom: 0 }}><div style={S.label}>{k}</div><b>{inr(v)}</b></div>)}
-            <div style={S.muted}>Total {inr(ov.payments.total)} from {ov.payments.count} filing record(s).</div></div>
-        ) : <div style={S.muted}>No payment recorded on filing records in this filter.</div>}
-        <div style={{ ...S.small, marginTop: 8 }}>Unpaid liabilities, interest exposure and cash forecasts need liability data and are not available in this phase.</div>
-      </Section>
+function Ring({ pct }) {
+  const size = 150, r = 60, c = 2 * Math.PI * r;
+  return (
+    <div style={{ display: 'flex', justifyContent: 'center' }}>
+      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} role="img" aria-label={pct === null ? 'No tasks' : `${pct}% completed`}>
+        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="#EEF0F6" strokeWidth="14" />
+        {pct !== null && <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="#7865D6" strokeWidth="14" strokeDasharray={`${(c * pct) / 100} ${c}`} transform={`rotate(-90 ${size / 2} ${size / 2})`} />}
+        <text x="50%" y="50%" textAnchor="middle" fontSize="26" fontWeight="800" fill="#202C45">{pct === null ? '—' : `${Math.round(pct)}%`}</text>
+        <text x="50%" y="63%" textAnchor="middle" fontSize="9" fill="#8590A3" letterSpacing="1">COMPLETED</text>
+      </svg>
     </div>
   );
 }

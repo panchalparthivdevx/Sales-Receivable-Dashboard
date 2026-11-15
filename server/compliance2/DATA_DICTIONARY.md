@@ -23,6 +23,17 @@
 | `<sp>_folders` | OneDrive folder mapping (see "Document folders" below) |
 | `onedrive` | Live only: `{ status: connected\|revoked\|disconnected, sealed (encrypted refresh token), account { name, upn, id }, connected_by, connected_at, scopes, last_error }`. Never a password. |
 | `demo_graphsim` | The demo's simulated OneDrive |
+| `<sp>_payments` | `{ payments[] }` — payment register (lib/payments.js) |
+| `<sp>_tds` | `{ sections[], challans[], allocations[] }` — TDS section-wise (lib/tds.js) |
+| `<sp>_recon` | `{ records[] }` — reconciliation inputs (lib/recon.js) |
+| `<sp>_imports` | `{ batches[] }` — payroll / ECR / ESIC import batches (lib/memberImports.js) |
+| `<sp>_taxaudit` | `{ lots[], payments[], settings{ "<entity>\|<fy>": cut-off } }` (lib/taxAudit.js) |
+| `<sp>_updates` | `{ updates[], sources[], runs[], actions[], user_state{ user: { read[], saved[] } }, settings{ enabled, time, extra_domains[] } }` (lib/updates.js) |
+| `<sp>_files` | `{ files[] }` — evidence files of workspace records (lib/attachments.js; same encrypted file store as documents) |
+| `build_prompt` | `{ text, uploaded_by, at }` — the build prompt (or `build_prompt.txt` in the data folder on the PC) |
+
+Each workspace record's fields are described at the top of its lib file. Records made by the demo seed carry
+`illustrative: true` and are reported as their own dataset.
 
 **Files.** On the PC they are in `server/compliance2/files/<space>/<sha256>.c2e`; online in the private Blob
 `compliance2/<space>/<sha256>.c2e`. Each file is AES-256-GCM encrypted: `"C2E1"` + key id + IV + tag + ciphertext. The name is

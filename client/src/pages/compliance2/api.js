@@ -63,7 +63,34 @@ export const api = {
   setBase: url => post('/onedrive/base', { url }),
   disconnectOneDrive: () => post('/onedrive/disconnect', {}),
   docToOneDrive: (id, version) => post(`/documents/${id}/onedrive`, { version }, { timeout: 300000 }),
+  // Workspace — server/compliance2/workspace.js
+  ws: () => get('/ws/meta'), prompt: () => get('/ws/prompt'), savePrompt: form => axios.put(`${B}/ws/prompt`, form, cfg()).then(d),
+  uploadFile: (form, onUploadProgress) => post('/files', form, { timeout: 300000, onUploadProgress }), files: params => get('/files', params), fileUrl: id => post(`/files/${id}/link-url`, {}),
+  payments: params => get('/payments', params), addPayment: body => post('/payments', body), reversePayment: (id, reason) => post(`/payments/${id}/reverse`, { reason }),
+  tds: params => get('/tds', params), addSection: body => post('/tds/sections', body), verifySection: (id, source) => post(`/tds/sections/${id}/verify`, { source }),
+  addChallan: body => post('/tds/challans', body), reverseChallan: (id, reason) => post(`/tds/challans/${id}/reverse`, { reason }), reviewChallan: (id, action, note) => post(`/tds/challans/${id}/review`, { action, note }),
+  allocate: (body, id) => (id ? put(`/tds/allocations/${id}`, body) : post('/tds/allocations', body)), reverseAllocation: (id, reason) => post(`/tds/allocations/${id}/reverse`, { reason }),
+  recon: params => get('/recon', params), reconOne: id => get(`/recon/${id}`), saveRecon: (body, id) => (id ? put(`/recon/${id}`, body) : post('/recon', body)), reconAct: (id, action, body) => post(`/recon/${id}/${action}`, body || {}),
+  reconImport: (type, form) => post(`/recon-import/${type}`, form),
+  importParse: form => post('/imports/parse', form, { timeout: 300000 }), importMap: body => post('/imports/map', body), importSave: body => post('/imports/batches', body, { timeout: 300000 }),
+  importBatches: params => get('/imports/batches', params), importToRecon: id => post(`/imports/batches/${id}/to-recon`, {}), importWithdraw: (id, reason) => post(`/imports/batches/${id}/withdraw`, { reason }),
+  taxaudit: params => get('/taxaudit', params), saveLot: (body, id) => (id ? put(`/taxaudit/lots/${id}`, body) : post('/taxaudit/lots', body)), approveLot: id => post(`/taxaudit/lots/${id}/approve`, {}),
+  saveTaPayment: (body, id) => (id ? put(`/taxaudit/payments/${id}`, body) : post('/taxaudit/payments', body)), verifyTaPayment: (id, verified) => post(`/taxaudit/payments/${id}/verify`, { verified }),
+  reverseTaPayment: (id, reason) => post(`/taxaudit/payments/${id}/reverse`, { reason }), saveCutoff: body => put('/taxaudit/settings', body),
+  updates: params => get('/updates', params), addUpdate: body => post('/updates', body), editUpdate: (id, body) => put(`/updates/${id}`, body), decideUpdate: (id, body) => post(`/updates/${id}/decide`, body),
+  noteUpdate: (id, text) => post(`/updates/${id}/note`, { text }), markUpdate: (id, what, on) => post(`/updates/${id}/mark`, { what, on }), addAction: body => post('/updates/actions', body),
+  setAction: (id, status) => post(`/updates/actions/${id}`, { status }), proposeRule: (id, body) => post(`/updates/${id}/propose-rule`, body), updateSettings: body => put('/updates/settings', body),
+  addSource: body => post('/updates/sources', body), setSource: (id, body) => put(`/updates/sources/${id}`, body), runMonitor: () => post('/updates/run', {}, { timeout: 600000 }),
+  reportPayments: params => get('/reports/payments', params), reportTrends: params => get('/reports/trends', params), reportTasks: params => get('/reports/tasks', params), reportRecon: (page, params) => get(`/reports/recon/${page}`, params),
 };
+
+/** Opens a workspace evidence file through a short-lived signed link */
+export async function openFile(fileId) {
+  const { url } = await api.fileUrl(fileId);
+  const a = document.createElement('a');
+  a.href = url; a.rel = 'noopener';
+  document.body.appendChild(a); a.click(); a.remove();
+}
 
 /** Download from an authenticated route (the login token travels in the header) */
 export async function download(path, params, fallbackName) {

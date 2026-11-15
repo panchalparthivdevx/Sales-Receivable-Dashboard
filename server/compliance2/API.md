@@ -114,6 +114,44 @@ is honoured in the demo space only.
 | POST `/onedrive/disconnect` | admin | Stops the engine; folders and mapping stay. |
 | POST `/documents/:id/onedrive` | prepare or file | `{ version? }`. Copies (again) to the document's OneDrive folder. Returns `{ remote }`. |
 
+## Workspace (workspace.js)
+
+Datasets: in the demo space `?dataset=illustrative` (default) or `recorded`; the live space has recorded data only.
+
+| Method and path | Right | Purpose |
+|---|---|---|
+| GET `/ws/meta` | view | Constants for the screens (sections, recon grids and fields, TDS, imports, tax audit, updates). |
+| GET `/ws/prompt`, PUT `/ws/prompt` | view / admin | The build prompt (plain text). PUT takes multipart `file` (.txt). |
+| POST `/files` | prepare or file | Multipart `file`, `entity_id`, `kind`, optional `module` (`payment`, `tds_challan`, `recon`, `taxaudit_payment`, `import_batch`) + `record_id`. Same pipeline as task documents; the same content is stored once. |
+| GET `/files?ids&entity_id`, POST `/files/:id/link-url` | view | Evidence file list; signed download link (`/dl/<token>`). |
+| GET `/payments`, POST `/payments` | view / prepare or file | Payment register (not TDS). 409 on a duplicate reference. |
+| POST `/payments/:id/reverse` | file or approve | `{ reason }` — reversal record, original kept. |
+| GET `/tds?entity_ids&registration_ids&months&payment_months&section` | view | `{ sections, challans (+ balance), allocations, queue, rows, pivot, tans }`. |
+| POST `/tds/sections`, POST `/tds/sections/:id/verify` | rules / rules or approve | Section master; verification by another person quoting the source. |
+| POST `/tds/challans`, POST `/tds/challans/:id/reverse` | prepare or file / file or approve | Challan header; reversal also reverses its allocations. |
+| POST `/tds/challans/:id/review` | submit: prepare or file; approve / return: review or approve | `{ action, note }`. |
+| POST `/tds/allocations`, PUT `/tds/allocations/:id`, POST `/tds/allocations/:id/reverse` | prepare or file | Section allocation lines. |
+| GET `/recon?types`, GET `/recon/:id` | view | Records with `missing` and `calc`. |
+| POST `/recon`, PUT `/recon/:id` | prepare | Save as draft (`rev` checked). |
+| POST `/recon/:id/submit\|review\|return` | prepare / review or approve | Maker / checker transitions. |
+| GET `/recon-template/:type.csv`, POST `/recon-import/:type` | view / prepare | Strict-header grid template and import (multipart `file`). |
+| POST `/imports/parse` | prepare | Multipart `file`, `entity_id`, `side`, `fund` → stored file + ECR rows or sheet previews. |
+| POST `/imports/map` | prepare | `{ entity_id, file_id, sheet, header_row, mapping }` → mapped rows (preview). |
+| POST `/imports/batches`, GET `/imports/batches` | prepare / view | Rows are re-read from the stored files; summary with matches and exceptions. |
+| POST `/imports/batches/:id/to-recon`, POST `/imports/batches/:id/withdraw` | prepare | Send to the PF / ESIC reconciliation (draft); withdraw (files kept). |
+| GET `/taxaudit?fy&entity_ids&registration_ids&as_of` | view | Schedules (20(b), 26(A), 26(B)), lots, payments with allocations, cut-offs. |
+| POST `/taxaudit/lots`, PUT `/taxaudit/lots/:id`, POST `/taxaudit/lots/:id/approve` | prepare / review or approve | Liability lots; classification approved by another person. |
+| POST `/taxaudit/payments`, PUT `/taxaudit/payments/:id`, POST `.../verify`, POST `.../reverse` | prepare or file / review, verify or approve | Paid challans with allocations; verification by another person. |
+| PUT `/taxaudit/settings` | prepare, review or approve | `{ entity_id, fy, cutoff, source, confirmed? }` — confirmation by another person. |
+| GET `/updates?topic&state&impact&status&kind&entity_id&unread&saved&from&to&search` | view | Updates for the user (+ sources, runs, settings, counts). |
+| POST `/updates`, PUT `/updates/:id` | rules | Record / correct (a corrected verified item goes back to review). |
+| POST `/updates/:id/decide` | approve or rules | `{ action: verify\|reject\|supersede, note, superseded_by }`. |
+| POST `/updates/:id/note`, POST `/updates/:id/mark` | view (not auditors for notes) | Note; per-user `{ what: read\|saved, on }`. |
+| POST `/updates/actions`, POST `/updates/actions/:id` | prepare, rules or approve / view | Assignable action (duplicates refused); status. |
+| POST `/updates/:id/propose-rule` | rules | `{ rule_id, effective_from? }` — creates a DRAFT rule version from a verified update. |
+| PUT `/updates/settings`, POST `/updates/sources`, PUT `/updates/sources/:id`, POST `/updates/run` | admin | Monitor on / off, time, extra official domains, sources, check now (live only). |
+| GET `/reports/payments`, `/reports/trends`, `/reports/tasks`, `/reports/recon/:page` | view | Report data (`fy`, `basis`, `entity_ids`, `registration_ids`, `section`, `month`, `status`, `metric`, `period`). |
+
 ## Team, settings, audit, exports, import, demo
 
 | Method and path | Right | Purpose |

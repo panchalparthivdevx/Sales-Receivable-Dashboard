@@ -40,15 +40,19 @@ const PV = require('./lib/provision');
 const GR = require('./lib/graph');
 const GS = require('./lib/graphSim');
 const MS = require('./lib/msauth');
+const DEMO2 = require('./lib/demo2');
+const TDS = require('./lib/tds');
+const UP = require('./lib/updates');
 const { background } = require('../background');
 
 const router = express.Router();
 const IS_VERCEL = !!process.env.VERCEL;
 let usersOf = loadUsers;
 // tests inject a simulated OneDrive (deps.graph) and a stand-in for the Microsoft sign-in (deps.msauth)
-let graphOverride = null, msauthOverride = null;
+let graphOverride = null, msauthOverride = null, fetchOverride = null;
 router.init = (deps = {}) => {
   if (deps.loadUsers) usersOf = deps.loadUsers;
+  if (deps.fetcher) fetchOverride = deps.fetcher;
   if (deps.graph !== undefined) { graphOverride = deps.graph; liveGraph = null; }
   if (deps.msauth) msauthOverride = deps.msauth;
   return router;
@@ -71,7 +75,33 @@ async function ensure(sp) {
   const meta = await store.read(S.keys(sp).meta, null);
   if (!meta?.initialised_at) { if (sp === 'demo') await resetDemo(DEMO.SEED_ACTOR, { onlyIfEmpty: true }); else await initLive(); }
   await upgradeCatalogue(sp);
+  await seedWorkspace(sp);
   ready.set(sp, true);
+}
+/** Workspace stores: the TDS section master and the update sources start from the official seed lists (all unverified /
+ *  monitor off); a demo space made before the workspace tabs existed gets its illustrative workspace records. */
+async function seedWorkspace(sp) {
+  const k = S.keys(sp);
+  if (sp === 'demo' && !(await store.read(k.updates, null))) {
+    const { org, meta } = await S.load(store, 'demo', ['org', 'meta']);
+    const w = await DEMO2.build({ org, snapshot: meta.snapshot_date || DEMO.fixedSnapshot() });
+    await store.transaction(async tx => {
+      if (await tx.get(k.updates, null)) return;
+      for (const n of S.WORKSPACE) tx.set(k[n], w[n]);
+      await AU.append(tx, 'demo', { actor: DEMO.SEED_ACTOR, action: 'demo_workspace_seeded', summary: 'Illustrative payments, TDS challans, reconciliation inputs, a payroll import, tax-audit lots and curated update entries added to the demo' });
+    });
+    return;
+  }
+  if (sp !== 'live') return;
+  const tds = await store.read(k.tds, null), up = await store.read(k.updates, null);
+  if (tds?.sections?.length && up?.sources?.length) return;
+  await store.transaction(async tx => {
+    const t = await tx.get(k.tds, S.DEF.tds()), u = await tx.get(k.updates, S.DEF.updates());
+    const a = TDS.seed(t), b = UP.seedSources(u);
+    if (!a && !b) return;
+    tx.set(k.tds, t); tx.set(k.updates, u);
+    await AU.append(tx, 'live', { action: 'workspace_seeded', summary: `${a} TDS section reference(s) added as "requires verification"; ${b} official update source(s) listed (monitor off until an administrator turns it on)` });
+  });
 }
 /** A newer catalogue adds its new rules and updates rules nobody has touched; edited rules are kept (and listed) */
 async function upgradeCatalogue(sp) {
@@ -98,10 +128,12 @@ async function initLive() {
 }
 async function resetDemo(actor, { onlyIfEmpty } = {}) {
   const built = await DEMO.build();
+  const work = await DEMO2.build({ org: built.org, snapshot: built.meta.snapshot_date });
   const old = (await store.list('demo_tasks_')).map(k => k.slice('demo_tasks_'.length));
   await store.transaction(async tx => {
     if (onlyIfEmpty && (await tx.get('demo_meta', {})).initialised_at) return;
     for (const n of ['org', 'rules', 'applic', 'events', 'team', 'docs', 'meta']) S.set(tx, 'demo', n, built[n]);
+    for (const n of S.WORKSPACE) S.set(tx, 'demo', n, work[n]);
     for (const fy of U.uniq([...old, ...Object.keys(built.tasksDocs)])) tx.set(T.taskKey('demo', fy), built.tasksDocs[fy] || { tasks: [] });
     tx.set('demo_folders', PV.EMPTY());                    // the simulated OneDrive starts empty again
     tx.set('demo_graphsim', null);
@@ -566,6 +598,10 @@ router.post('/tasks/:id/action', gate(), wrap(async (req, res) => {
     const { task, doc, fy } = await S.findTask(tx, req.c2.sp, req.params.id);
     if (!AC.canSeeTask(req.c2.actor, task)) throw U.httpError(404, 'Task not found');
     const before = U.clone(task);
+    if (action === 'verify_close' && task.rule_id === 'TDS-DEP') {         // V3: the section-wise allocation and the paid challan come first
+      const chk = TDS.closeCheck(await tx.get(S.keys(req.c2.sp).tds, S.DEF.tds()), task);
+      if (!chk.ok) throw U.httpError(400, chk.reason);
+    }
     const r = W.act(task, action, req.body || {}, { actor: req.c2.actor, docs: docs.documents.filter(d => d.task_ids.includes(task.id)), nowMs: U.clock.now() });
     if (r.revision) doc.tasks.push(r.revision);
     tx.set(T.taskKey(req.c2.sp, fy), doc);
@@ -666,6 +702,7 @@ router.get('/dl/:token', wrap(async (req, res) => {
   const settings = await S.settings();
   const actor = AC.resolve(users, { id: p.u }, { settings, space: p.s });
   if (actor.error) return bad(res, 403, 'Your access has changed — open the document again from the dashboard.');
+  if (String(p.d).startsWith('F:')) return sendWorkspaceFile(res, p, actor);
   const { docs } = await S.load(store, p.s, ['docs']);
   const d = docs.documents.find(x => x.id === p.d);
   if (!d || !AC.canSeeEntity(actor, d.entity_id)) return bad(res, 404, 'Document not found');
@@ -682,6 +719,23 @@ router.get('/dl/:token', wrap(async (req, res) => {
   res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
   res.end(buf);
 }));
+
+/** Evidence file of a workspace record (TDS challan, payment, reconciliation, payroll import, tax-audit payment) */
+async function sendWorkspaceFile(res, p, actor) {
+  const { files } = await S.load(store, p.s, ['files']);
+  const f = files.files.find(x => x.id === String(p.d).slice(2));
+  if (!f || !AC.canSeeEntity(actor, f.entity_id)) return bad(res, 404, 'File not found');
+  if (f.scan?.status === 'infected') return bad(res, 403, 'This file failed the malware scan');
+  const buf = await BL.read(p.s, f.sha256);
+  if (!buf) return bad(res, 404, 'The stored file is missing — restore it from the backup');
+  await store.transaction(tx => AU.append(tx, p.s, { actor, action: 'evidence_downloaded', object_type: 'file', object_id: f.id, entity_id: f.entity_id, summary: `"${f.original_name}" downloaded` }));
+  res.setHeader('Content-Type', f.mime || 'application/octet-stream');
+  res.setHeader('Content-Disposition', `attachment; filename="${EXP.safeName(f.original_name).replace(/"/g, '')}"`);
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
+  return res.end(buf);
+}
 
 function docAction(right, fn, action) {
   router.post(`/documents/:id/${action}`, gate(right), wrap(async (req, res) => {
@@ -1217,6 +1271,9 @@ router.post('/documents/:id/onedrive', gate(['prepare', 'file']), wrap(async (re
   const { d } = await loadDoc(store, req, req.params.id);
   res.json({ remote: await copyDoc(req.c2.sp, d.id, Number(req.body?.version) || d.current.v, { force: true }) });
 }));
+
+// ── Workspace: payments, TDS section-wise, reconciliations, payroll imports, tax audit, updates, reports ──
+require('./workspace').mount(router, { gate, wrap, audit, upload, store, MAX_MB, derivedTasks, slim, isVercel: IS_VERCEL, get fetcher() { return fetchOverride; } });
 
 // ── Errors ────────────────────────────────────────────────────────────────────
 router.use((err, req, res, next) => { // eslint-disable-line no-unused-vars

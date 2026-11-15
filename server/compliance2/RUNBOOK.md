@@ -68,6 +68,21 @@ From then on, folders appear by themselves:
   team is better for company records. The engine needs the shared link plus `Files.ReadWrite.All` or `Sites.Selected`;
   ask before switching.
 
+## Compliance Updates monitor
+
+- Off by default. An administrator opens Compliance Updates → Sources & monitor, checks each source URL, then turns the
+  monitor on and sets the time (Indian time, default 09:00). The office PC server checks every 5 minutes whether the
+  daily run (or a retry) is due. Online (Vercel) there is no always-running process: use "Check now" or rely on the PC.
+- Only https pages on official domains are fetched (extra .gov.in / .nic.in / .org.in domains can be added). The first
+  check of a source takes a baseline; later checks add new links as unverified candidates. A failure is recorded with a
+  retry after 15 minutes and 1 hour, then the next daily run.
+- Nothing is e-mailed or messaged, and no rule changes until a reviewer creates a rule draft and it is verified and approved.
+
+## Build prompt
+
+The Claude build prompt tab reads the store key `build_prompt` or, on the PC, `server/compliance2/data/build_prompt.txt`
+(git-ignored — the prompt names people and companies). Online, an administrator uploads the .txt once in that tab.
+
 ## Keys
 
 | Key | Purpose |

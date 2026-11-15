@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { Multi, Select, Input, Btn, S, C } from './ui';
 
 // Filters shared by Overview, Calendar, Register and Workload. Every count on those screens comes from the tasks that pass them.
@@ -20,22 +20,27 @@ export default function FilterBar({ filters, setFilters, meta, org, users, fyOpt
   const states = [...new Set((org?.registrations || []).map(r => r.state).filter(Boolean))].sort().map(s => [s, s]);
   const people = (users || []).map(u => [u.id, u.name]);
   const any = Object.entries(f).some(([k, v]) => k !== 'fy' && (Array.isArray(v) ? v.length : v));
+  const moreSet = ['states', 'months', 'quarters', 'owners', 'checkers', 'priorities', 'statuses', 'flags'].filter(k => f[k].length).length;
+  const [more, setMore] = useState(moreSet > 0);
   return (
-    <div style={{ ...S.card, padding: '0.75rem 0.9rem', display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'flex-end' }} role="search" aria-label="Filters">
+    <div style={{ background: '#fff', border: '1px solid #E4E7EF', borderRadius: 12, padding: 14, marginBottom: 18, display: 'flex', gap: 14, flexWrap: 'wrap', alignItems: 'flex-end' }} role="search" aria-label="Filters">
+      <Multi label="Company" options={ents} value={f.entity_ids} onChange={v => setFilters({ ...f, entity_ids: v, registration_ids: [] })} width={220} />
+      <Multi label="Registration" options={regs} value={f.registration_ids} onChange={v => set('registration_ids', v)} width={210} />
+      <Multi label="Category" options={(meta?.constants.categories || []).map(c => [c, c])} value={f.categories} onChange={v => set('categories', v)} width={170} />
+      <div style={{ width: 200 }}><span style={S.label}>Search</span><Input value={f.search} onChange={e => set('search', e.target.value)} placeholder="Task, owner, acknowledgement…" aria-label="Search tasks" /></div>
       <div style={{ width: 120 }}><span style={S.label}>Financial year</span><Select value={f.fy} onChange={v => setFilters({ ...f, fy: v, months: [] })} options={fyOptions} placeholder="All years" aria-label="Financial year" /></div>
-      <Multi label="Companies" options={ents} value={f.entity_ids} onChange={v => setFilters({ ...f, entity_ids: v, registration_ids: [] })} width={210} />
-      <Multi label="Registrations / GSTINs" options={regs} value={f.registration_ids} onChange={v => set('registration_ids', v)} width={210} />
+      <Btn kind="ghost" onClick={() => setMore(m => !m)} aria-expanded={more}>{more ? 'Fewer filters' : `More filters${moreSet ? ` (${moreSet})` : ''}`}</Btn>
+      {any && <Btn kind="ghost" onClick={() => setFilters({ ...EMPTY_FILTERS, fy: f.fy })} style={{ color: C.lav }}>Clear filters</Btn>}
+      {more && <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'flex-end', width: '100%', borderTop: '1px solid #EEF0F6', paddingTop: 12 }}>
       <Multi label="States" options={states} value={f.states} onChange={v => set('states', v)} width={110} />
       <Multi label="Months" options={fyMonths(f.fy)} value={f.months} onChange={v => set('months', v)} width={130} />
       <Multi label="Quarters" options={[['Q1', 'Q1 Apr–Jun'], ['Q2', 'Q2 Jul–Sep'], ['Q3', 'Q3 Oct–Dec'], ['Q4', 'Q4 Jan–Mar']]} value={f.quarters} onChange={v => set('quarters', v)} width={120} />
-      <Multi label="Category" options={(meta?.constants.categories || []).map(c => [c, c])} value={f.categories} onChange={v => set('categories', v)} width={170} />
       <Multi label="Owner" options={[['__none__', 'Unassigned'], ...people]} value={f.owners} onChange={v => set('owners', v)} width={140} />
       <Multi label="Approver" options={[['__none__', 'Unassigned'], ...people]} value={f.checkers} onChange={v => set('checkers', v)} width={140} />
       <Multi label="Priority" options={[['high', 'High'], ['medium', 'Medium'], ['low', 'Low']]} value={f.priorities} onChange={v => set('priorities', v)} width={110} />
       <Multi label="Status" options={Object.entries(meta?.constants.statuses || {})} value={f.statuses} onChange={v => set('statuses', v)} width={170} />
       <Multi label="Flags" options={FLAG_OPTS} value={f.flags} onChange={v => set('flags', v)} width={160} />
-      <div style={{ width: 180 }}><span style={S.label}>Search</span><Input value={f.search} onChange={e => set('search', e.target.value)} placeholder="Task, form, GSTIN, ARN…" aria-label="Search tasks" /></div>
-      {any && <Btn kind="ghost" onClick={() => setFilters({ ...EMPTY_FILTERS, fy: f.fy })} style={{ color: C.lav }}>Clear filters</Btn>}
+      </div>}
     </div>
   );
 }
