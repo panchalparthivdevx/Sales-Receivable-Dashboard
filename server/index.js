@@ -139,6 +139,10 @@ const CRM_FORM_API = new Set([
 app.use('/api', (req, res, next) => {
   const route = `${req.method} ${req.baseUrl}${req.path}`;
   if (req.method === 'OPTIONS' || PUBLIC_API.has(route)) return next();
+  // Compliance Vr.2.0 download links: signed, per user, valid ~2 minutes; the user's access is checked again when used
+  if (req.method === 'GET' && req.path.startsWith('/compliance2/dl/') && /^[A-Za-z0-9_.-]+$/.test(req.path.slice('/compliance2/dl/'.length))) return next();
+  // Compliance Vr.2.0: Microsoft returns here after the OneDrive sign-in; it checks its own signed, short-lived state
+  if (req.method === 'GET' && req.path === '/compliance2/onedrive/callback') return next();
   if (CRM_FORM_API.has(route) && (!process.env.CRM_FORM_KEY || req.headers['x-form-key'] === process.env.CRM_FORM_KEY)) return next();
   if (!req.headers.authorization && req.method === 'GET' && req.query.token && req.path.includes('/file/')) {
     req.headers.authorization = `Bearer ${req.query.token}`;
@@ -16091,6 +16095,10 @@ app.get('/api/pocm/quarters/snapshot', authMiddleware, async (req, res) => {
 // ─── Compliance Dashboard (tasks, masters, documents, period Zoho sync) ───────
 // Self-contained module — see server/compliance/ and "Compliance Dashboard/FILE_MAP.md"
 app.use('/api/compliance', require('./compliance'));
+
+// ─── Compliance Dashboard Vr.2.0 (entities → registrations, rule engine, maker/checker workflow, evidence vault) ─
+// Self-contained module — see server/compliance2/README.md. Its own data and files; Compliance v1 above is untouched.
+app.use('/api/compliance2', require('./compliance2'));
 
 // ─── Bill Collection & Booking (mailboxes + ERP uploads → Zoho draft bills) ───
 // Self-contained module — see server/bill-booking/README.md. It reads each company's central

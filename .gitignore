@@ -31,6 +31,9 @@ server/gstr2b/files/
 server/gstr2b/data/
 # Financial Reporting: imported statement versions, adjustments, decisions, management inputs
 server/fin-reporting/data/
+# Compliance Dashboard Vr.2.0: entities, tasks, audit trail and the encrypted evidence files (confidential, never in git)
+server/compliance2/data/
+server/compliance2/files/
 
 # Company documents and data — stay on this PC, never in git (deployed data lives in Neon)
 Client Agreements/

@@ -26,6 +26,7 @@ import Step15GWorkspace from './pages/Step15GWorkspace';
 import Step15HWorkspace from './pages/Step15HWorkspace';
 import FinanceOverview from './pages/FinanceOverview';
 import ComplianceDashboard from './pages/ComplianceDashboard';
+import Compliance2 from './pages/Compliance2';
 import BillBooking from './pages/BillBooking';
 import Gstr2bReco from './pages/Gstr2bReco';
 
@@ -98,6 +99,8 @@ function AppInner() {
           {page === 'tds'          && hasModule('tds')          && <TDSDashboard />}
           {page === 'payroll'      && hasModule('payroll')      && <PayrollDashboard />}
           {page === 'compliance'   && hasModule('compliance')   && <ComplianceDashboard />}
+          {/* Granted explicitly (the server checks the same) */}
+          {page === 'compliance2' && (user.role === 'admin' || user.permissions?.compliance_v2?.enabled === true) && <Compliance2 />}
           {page === 'loan'         && hasModule('loan')         && <LoanDashboard />}
           {page === 'pocm'         && hasModule('pocm')         && <POCMDashboard />}
           {page === 'portal'       && <FinancePortal />}

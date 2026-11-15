@@ -202,6 +202,47 @@ async function writeJSON(key, localPath, data) {
   }
 }
 
+// Neon only: a document with its write stamp (updated_at as text; null when there is no row). Read errors are
+// thrown, not swallowed: a caller that takes a failed read for "empty" would write that over the real document.
+async function readJSONStamped(key) {
+  const text = await _readStored(key);
+  if (text == null) return { value: undefined, at: null };
+  const hit = _docCache.get(key);
+  if (hit && hit.text === text) return { value: JSON.parse(await _unpack(text)), at: hit.at };
+  const r = await getPool().query('SELECT value::text AS text, updated_at::text AS at FROM kv_store WHERE key = $1', [key]);
+  if (!r.rows.length) return { value: undefined, at: null };
+  return { value: JSON.parse(await _unpack(r.rows[0].text)), at: r.rows[0].at };
+}
+
+// Neon only: write several documents in ONE database transaction, each only if it still has the stamp it was read
+// with (at: null = it must not exist yet). When any of them was written by someone else meanwhile, nothing is
+// written and the answer is false (the caller reads again and retries).
+async function writeJSONManyIfUnchanged(entries) {
+  const packed = await Promise.all(entries.map(async e => ({ ...e, stored: await _pack(JSON.stringify(e.value)) })));
+  const client = await getPool().connect();
+  try {
+    await client.query('BEGIN');
+    const done = [];
+    for (const e of packed) {
+      const r = e.at === null
+        ? await client.query(`INSERT INTO kv_store (key, value, updated_at) VALUES ($1, $2::json, NOW())
+                              ON CONFLICT (key) DO NOTHING RETURNING updated_at::text AS at`, [e.key, e.stored])
+        : await client.query(`UPDATE kv_store SET value = $2::json, updated_at = NOW()
+                              WHERE key = $1 AND updated_at::text = $3 RETURNING updated_at::text AS at`, [e.key, e.stored, e.at]);
+      if (!r.rows.length) { await client.query('ROLLBACK'); return false; }
+      done.push({ key: e.key, at: r.rows[0].at, stored: e.stored });
+    }
+    await client.query('COMMIT');
+    for (const d of done) _cacheDoc(d.key, d.at, d.stored);
+    return true;
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch (_) { /* connection already gone */ }
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 // Neon only: remove a document (no-op when using local files)
 async function deleteKey(key) {
   if (!USE_DB) return;
@@ -333,6 +374,8 @@ module.exports = {
   initDB,
   readJSON,
   writeJSON,
+  readJSONStamped,
+  writeJSONManyIfUnchanged,
   deleteKey,
   listKeys,
   readBranchCache,

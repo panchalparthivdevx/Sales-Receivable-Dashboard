@@ -83,6 +83,8 @@ const MODULES = {
   tds:         { label: 'TDS Dashboard', sections: {} },
   payroll:     { label: 'Payroll Dashboard', sections: {} },
   compliance:  { label: 'Compliance Dashboard', sections: {} },
+  // Compliance Dashboard Vr.2.0: seen only when ticked; each right ticked one by one (see server/compliance2/lib/access.js)
+  compliance_v2: { label: 'Compliance Dashboard Vr.2.0', sections: require('./compliance2/lib/access').SECTIONS },
   loan:        { label: 'Loan Module', sections: {} },
   pocm:        { label: 'POCM Dashboard', sections: {} },
   // Financial Statements: viewing follows the module tick; each edit right is ticked one by one (see server/fin-reporting/index.js `rights`)

@@ -32,6 +32,8 @@ const NAV = [
   { id: 'banking',      label: 'Banking Dashboard',     icon: Landmark,     live: false },
   { id: 'payroll',      label: 'Payroll Dashboard',     icon: Users,        live: true,  module: 'payroll' },
   { id: 'compliance',   label: 'Compliance Dashboard',  icon: ShieldCheck,  live: true,  module: 'compliance' },
+  // grantOnly: shown only to admins and to users ticked for it in User Settings
+  { id: 'compliance2',  label: 'Compliance Dashboard Vr.2.0', icon: ShieldCheck, live: true, module: 'compliance_v2', grantOnly: true },
   { id: 'fin-stmt',     label: 'Financial Statements',  icon: BookOpen,     live: true,  module: 'fin_stmt'    },
   { id: 'budget',       label: 'Budget vs. Actual',     icon: Target,       live: true,  module: 'budget'      },
   { id: 'loan',         label: 'Loan Module',           icon: CreditCard,   live: true,  module: 'loan'        },
