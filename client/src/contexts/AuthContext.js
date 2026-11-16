@@ -45,7 +45,8 @@ export function AuthProvider({ children }) {
   }, [token]);
 
   const login = useCallback(async (username, password) => {
-    const r = await axios.post(`${BASE}/auth/login`, { username, password });
+    // give up after a minute instead of showing "Signing in…" for ever when the server or its database does not answer
+    const r = await axios.post(`${BASE}/auth/login`, { username, password }, { timeout: 60000 });
     localStorage.setItem('da_token', r.data.token);
     setToken(r.data.token);
     setUser(r.data.user);

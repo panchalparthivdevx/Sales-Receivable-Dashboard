@@ -115,7 +115,16 @@ function allPerms() {
 
 // ── User store (DB-backed, async) ─────────────────────────────────────────────
 async function loadUsers() {
-  const users = await db.readJSON('users', USERS_FILE, null);
+  // Online, a failed read must never look like "no users yet": that would replace every account with the default admin.
+  // readJSONStamped throws when Neon cannot be read; `undefined` means the row really does not exist (first start).
+  let users;
+  if (db.USE_DB) {
+    try { users = (await db.readJSONStamped('users')).value; }
+    catch (e) {
+      console.error('[auth] user list could not be read:', e.message);
+      throw Object.assign(new Error('The database did not answer, so sign-in is not possible right now. Please try again in a minute.'), { status: 503 });
+    }
+  } else users = await db.readJSON('users', USERS_FILE, null);
   if (!users) {
     const admin = {
       id: '1', username: 'admin', name: 'Administrator',

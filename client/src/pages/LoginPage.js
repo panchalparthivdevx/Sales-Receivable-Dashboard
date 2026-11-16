@@ -15,7 +15,7 @@ export default function LoginPage() {
     try {
       await login(username.trim(), password);
     } catch (err) {
-      setError(err?.response?.data?.error || 'Login failed. Check credentials.');
+      setError(err?.response?.data?.error || (err?.code === 'ECONNABORTED' ? 'The server did not answer within a minute. Please try again shortly.' : 'Login failed. Check credentials.'));
     } finally {
       setBusy(false);
     }

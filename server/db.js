@@ -16,6 +16,10 @@ const MIRROR = !process.env.VERCEL;
 
 let _pool = null;
 
+// Every wait on Neon has a limit, so a dead connection, a lock held by an abandoned session or a busy pool shows up
+// as an error within seconds instead of a request (e.g. sign-in) that never answers.
+const PG_CONNECT_MS = 10000;   // opening a connection
+const PG_QUERY_MS   = 45000;   // one query, client side (large synced lists can take a while)
 function getPool() {
   if (!_pool) {
     const { Pool } = require('pg');
@@ -24,8 +28,14 @@ function getPool() {
       ssl: process.env.DATABASE_URL?.includes('neon.tech')
         ? { rejectUnauthorized: false }
         : false,
-      max: 5,
+      max: Number(process.env.PG_POOL_MAX) || 10,
+      connectionTimeoutMillis: PG_CONNECT_MS,
+      idleTimeoutMillis: 20000,           // drop idle connections before Neon or a paused function leaves them dead
+      query_timeout: PG_QUERY_MS,
+      keepAlive: true,
     });
+    // An idle connection closed by Neon (compute suspended, restart) must not crash the process
+    if (typeof _pool.on === 'function') _pool.on('error', e => console.warn('[db] idle connection dropped:', e.message));
   }
   return _pool;
 }
@@ -220,8 +230,15 @@ async function readJSONStamped(key) {
 async function writeJSONManyIfUnchanged(entries) {
   const packed = await Promise.all(entries.map(async e => ({ ...e, stored: await _pack(JSON.stringify(e.value)) })));
   const client = await getPool().connect();
+  let broken = null;                              // set when the connection must be closed instead of reused
   try {
     await client.query('BEGIN');
+    // Limits for this transaction only (SET LOCAL ends with it): a row held by another session fails after 5 s instead
+    // of waiting forever, and if this function is stopped half-way, Neon ends the open transaction (and frees its rows)
+    // after 30 s instead of keeping them locked.
+    await client.query("SET LOCAL lock_timeout = '5s'");
+    await client.query("SET LOCAL statement_timeout = '30s'");
+    await client.query("SET LOCAL idle_in_transaction_session_timeout = '30s'");
     const done = [];
     for (const e of packed) {
       const r = e.at === null
@@ -236,10 +253,10 @@ async function writeJSONManyIfUnchanged(entries) {
     for (const d of done) _cacheDoc(d.key, d.at, d.stored);
     return true;
   } catch (err) {
-    try { await client.query('ROLLBACK'); } catch (_) { /* connection already gone */ }
+    try { await client.query('ROLLBACK'); } catch (_) { broken = err; /* connection already gone */ }
     throw err;
   } finally {
-    client.release();
+    client.release(broken || undefined);          // a broken connection is closed, never handed out again
   }
 }
 

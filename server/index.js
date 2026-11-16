@@ -9618,7 +9618,14 @@ app.get('/api/health', (req, res) => res.json({ status: 'ok', time: new Date().t
 // ─── Auth & User Management ───────────────────────────────────────────────────
 
 // Login
-app.post('/api/auth/login', async (req, res) => {
+// The user routes answer with an error (e.g. 503 when the database does not answer) instead of leaving the request open:
+// Express 4 does not catch errors thrown by async handlers.
+const usersRoute = fn => (req, res) => fn(req, res).catch(e => {
+  if (!e.status) console.error('[auth]', e.message);
+  if (!res.headersSent) res.status(e.status || 500).json({ error: e.status ? e.message : `Server error: ${e.message}` });
+});
+
+app.post('/api/auth/login', usersRoute(async (req, res) => {
   const { username, password } = req.body || {};
   if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
   const users = await loadUsers();
@@ -9627,27 +9634,27 @@ app.post('/api/auth/login', async (req, res) => {
     return res.status(401).json({ error: 'Invalid username or password' });
   const token = signToken(user);
   res.json({ token, user: { id: user.id, username: user.username, name: user.name, role: user.role, permissions: user.permissions } });
-});
+}));
 
 // Current user info
-app.get('/api/auth/me', authMiddleware, async (req, res) => {
+app.get('/api/auth/me', authMiddleware, usersRoute(async (req, res) => {
   const users = await loadUsers();
   const user  = users.find(u => u.id === req.user.id);
   if (!user) return res.status(404).json({ error: 'User not found' });
   res.json({ id: user.id, username: user.username, name: user.name, role: user.role, permissions: user.permissions });
-});
+}));
 
 // Module definitions (for admin UI)
 app.get('/api/auth/modules', authMiddleware, adminOnly, (req, res) => res.json(MODULES));
 
 // List users
-app.get('/api/auth/users', authMiddleware, adminOnly, async (req, res) => {
+app.get('/api/auth/users', authMiddleware, adminOnly, usersRoute(async (req, res) => {
   const users = (await loadUsers()).map(({ password: _, ...u }) => u);
   res.json(users);
-});
+}));
 
 // Create user
-app.post('/api/auth/users', authMiddleware, adminOnly, async (req, res) => {
+app.post('/api/auth/users', authMiddleware, adminOnly, usersRoute(async (req, res) => {
   const { username, name, password, role, permissions } = req.body || {};
   if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
   const users = await loadUsers();
@@ -9666,10 +9673,10 @@ app.post('/api/auth/users', authMiddleware, adminOnly, async (req, res) => {
   await saveUsers(users);
   const { password: _, ...safe } = newUser;
   res.status(201).json(safe);
-});
+}));
 
 // Update user
-app.put('/api/auth/users/:id', authMiddleware, adminOnly, async (req, res) => {
+app.put('/api/auth/users/:id', authMiddleware, adminOnly, usersRoute(async (req, res) => {
   const users = await loadUsers();
   const idx   = users.findIndex(u => u.id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: 'User not found' });
@@ -9684,10 +9691,10 @@ app.put('/api/auth/users/:id', authMiddleware, adminOnly, async (req, res) => {
   await saveUsers(users);
   const { password: _, ...safe } = users[idx];
   res.json(safe);
-});
+}));
 
 // Delete user
-app.delete('/api/auth/users/:id', authMiddleware, adminOnly, async (req, res) => {
+app.delete('/api/auth/users/:id', authMiddleware, adminOnly, usersRoute(async (req, res) => {
   const users = await loadUsers();
   const user  = users.find(u => u.id === req.params.id);
   if (!user) return res.status(404).json({ error: 'User not found' });
@@ -9695,7 +9702,7 @@ app.delete('/api/auth/users/:id', authMiddleware, adminOnly, async (req, res) =>
     return res.status(400).json({ error: 'Cannot delete the last admin' });
   await saveUsers(users.filter(u => u.id !== req.params.id));
   res.json({ ok: true });
-});
+}));
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // TDS PAYABLE DASHBOARD — API Routes
