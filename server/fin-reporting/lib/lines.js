@@ -24,16 +24,16 @@ const PL = [
   { id: 'pl.exp_dep', label: 'Depreciation and amortisation expense', re: /^depreciation (and|&) amorti[sz]ation( expenses?)?$/, indent: 1 },
   { id: 'pl.exp_oth', label: 'Other expenses', re: /^other expenses$/, indent: 1 },
   { id: 'pl.exp_tot', label: 'Total expenses', re: /^total expenses\b/, bold: true, sum: ['pl.exp_ops', 'pl.exp_emp', 'pl.exp_fin', 'pl.exp_dep', 'pl.exp_oth'] },
-  { id: 'pl.pbe', label: 'Profit before exceptional items and tax', re: /^profit.*before exceptional items? and tax/, bold: true, calc: v => d(v['pl.tot_inc'], v['pl.exp_tot']) },
+  { id: 'pl.pbe', label: 'Profit before exceptional items and tax', re: /^(profit|loss).*before exceptional items? and tax/, bold: true, calc: v => d(v['pl.tot_inc'], v['pl.exp_tot']) },
   { id: 'pl.exceptional', label: 'Exceptional items', re: /^exceptional items?$/ },
-  { id: 'pl.pb_assoc', label: 'Profit before share of associates and tax', re: /^profit.*before share of (net )?(profit|loss)/, bold: true, cons: true },
+  { id: 'pl.pb_assoc', label: 'Profit before share of associates and tax', re: /^(profit|loss).*before share of (net )?(profit|loss)/, bold: true, cons: true },
   { id: 'pl.share_assoc', label: 'Share of profit/(loss) of associates', re: /^share of (net )?(profit|loss).*(associate|joint venture)/, cons: true },
-  { id: 'pl.pbt', label: 'Profit before tax', re: /^profit.*before tax\b/, bold: true },
+  { id: 'pl.pbt', label: 'Profit before tax', re: /^(profit|loss).*before tax\b/, bold: true },
   { id: 'pl.tax_cur', label: 'Current tax', re: /current tax$/, indent: 1, sec: 'tax' },
   { id: 'pl.tax_def', label: 'Deferred tax', re: /^deferred tax/, indent: 1, sec: 'tax' },
   { id: 'pl.tax_prior', label: 'Tax adjustment for earlier years', re: /earlier years?|prior years?/, indent: 1, sec: 'tax' },
   { id: 'pl.tax_tot', label: 'Total tax expense', re: /^total tax expenses?/, bold: true, sum: ['pl.tax_cur', 'pl.tax_def', 'pl.tax_prior'] },
-  { id: 'pl.pat', label: 'Profit for the period', re: /^profit.*for the (period|year)|^(net )?profit after tax/, not: /attributable/, bold: true, calc: v => d(v['pl.pbt'], v['pl.tax_tot']) },
+  { id: 'pl.pat', label: 'Profit for the period', re: /^(profit|loss).*for the (period|year)|^(net )?(profit|loss) after tax/, not: /attributable/, bold: true, calc: v => d(v['pl.pbt'], v['pl.tax_tot']) },
   { id: 'pl.oci_nr', label: 'OCI — items that will not be reclassified to profit or loss', re: /^items that will not be reclassified to profit or loss$|remeasurement (gains?|losses?|of)?.*defined benew*/, indent: 1, sec: 'oci' },
   { id: 'pl.oci_nr_tax', label: 'Income tax on items that will not be reclassified', re: /^(income tax|tax).*(will not be reclassified)/, indent: 1, sec: 'oci' },
   { id: 'pl.oci_r', label: 'OCI — items that will be reclassified to profit or loss', re: /^items that will be reclassified to profit or loss$/, indent: 1, sec: 'oci' },
@@ -181,6 +181,7 @@ function norm(label) {
   t = t.replace(/^\s*(?:\(?[ivxl]{1,5}\)|\(?[a-z]\)|[-–—•]+)\s*/g, '');          // a second one ("(a) (i)")
   t = t.replace(/[*:]+/g, ' ').replace(/\s+/g, ' ').trim();
   t = t.replace(/\s*\.$/, '');
+  t = t.replace(/([a-z)])\s+\d{1,2}(?:\.\d{1,2})?(?:\s*(?:&|and|,)\s*\d{1,2}(?:\.\d{1,2})?)*$/, '$1');
   return t;
 }
 const slug = s => norm(s).replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 60) || 'row';

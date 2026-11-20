@@ -5,7 +5,7 @@ import { C, S, Card, Note, Badge, Loading, fmtVal, useLoad, ExportButtons, expor
 import BudgetSection, { Pills } from './BudgetSection';
 import { BranchMasterSection, ForecastSection, DebtSection } from './PlanningTabs';
 
-const STATUSES = ['Material difference', 'Unreconciled', 'Difference', 'Rounding', 'Agrees', 'Info'];
+const STATUSES = ['Material difference', 'Unreconciled', 'Difference', 'Restated', 'Rounding', 'Agrees', 'Info'];
 const pLabel = p => (p ? p.replace(/^FY(\d{4})-(.*)$/, (m, y, k) => `${k === 'FY' ? '' : `${k} `}FY${y.slice(2)}`).replace(/^BS-/, 'As at ') : '');
 
 // Sections: the import and reconciliation of the published workbooks, then the planning inputs (formats to fill in)

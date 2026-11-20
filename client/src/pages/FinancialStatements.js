@@ -1429,6 +1429,9 @@ export default function FinancialStatements() {
 
   const [budgetVersions, setBudgetVersions] = useState([]);
   useEffect(() => { if (['cfo', 'performance'].includes(tab)) fsApi.budgetVersions().then(r => setBudgetVersions(r.versions || [])).catch(() => setBudgetVersions([])); }, [tab]);
+  // only the bases the active import holds can be chosen (the import can be standalone only)
+  const importedBases = useMemo(() => (fsStatus?.active ? [...new Set(fsStatus.active.files.map(f => f.basis))] : null), [fsStatus]);
+  useEffect(() => { if (importedBases && !importedBases.includes(F.basis) && importedBases.length) setF(f => ({ ...f, basis: importedBases[0] })); }, [importedBases, F.basis]);
   const goValidation = useCallback(section => { try { sessionStorage.setItem('fs_validation_section', section); } catch { /* private mode */ } setTab('validation'); }, []);
   const reloadStatus = useCallback(() => fsApi.status().then(s => { setFsStatus(s); return s; }).catch(() => setFsStatus({ active: null, versions: [], staging: [], rights: {} })), []);
   useEffect(() => { reloadStatus(); }, [reloadStatus]);
@@ -1648,7 +1651,7 @@ export default function FinancialStatements() {
         ))}
       </div>
 
-      {showFilters && imported && <FilterBar F={F} setF={setF} show={FILTERS_FOR[tab] || {}} periods={plPeriods} budgetVersions={budgetVersions} branches={[]} />}
+      {showFilters && imported && <FilterBar F={F} setF={setF} show={FILTERS_FOR[tab] || {}} periods={plPeriods} budgetVersions={budgetVersions} branches={[]} bases={importedBases} />}
 
       {/* Balance Sheet */}
       {tab === 'bs' && <>

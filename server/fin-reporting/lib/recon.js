@@ -7,6 +7,8 @@
  * Every difference is listed, including those inside the rounding tolerance. Nothing is adjusted to make a check agree.
  *
  * Status:  Agrees (< 0.0005) · Rounding (≤ tolerance; + 0.005 when one side was typed rounded to 2 decimals)
+ *          Restated (the same period's figure in a later workbook — or, in the latest view, an earlier one — differs:
+ *          a restatement / regrouping, kept as a source version, no decision) ·
  *          Difference (above tolerance, below materiality) · Material difference (above materiality — a decision request
  *          when it is a conflict between sources) · Unreconciled (an Excel error / missing figure prevents the check) · Info
  * Defaults: amounts tolerance ₹0.015 lakh, materiality ₹1.00 lakh; EPS tolerance ₹0.0005, materiality ₹0.01; editable
@@ -218,14 +220,20 @@ function reconcile(version, opts = {}) {
     const mat = isEps ? o.epsMateriality : isRatio ? 0.01 : o.materiality;
     const tol = isEps ? o.epsTolerance : isRatio ? o.ratioTolerance : o.tolerance;
     const competing = [];
+    const dateOf = fc => files[fc.f]?.reportingDate || '';
     for (const alt of valid) {
       if (alt === shown.fact) continue;
       const diff = alt.v - shown.fact.v;
       const rounded = !!(alt.r2 || shown.fact.r2);
-      const status = statusOf(diff, { tol, mat, rounded, eps: isEps });
+      let status = statusOf(diff, { tol, mat, rounded, eps: isEps });
       const sameFile = alt.f === shown.fact.f;
+      // a later workbook repeating the period with another figure restated / regrouped it (the latest view: an earlier
+      // workbook is the figure as first reported) — both stay available through "Financial version"; nothing to decide
+      const restated = !sameFile && (ctx.mode === 'latest' ? dateOf(alt) < dateOf(shown.fact) : dateOf(alt) > dateOf(shown.fact));
+      if (restated && (status === 'Difference' || status === 'Material difference')) status = 'Restated';
       let expl = sameFile ? `Same workbook, ${alt.k === shown.fact.k ? 'another sheet' : `${kindName(alt.k)} vs ${kindName(shown.fact.k)}`}${alt.hid ? ' (hidden sheet)' : ''}.` : `Repeated as ${alt.role === 'working' ? 'a working column' : alt.role} in ${files[alt.f]?.name}${alt.hid ? ' (hidden sheet)' : ''}.`;
       if (status === 'Rounding' && rounded) expl += ' One side was typed rounded to 2 decimals.';
+      else if (status === 'Restated') expl += ctx.mode === 'latest' ? ` As first reported in the workbook prepared for ${dateOf(alt)}; the statements show the latest figure (prepared for ${dateOf(shown.fact)}). "Financial version → As originally reported" shows the first one.` : ` Restated or regrouped in the workbook prepared for ${dateOf(alt)}; the statements show the figure as originally reported (prepared for ${dateOf(shown.fact)}). "Financial version → Latest reported / regrouped" shows the restated one.`;
       else if (status === 'Difference' || status === 'Material difference') expl += ' Reason not established (rounding, regrouping, restatement or adjustment) — kept as separate source versions.';
       if (alt.lbl && shown.fact.lbl && L.norm(alt.lbl) !== L.norm(shown.fact.lbl)) expl += ` Labels differ: "${alt.lbl}" vs "${shown.fact.lbl}".`;
       add({ b, p, stmt: shown.fact.s, check: 'Repeated figure', particulars: `${L.BY_ID[l]?.label || shown.fact.lbl} — ${files[alt.f]?.name.replace(/\.xlsx$/i, '')} vs shown figure`,

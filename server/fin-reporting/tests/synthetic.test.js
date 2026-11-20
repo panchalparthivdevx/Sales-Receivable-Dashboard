@@ -120,22 +120,26 @@ test('a total that does not add up is a difference, never forced to agree', () =
   assert.ok(Math.abs(row.diff - 40) < 1e-9);
 });
 
-test('two workbooks with different figures for the same period: original vs latest, decision request above materiality', () => {
+test('two workbooks with different figures for the same period: original vs latest; a later restatement is Restated, equal sources that disagree ask for a decision', () => {
   const a = X.extractWorkbook(sampleBook({ revQ2: 600 }), { name: 'a.xlsx' });
   const b = X.extractWorkbook(sampleBook({ revQ2: 605 }), { name: 'b.xlsx' });
   b.reportingDate = '2026-12-31';   // b is the later workbook: its Sep-26 columns become comparatives
   for (const s of b.statements) for (const p of s.periods) if (p.role === 'primary') p.role = 'comparative';
   const v = B.build([a, b]);
-  const orig = M.cell(M.makeCtx(v), 'SA', 'pl.rev', 'FY2027-Q2');
-  const late = M.cell(M.makeCtx(v, { mode: 'latest' }), 'SA', 'pl.rev', 'FY2027-Q2');
-  assert.strictEqual(orig.v, 600);
-  assert.strictEqual(late.v, 605);
-  const r = RC.reconcile(v, {});
-  assert.ok(r.decisions.some(d => d.l === 'pl.rev' && d.p === 'FY2027-Q2'));
-  // a recorded decision overrides the priority for its version
-  const dk = M.factKey(v.facts.find(f => f.l === 'pl.rev' && f.p === 'FY2027-Q2' && f.v === 605));
-  const decided = M.cell(M.makeCtx(v, { decisions: { 'SA|pl.rev|FY2027-Q2|original': dk } }), 'SA', 'pl.rev', 'FY2027-Q2');
-  assert.strictEqual(decided.v, 605);
+  assert.strictEqual(M.cell(M.makeCtx(v), 'SA', 'pl.rev', 'FY2027-Q2').v, 600);
+  assert.strictEqual(M.cell(M.makeCtx(v, { mode: 'latest' }), 'SA', 'pl.rev', 'FY2027-Q2').v, 605);
+  for (const mode of ['original', 'latest']) {
+    const r = RC.reconcile(v, { mode });
+    assert.ok(r.rows.some(x => x.check === 'Repeated figure' && x.line === 'pl.rev' && x.p === 'FY2027-Q2' && x.status === 'Restated'), mode);
+    assert.ok(!r.decisions.some(d => d.l === 'pl.rev' && d.p === 'FY2027-Q2'), mode + ': a restatement is not a decision');
+  }
+  // two workbooks prepared for the same date that disagree: a decision request, and a recorded decision overrides
+  const c = X.extractWorkbook(sampleBook({ revQ2: 650 }), { name: 'c.xlsx' });
+  const v2 = B.build([a, c]);
+  assert.ok(RC.reconcile(v2, {}).decisions.some(d => d.l === 'pl.rev' && d.p === 'FY2027-Q2'));
+  const dk = M.factKey(v2.facts.find(f => f.l === 'pl.rev' && f.p === 'FY2027-Q2' && f.v === 650));
+  const decided = M.cell(M.makeCtx(v2, { decisions: { 'SA|pl.rev|FY2027-Q2|original': dk } }), 'SA', 'pl.rev', 'FY2027-Q2');
+  assert.strictEqual(decided.v, 650);
   assert.ok(decided.decided);
 });
 

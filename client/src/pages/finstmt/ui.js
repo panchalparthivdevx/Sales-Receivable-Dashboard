@@ -48,7 +48,7 @@ export const pctTxt = (p, note) => (note ? note : p == null ? '—' : `${p >= 0 
 // ── status ───────────────────────────────────────────────────────────────────
 const STATUS = {
   OK: [C.good, CheckCircle2], Agrees: [C.good, CheckCircle2], 'Within threshold': [C.good, CheckCircle2], Reported: [C.good, CheckCircle2],
-  Rounding: [C.info, Info], Info: [C.info, Info], Derived: [C.info, Info], 'Within threshold (proxy)': [C.warn, AlertTriangle],
+  Rounding: [C.info, Info], Info: [C.info, Info], Derived: [C.info, Info], Restated: [C.info, Info], 'Within threshold (proxy)': [C.warn, AlertTriangle],
   Proxy: [C.warn, AlertTriangle], Difference: [C.warn, AlertTriangle], 'No threshold set': [C.ink2, MinusCircle], 'Not Applicable': [C.ink2, MinusCircle], 'Not Meaningful': [C.ink2, MinusCircle],
   'Missing Input': [C.warn, HelpCircle], 'Missing data': [C.warn, HelpCircle], 'Not available': [C.ink2, MinusCircle],
   'Material difference': [C.bad, XCircle], Breach: [C.bad, XCircle], Unreconciled: [C.bad, XCircle],
@@ -90,7 +90,7 @@ export function useLoad(fn, deps) {
 }
 
 // ── filters ──────────────────────────────────────────────────────────────────
-export function FilterBar({ F, setF, show = {}, periods = [], budgetVersions = [], branches = [] }) {
+export function FilterBar({ F, setF, show = {}, periods = [], budgetVersions = [], branches = [], bases = null }) {
   const set = (k, v) => setF(f => ({ ...f, [k]: v }));
   const Lbl = ({ t, children }) => <label style={{ display: 'flex', flexDirection: 'column', gap: 3, fontSize: '0.66rem', color: C.ink2, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.03em' }}>{t}{children}</label>;
   const fys = [...new Set(periods.map(p => p.fy))].sort((a, b) => b - a);
@@ -98,7 +98,7 @@ export function FilterBar({ F, setF, show = {}, periods = [], budgetVersions = [
   return (
     <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'flex-end', background: C.white, border: `1px solid ${C.line}`, borderRadius: 10, padding: '10px 14px', marginBottom: 14 }}>
       <Lbl t="Company"><select style={S.select} value="devx" onChange={() => {}} title="Financial statements are imported for Dev Accelerator Ltd (standalone and consolidated). Other companies have no financial statements loaded."><option value="devx">Dev Accelerator Ltd</option></select></Lbl>
-      <Lbl t="Basis"><select style={S.select} value={F.basis} onChange={e => set('basis', e.target.value)}><option value="SA">Standalone</option><option value="CO">Consolidated</option></select></Lbl>
+      <Lbl t="Basis"><select style={S.select} value={F.basis} onChange={e => set('basis', e.target.value)}>{[['SA', 'Standalone'], ['CO', 'Consolidated']].map(([k, l]) => { const off = bases && !bases.includes(k); return <option key={k} value={k} disabled={off}>{l}{off ? ' — not imported' : ''}</option>; })}</select></Lbl>
       {show.period && <>
         <Lbl t="Financial year"><select style={S.select} value={F.fy || ''} onChange={e => set('fy', +e.target.value)}>{fys.map(fy => <option key={fy} value={fy}>FY{fy - 1}-{String(fy).slice(2)}</option>)}</select></Lbl>
         <Lbl t="Period"><select style={S.select} value={F.period || ''} onChange={e => set('period', e.target.value)}>

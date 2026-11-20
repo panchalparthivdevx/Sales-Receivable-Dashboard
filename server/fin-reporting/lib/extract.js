@@ -37,6 +37,22 @@ function cellText(cell) {
   return '';
 }
 
+/**
+ * Scaling applied by a cell's number format, so the figure is the one the sheet shows. Each comma after the last digit
+ * placeholder divides by 1,000; an escaped / quoted dot followed by digits ("#\.00,") is a literal point that turns the
+ * last digits into decimals — the usual way to show rupees as ₹ lakh. 1 when the format does not scale.
+ */
+function formatScale(z) {
+  if (!z || typeof z !== 'string' || z === 'General') return 1;
+  const pos = z.split(';')[0].replace(/\[[^\]]*\]/g, '');              // positive section, without [colour] / [condition]
+  const bare = pos.replace(/"[^"]*"/g, m => (m === '"."' ? '\u0001' : '')).replace(/\\\./g, '\u0001').replace(/\\./g, '').replace(/_./g, '').replace(/\*./g, '');
+  const commas = (bare.match(/[0#?](,+)[^0#?]*$/) || [])[1]?.length || 0;
+  const lit = bare.match(/\u0001([0#?]+)/);
+  const realDot = /[0#?]\.[0#?]/.test(bare);
+  const scale = Math.pow(1000, commas) * (lit && !realDot ? Math.pow(10, lit[1].length) : 1);
+  return scale > 1 ? scale : 1;
+}
+
 /** Value of a figure cell, with everything needed to audit it */
 function readFigure(ws, r, c) {
   const a = addr(r, c);
@@ -47,7 +63,10 @@ function readFigure(ws, r, c) {
   if (cell.f && EXT_LINK_RE.test(cell.f)) out.ext = true;
   if (cell.t === 'e') return { ...out, st: 'error', v: null, err: cell.w || `#ERR${cell.v}` };
   if (cell.v === undefined || cell.v === null) return { ...out, st: cell.f ? 'no_cached' : 'blank', v: null };
-  if (cell.t === 'n') return { ...out, st: 'ok', v: cell.v };
+  if (cell.t === 'n') {
+    const k = formatScale(cell.z);
+    return k === 1 ? { ...out, st: 'ok', v: cell.v } : { ...out, st: 'ok', v: cell.v / k, stored: cell.v, scaledBy: k, nf: cell.z };
+  }
   if (cell.t === 'b') return { ...out, st: 'text', v: null, raw: String(cell.v) };
   if (cell.t === 'd') return { ...out, st: 'text', v: null, raw: P.dateToIso(cell.v) };
   const s = String(cell.v).trim();
@@ -87,6 +106,41 @@ function looksLikeNotes(ws) {
     if (hits >= 3) return true;
   }
   return false;
+}
+
+/**
+ * Older notes layout (FY 2022-23, 2023-24 workbooks): "4. Non-Current Investments" in column A, then "Particulars" and
+ * the item names in column A as well. Returns the sheet with the note number split into its own column A (everything
+ * else one column to the right) so the notes reader can read it, or null for any other layout. Cell references are
+ * moved back afterwards (unshiftNotes).
+ */
+const NOTE_HEAD_A = /^\s*(\d{1,2}(?:\.\d{1,2})?)\s*\.?\s+([A-Za-z(].{2,})$/;
+function shiftedNotesSheet(ws) {
+  const rg = sheetRange(ws);
+  if (!rg) return null;
+  let hits = 0;
+  for (let r = rg.r0; r < Math.min(rg.r1, 400) && hits < 2; r++) {
+    if (!NOTE_HEAD_A.test(cellText(ws[addr(r, 0)]))) continue;
+    for (let k = 1; k <= 3; k++) if (/^\s*particulars\s*$/i.test(cellText(ws[addr(r + k, 0)]).replace(/\s+/g, ' '))) { hits++; break; }
+  }
+  if (hits < 2) return null;
+  const out = {};
+  for (const [k, cell] of Object.entries(ws)) {
+    if (k[0] === '!') continue;
+    const { r, c } = XLSX.utils.decode_cell(k);
+    const m = c === 0 && NOTE_HEAD_A.exec(cellText(cell));
+    if (m) { out[addr(r, 0)] = { t: 'n', v: Number(m[1]) }; out[addr(r, 1)] = { t: 's', v: m[2].trim() }; continue; }
+    out[addr(r, c + 1)] = cell;
+  }
+  const full = XLSX.utils.decode_range(ws['!ref']);
+  out['!ref'] = XLSX.utils.encode_range({ s: full.s, e: { r: full.e.r, c: full.e.c + 1 } });
+  out['!merges'] = (ws['!merges'] || []).map(m => ({ s: { r: m.s.r, c: m.s.c + 1 }, e: { r: m.e.r, c: m.e.c + 1 } }));
+  return out;
+}
+function unshiftNotes(notes) {
+  const back = a => { const { r, c } = XLSX.utils.decode_cell(a); return addr(r, Math.max(0, c - 1)); };
+  for (const n of notes) for (const it of n.items) for (const g of it.figs || []) { if (g.c) g.c = back(g.c); if (g.col) g.col = XLSX.utils.encode_col(Math.max(0, XLSX.utils.decode_col(g.col) - 1)); }
+  return notes;
 }
 
 function classify(title) {
@@ -432,7 +486,7 @@ function extractNarrative(ws, sheet) {
 /** Whole workbook → extraction (no storage) */
 function extractWorkbook(buf, meta = {}) {
   const sha256 = crypto.createHash('sha256').update(buf).digest('hex');
-  const wb = XLSX.read(buf, { cellFormula: true, cellDates: true, cellNF: false, cellStyles: false });
+  const wb = XLSX.read(buf, { cellFormula: true, cellDates: true, cellNF: true, cellStyles: false });
   const hiddenOf = Object.fromEntries((wb.Workbook?.Sheets || []).map(s => [s.name, !!s.Hidden]));
   const statements = [];
   const notes = [];
@@ -446,12 +500,15 @@ function extractWorkbook(buf, meta = {}) {
     if (!ws || !ws['!ref']) continue;
     const title = titleOf(ws);
     let type = classify(title);
+    let notesWs = ws, shifted = false;
     if (!type && looksLikeNotes(ws)) type = 'NOTES';
+    if (!type) { const sh = shiftedNotesSheet(ws); if (sh && looksLikeNotes(sh)) { type = 'NOTES'; notesWs = sh; shifted = true; } }
     const isSebiNotes = /^notes?:?$/i.test(cellText(ws.A1)) || (/results notes/i.test(name) && !type);
     if (isSebiNotes) { narrative.push(...extractNarrative(ws, name).map(n => ({ ...n, hidden: !!hiddenOf[name] }))); continue; }
     if (!type) { skippedSheets.push(name); continue; }
     if (type === 'NOTES') {
-      const res = extractNotes(ws, name, {});
+      const res = extractNotes(notesWs, name, {});
+      if (shifted) unshiftNotes(res.notes);
       for (const n of res.notes) { n.hidden = !!hiddenOf[name]; n.basis = basisIn(title); notes.push(n); }
       issues.push(...res.issues);
       continue;
@@ -520,6 +577,7 @@ function extractWorkbook(buf, meta = {}) {
         if (f.st === 'error') { errorsSeen.push({ sheet: s.sheet, cell: f.c, err: f.err }); s.issues.push({ sev: 'error', code: 'EXCEL_ERROR', sheet: s.sheet, cell: f.c, period: pc.period, line: row.id, msg: `${f.err} in ${s.sheet}!${f.c} ("${row.label}", ${pc.period}). Kept as an error — not zero.` }); }
         if (f.st === 'no_cached') s.issues.push({ sev: 'error', code: 'NO_CACHED_VALUE', sheet: s.sheet, cell: f.c, period: pc.period, line: row.id, msg: `${s.sheet}!${f.c} has a formula but no saved result (open and save the workbook in Excel).` });
         if (f.ext) s.issues.push({ sev: f.st === 'ok' ? 'info' : 'error', code: 'EXTERNAL_LINK', sheet: s.sheet, cell: f.c, period: pc.period, line: row.id, msg: `${s.sheet}!${f.c} links to another workbook (${f.fx}); ${f.st === 'ok' ? 'the saved result is used' : 'no saved result is available'}.` });
+        if (f.scaledBy) s.issues.push({ sev: 'warning', code: 'FORMAT_SCALED', sheet: s.sheet, cell: f.c, period: pc.period, line: row.id, msg: `${s.sheet}!${f.c} ("${row.label}") stores ${f.stored} but its number format (${f.nf}) shows it ÷ ${f.scaledBy.toLocaleString('en-IN')}; the figure as shown (${Math.round(f.v * 100) / 100}) is used.` });
         const plug = plugsIn(f.fx);
         if (plug) { f.plug = plug; s.issues.push({ sev: 'info', code: 'ROUNDING_PLUG', sheet: s.sheet, cell: f.c, period: pc.period, line: row.id, value: plug, msg: `${s.sheet}!${f.c} ("${row.label}") includes a manual adjustment of ${plug > 0 ? '+' : ''}${plug} in its formula (=${f.fx}).` }); }
         const der = derivation(f.fx, row.r, s.periodByCol);

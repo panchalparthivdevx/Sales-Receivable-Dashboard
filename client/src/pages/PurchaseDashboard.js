@@ -715,6 +715,10 @@ function FYToggle({ fy, onChange }) {
 }
 
 function RecurringExpenseReport({ data, loading, branch, onBranchChange, head, onHeadChange, fy, onFYChange, quarter, onQuarterChange, onCellClick }) {
+  // Expense-head expand/collapse: head key → true (open) / false (closed).
+  // A head not in the map is closed, except when only one head is shown or a single branch is picked.
+  const [openHeads, setOpenHeads] = useState({});
+
   const allMonths   = data?.months     || [];
   const allRows     = data?.rows       || [];
   const allBranches = data?.all_branches || ['All Branches'];
@@ -739,6 +743,16 @@ function RecurringExpenseReport({ data, loading, branch, onBranchChange, head, o
     } else { curGroup.push(r); }
   }
   if (curGroup.length) groups.push({ key: curKey, label: curGroup[0].head_label, rows: curGroup });
+
+  const headOpenByDefault = groups.length === 1 || branch !== 'All Branches';
+  const isHeadOpen   = k => (k in openHeads ? openHeads[k] : headOpenByDefault);
+  const toggleHead   = k => setOpenHeads(p => ({ ...p, [k]: !isHeadOpen(k) }));
+  const setAllHeads  = open => setOpenHeads(p => {
+    const next = { ...p };
+    for (const g of groups) next[g.key] = open;
+    return next;
+  });
+  const openHeadCount = groups.filter(g => isHeadOpen(g.key)).length;
 
   // Chart: expense head totals per month
   const chartData = months.map(m => {
@@ -886,6 +900,21 @@ function RecurringExpenseReport({ data, loading, branch, onBranchChange, head, o
             </div>
           )}
 
+          {/* Expand / Collapse controls */}
+          <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem', flexWrap: 'wrap' }}>
+            <span style={{ color: '#5D6C7B', fontSize: '0.75rem' }}>
+              {openHeadCount} of {groups.length} expense head{groups.length !== 1 ? 's' : ''} expanded · click an expense head row to open or close it
+            </span>
+            <button onClick={() => setAllHeads(true)} disabled={openHeadCount === groups.length}
+              style={{ ...VCS.clearBtn, opacity: openHeadCount === groups.length ? 0.5 : 1, cursor: openHeadCount === groups.length ? 'default' : 'pointer' }}>
+              Expand all
+            </button>
+            <button onClick={() => setAllHeads(false)} disabled={openHeadCount === 0}
+              style={{ ...VCS.clearBtn, opacity: openHeadCount === 0 ? 0.5 : 1, cursor: openHeadCount === 0 ? 'default' : 'pointer' }}>
+              Collapse all
+            </button>
+          </div>
+
           {/* Pivot Table */}
           <div style={{ overflowX: 'auto' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem', minWidth: 700 }}>
@@ -901,11 +930,17 @@ function RecurringExpenseReport({ data, loading, branch, onBranchChange, head, o
                   const metaDefs   = allHeads.find(h => h.key === hKey)?.meta || [];
                   const headColor  = HEAD_COLORS[hKey] || '#64748b';
                   const groupTotal = months.reduce((s, m) => s + monthSum(hRows, m.key), 0);
+                  const isOpen     = isHeadOpen(hKey);
                   return (
                     <React.Fragment key={hKey}>
-                      {/* Expense head row */}
-                      <tr style={VCS.grpRow}>
+                      {/* Expense head row — click to expand / collapse its branches */}
+                      <tr style={{ ...VCS.grpRow, cursor: 'pointer' }}
+                        role="button" tabIndex={0} aria-expanded={isOpen}
+                        title={isOpen ? 'Click to collapse' : 'Click to expand'}
+                        onClick={() => toggleHead(hKey)}
+                        onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleHead(hKey); } }}>
                         <td style={{ ...VCS.td, fontWeight: 700, color: headColor, whiteSpace: 'nowrap' }}>
+                          <span style={{ display: 'inline-block', width: 14, color: '#475569', fontSize: '0.7rem' }}>{isOpen ? '▼' : '▶'}</span>
                           <span style={{ ...VCS.dot, background: headColor }} />
                           {hLabel}
                           <span style={VCS.count}>({hRows.length} branch{hRows.length !== 1 ? 'es' : ''})</span>
@@ -913,8 +948,8 @@ function RecurringExpenseReport({ data, loading, branch, onBranchChange, head, o
                         {months.map(m => <td key={m.key} style={grpCell}>{fmtAmt(monthSum(hRows, m.key))}</td>)}
                         <td style={grpCell}>{fmtAmt(groupTotal)}</td>
                       </tr>
-                      {/* Branch rows */}
-                      {hRows.map((r, i) => {
+                      {/* Branch rows (only when the expense head is expanded) */}
+                      {isOpen && hRows.map((r, i) => {
                         const rowTotal = months.reduce((s, m) => s + (r.monthly[m.key]?.amount || 0), 0);
                         return (
                           <tr key={`${hKey}|||${r.branch}`} style={VCS.vendRow(i)}>
