@@ -762,7 +762,7 @@ router.get('/debt', wrap(async (req, res) => {
   const today = SRC.todayIso();
   const facilities = d.facilities.map(f => { const rows = d.schedule.filter(r => r.facilityId === f.id).sort((a, b) => a.dueDate.localeCompare(b.dueDate)); const next = rows.find(r => r.dueDate >= today);
     return { ...f, scheduleRows: rows.length, scheduledPrincipal: rows.reduce((s, r) => s + (Number(r.principal) || 0), 0), next12Principal: rows.filter(r => r.dueDate >= today && r.dueDate <= `${+today.slice(0, 4) + 1}${today.slice(4)}`).reduce((s, r) => s + (Number(r.principal) || 0), 0), nextDue: next || null }; });
-  res.json({ ...d, facilities, covenants: d.covenants.map(c => ({ ...c, ...DB.status(c, d.tests) })), fields: { facility: DB.FAC_FIELDS, schedule: DB.SCH_FIELDS, covenant: DB.COV_FIELDS, test: DB.TEST_FIELDS } });
+  res.json({ ...d, facilities, covenants: d.covenants.map(c => ({ ...c, ...DB.status(c, d.tests) })), fields: { facility: DB.FAC_FIELDS, schedule: DB.SCH_FIELDS, covenant: DB.COV_FIELDS, test: DB.TEST_FIELDS }, loanMasterFile: loanMasterOnDisk() });
 }));
 router.post('/debt/facility', need('inputs'), wrap(async (req, res) => {
   const f = req.body || {};
@@ -828,6 +828,47 @@ router.post('/debt/upload', need('inputs'), upload.single('file'), wrap(async (r
   });
   await store.audit({ action: 'debt-upload', facilities: doc.facilities.length, by: who(req), file: req.file.originalname });
   res.json({ ok: true, facilities: doc.facilities.length, scheduleRows: doc.schedule.length, covenants: doc.covenants.length, errors });
+}));
+// ── the Loan Master workbook (live loans, their schedule) ─────────────────────
+const LOAN_DIR = path.join(__dirname, '..', '..', 'Loan Module');
+function loanMasterOnDisk() {
+  if (IS_VERCEL || !fs.existsSync(LOAN_DIR)) return null;
+  const list = fs.readdirSync(LOAN_DIR).filter(f => /loan master/i.test(f) && /\.xlsx$/i.test(f) && !f.startsWith('~$'))
+    .map(f => ({ f, t: fs.statSync(path.join(LOAN_DIR, f)).mtimeMs })).sort((a, b) => b.t - a.t);
+  return list[0]?.f || null;
+}
+router.post('/debt/import-loan-master', need('inputs'), upload.single('file'), wrap(async (req, res) => {
+  let buf = req.file?.buffer, name = req.file?.originalname;
+  if (!buf) { name = loanMasterOnDisk(); if (!name) return bad(res, 400, IS_VERCEL ? 'Upload the Loan Master workbook.' : 'No "Loan Master" workbook in the Loan Module folder.'); buf = fs.readFileSync(path.join(LOAN_DIR, name)); }
+  const asOfMonth = /^\d{4}-\d{2}$/.test(req.body?.asOf || req.query.asOf || '') ? (req.body?.asOf || req.query.asOf) : undefined;
+  const r = DB.parseLoanMaster(buf, who(req), { asOfMonth, file: name });
+  if (!r.facilities.length) return bad(res, 400, r.flags[0] || 'No live loans found in the workbook.');
+  let added = 0, updated = 0, removed = 0;
+  const kept = [];
+  await store.update('debt', DB.empty(), d => {
+    const prev = d.facilities.filter(f => f.imported === 'loan-master');
+    const own = new Set(d.facilities.filter(f => f.imported !== 'loan-master').map(f => String(f.facilityName).toLowerCase()));
+    const incoming = [];
+    for (const f of r.facilities) {
+      if (own.has(String(f.facilityName).toLowerCase())) { kept.push(f.facilityName); continue; }   // a facility entered by hand wins
+      const old = prev.find(p => String(p.facilityName).toLowerCase() === String(f.facilityName).toLowerCase());
+      const oldId = f.id;
+      if (old) { f.id = old.id; updated++; } else added++;      // same name: same facility, so its covenants and tests stay
+      for (const s of r.schedule) if (s.facilityId === oldId) s.facilityId = f.id;
+      incoming.push(f);
+    }
+    const ids = new Set(incoming.map(f => f.id));
+    const gone = prev.filter(p => !ids.has(p.id)).map(p => p.id);
+    removed = gone.length;
+    const prevIds = new Set(prev.map(p => p.id));
+    d.facilities = d.facilities.filter(f => !prevIds.has(f.id)).concat(incoming);
+    d.schedule = d.schedule.filter(s => !prevIds.has(s.facilityId)).concat(r.schedule.filter(s => ids.has(s.facilityId)));
+    d.covenants = d.covenants.filter(c => !gone.includes(c.facilityId));
+    d.tests = d.tests.filter(t => d.covenants.some(c => c.id === t.covenantId));
+    d.loanMaster = { file: name, asOf: r.asOf, at: new Date().toISOString(), by: who(req), live: r.live, closed: r.closed, flags: r.flags };
+  });
+  await store.audit({ action: 'debt-import-loan-master', file: name, live: r.live, added, updated, removed, by: who(req) });
+  res.json({ ok: true, file: name, asOf: r.asOf, live: r.live, closed: r.closed, added, updated, removed, scheduleRows: r.schedule.length, kept, flags: r.flags });
 }));
 router.post('/debt/import-loans', need('inputs'), wrap(async (req, res) => {
   const ops = SRC.ops();

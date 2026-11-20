@@ -311,3 +311,101 @@ test('ratios use the debt schedule, covenant tests and branch master (real workb
     near(r['unit.rev_sqft'].v, rev * 1e5 / (183 / (365 / 12)) / 100000, 0.01);
   } finally { srv.close(); }
 });
+
+// ── Loan Master workbook (made-up lenders and amounts) ──────────────────────────────────────────────────────────
+function loanMasterBook() {
+  const serial = m => { const [y, mo] = m.split('-').map(Number); return Math.round((Date.UTC(y, mo, 0) - Date.UTC(1899, 11, 30)) / 86400000); };
+  const ms = ['2026-08', '2026-09', '2026-10', '2026-11', '2026-12', '2027-01'];
+  const head = ['Loan Name', 'O/S', 'Type', 'Loan Type', 'Sanction/Disburse Amt.', 'Rate of Interest', 'Tenure', 'Start Month', 'End Month', 'Loan End Month', 'Instalment Date', 'Direct or Escrow', 'Escrow Name', 'ZOHO Entry', 'Personal Gu', 'Closed/live', 'Remarks', 'Op. Bal.', ...ms.map(serial)];
+  const row = (name, kind, status, sanction, rate, day, vals) => [name, kind, '', 'Secured', sanction, rate, '6 Months', 'Aug-26', 'Jan-27', null, day, 'Direct', '', '', '', status, '', null, ...vals];
+  const aoa = [[], ['FY'], head, [], ['Principal Outflow', null, null, 'Loan Type'],
+    row('Alpha Bank - Term Loan', 'Principal', 'Live', 600000, 0.12, '15th', [100000, 100000, 100000, 100000, 100000, 100000]),
+    row('Alpha Bank - Term Loan', 'Closing Principal', 'Live', null, null, null, [500000, 400000, 300000, 200000, 100000, 0]),
+    row('Beta Finance', 'Principal', 'Closed', 300000, 0.15, '5th', [100000, 0, 0, 0, 0, 0]),
+    row('Beta Finance', 'Closing Principal', 'Closed', null, null, null, [0, 0, 0, 0, 0, 0]),
+    row('Gamma Bank - CC', 'Principal', 'Live', 2500000, 0.09, null, [0, 0, 0, 0, 0, 0]),
+    row('Gamma Bank - CC', 'Closing Principal', 'Live', null, null, null, [2500000, 2500000, 2500000, 2500000, 2500000, 2500000]),
+    ['Total Principal Outflow'], ['Interest Outflow'],
+    row('Alpha Bank - Term Loan', 'Interest', null, 600000, 0.12, '15th', [6000, 5000, 4000, 3000, 2000, 1000]),
+    row('Alpha Bank - Term Loan', 'Closing Interest', null, null, null, null, [15000, 10000, 6000, 3000, 1000, 0]),
+    row('Beta Finance', 'Interest', 'Closed', 300000, 0.15, '5th', [1250, 0, 0, 0, 0, 0]),
+    row('Beta Finance', 'Closing Interest', 'Closed', null, null, null, [0, 0, 0, 0, 0, 0]),
+    ['Total Interest Outflow'], ['EMI Outflow (Balance Sheet)'],
+    row('Alpha Bank - Term Loan', 'Total', 'Live', 600000, 0.12, '15th', [106000, 105000, 104000, 103000, 102000, 101000]),
+    row('Alpha Bank - Term Loan', 'Closing Total', 'Live', null, null, null, [515000, 410000, 306000, 203000, 101000, 0]),
+    row('Delta Equipment', 'Total', 'Live', null, null, null, [50000, 50000, 50000, 50000, 50000, 50000]),
+    row('Delta Equipment', 'Closing Total', 'Live', null, null, null, [250000, 200000, 150000, 100000, 50000, 0]),
+    ['Total EMI Outflow (Balance Sheet)']];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), 'Sheet1');
+  return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+}
+
+test('Loan Master: live loans only, balance at the as-at month, schedule on the instalment day, interest matched, gaps flagged', () => {
+  const r = DB.parseLoanMaster(loanMasterBook(), 'tester', { asOfMonth: '2026-10', file: 'LM.xlsx' });
+  assert.deepStrictEqual(r.facilities.map(f => f.facilityName).sort(), ['Alpha Bank - Term Loan', 'Delta Equipment', 'Gamma Bank - CC']);
+  assert.strictEqual(r.closed, 1);
+  const a = r.facilities.find(f => f.facilityName === 'Alpha Bank - Term Loan');
+  assert.strictEqual(a.lender, 'Alpha Bank');
+  assert.strictEqual(a.outstanding, 300000);
+  assert.strictEqual(a.outstandingAsAt, '2026-10-31');
+  assert.strictEqual(a.interestRate, 12);
+  assert.strictEqual(a.repaymentType, 'Custom');
+  assert.strictEqual(a.instalment, 103000);
+  const rows = r.schedule.filter(s => s.facilityId === a.id);
+  assert.strictEqual(rows.length, 6);
+  assert.deepStrictEqual(rows.find(s => s.dueDate === '2026-11-15'), { facilityId: a.id, dueDate: '2026-11-15', principal: 100000, interest: 3000, note: '', source: 'loan master' });
+  assert.ok(!a.flags.length, a.flags.join('; '));
+  const cc = r.facilities.find(f => f.facilityName === 'Gamma Bank - CC');
+  assert.strictEqual(cc.facilityType, 'Cash credit');
+  assert.strictEqual(cc.outstanding, 2500000);
+  assert.ok(cc.flags.some(t => /Revolving/.test(t)));
+  const d = r.facilities.find(f => f.facilityName === 'Delta Equipment');
+  assert.strictEqual(d.outstanding, 150000);
+  assert.ok(d.flags.some(t => /EMI section only/.test(t)));
+  assert.ok(d.flags.some(t => /No instalment date/.test(t)));
+  assert.strictEqual(r.schedule.filter(s => s.facilityId === d.id).find(s => s.dueDate === '2026-11-30').principal, 50000);
+});
+
+test('Loan Master import API: re-import keeps covenants of the same loan, drops loans no longer live, keeps facilities entered by hand', async () => {
+  const H = require('./helpers');
+  H.tempStore();
+  const srv = H.app(require('..')).listen(0);
+  const go = (method, url, body, form) => H.call(srv, method, '/api/fin-reporting' + url, { body, form });
+  const up = buf => { const f = new FormData(); f.append('file', new Blob([buf]), 'LM.xlsx'); return f; };
+  try {
+    const man = (await go('POST', '/debt/facility', { lender: 'NCD holders', facilityName: 'NCD Series A', facilityType: 'NCD', outstanding: 1000000000, outstandingAsAt: '2026-10-31', interestRate: 10, repaymentType: 'Bullet', frequency: 'Yearly', firstDueDate: '2029-05-19', maturityDate: '2029-05-19', source: 'information memorandum' })).body.item;
+    const r1 = await go('POST', '/debt/import-loan-master?asOf=2026-10', null, up(loanMasterBook()));
+    assert.strictEqual(r1.status, 200, JSON.stringify(r1.body));
+    assert.strictEqual(r1.body.live, 3);
+    assert.strictEqual(r1.body.added, 3);
+    let d = (await go('GET', '/debt')).body;
+    const alpha = d.facilities.find(f => f.facilityName === 'Alpha Bank - Term Loan');
+    const cov = (await go('POST', '/debt/covenant', { facilityId: alpha.id, metric: 'DSCR', definition: 'synthetic', operator: '>=', threshold: 1.2, source: 'clause 1' })).body.item;
+    assert.ok(d.loanMaster && d.loanMaster.file === 'LM.xlsx');
+    // the same workbook with Delta closed
+    const XLSXm = require('xlsx');
+    const wb = XLSXm.read(loanMasterBook());
+    const ws = wb.Sheets.Sheet1;
+    for (const [k, c] of Object.entries(ws)) if (k[0] !== '!' && c.v === 'Delta Equipment') { const r = XLSXm.utils.decode_cell(k).r; ws[XLSXm.utils.encode_cell({ r, c: 15 })] = { t: 's', v: 'Closed' }; }
+    const r2 = await go('POST', '/debt/import-loan-master?asOf=2026-10', null, up(XLSXm.write(wb, { type: 'buffer', bookType: 'xlsx' })));
+    assert.strictEqual(r2.status, 200, JSON.stringify(r2.body));
+    assert.deepStrictEqual([r2.body.added, r2.body.updated, r2.body.removed], [0, 2, 1]);
+    d = (await go('GET', '/debt')).body;
+    assert.ok(!d.facilities.some(f => f.facilityName === 'Delta Equipment'));
+    assert.strictEqual(d.facilities.find(f => f.facilityName === 'Alpha Bank - Term Loan').id, alpha.id, 'same facility id');
+    assert.ok(d.covenants.some(c => c.id === cov.id), 'covenant kept');
+    assert.ok(d.facilities.some(f => f.id === man.id), 'hand-entered facility kept');
+    assert.strictEqual(d.schedule.filter(s => s.facilityId === alpha.id).length, 6, 'no duplicate instalments');
+  } finally { srv.close(); }
+});
+
+test('Loan Master (the real workbook): 17 live loans, ₹14,597.78 lakh outstanding at the end of October 2026', { skip: !require('fs').existsSync(require('path').join(__dirname, '..', '..', '..', 'Loan Module', 'Updated Loan Master Sheet Vr. 3.0.xlsx')) && 'Loan Master not on this machine' }, () => {
+  const fs = require('fs'), path = require('path');
+  const r = DB.parseLoanMaster(fs.readFileSync(path.join(__dirname, '..', '..', '..', 'Loan Module', 'Updated Loan Master Sheet Vr. 3.0.xlsx')), 'tester', { asOfMonth: '2026-10' });
+  assert.strictEqual(r.live, 17);
+  near(r.facilities.reduce((s, f) => s + (f.outstanding || 0), 0) / 1e5, 14597.78, 0.01);
+  const tata = r.facilities.find(f => /TATA Capital/.test(f.facilityName));
+  assert.strictEqual(r.schedule.filter(s => s.facilityId === tata.id && s.dueDate > '2026-10-31').reduce((s, x) => s + x.principal, 0).toFixed(0), tata.outstanding.toFixed(0));
+  assert.ok(r.flags.some(t => /ICICI Bank Limited.*incomplete/.test(t)), 'the ICICI schedule gap is reported');
+});

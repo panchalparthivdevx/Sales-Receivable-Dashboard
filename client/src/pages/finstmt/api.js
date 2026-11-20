@@ -67,6 +67,7 @@ export const fsApi = {
   saveTest:     (body)        => axios.post(`${B}/debt/test`, body).then(r => r.data),
   uploadDebt:   (file, mode)  => { const f = new FormData(); f.append('file', file); return axios.post(`${B}/debt/upload`, f, { params: { mode } }).then(r => r.data); },
   importLoans:  ()            => axios.post(`${B}/debt/import-loans`).then(r => r.data),
+  importLoanMaster: (file)    => { const f = new FormData(); if (file) f.append('file', file); return axios.post(`${B}/debt/import-loan-master`, f, { timeout: 120000 }).then(r => r.data); },
   forecast:     (version, months) => axios.get(`${B}/forecast`, { params: q({ version, months }), timeout: 180000 }).then(r => r.data),
   forecastSettings: (body)    => axios.put(`${B}/forecast/settings`, body).then(r => r.data),
   forecastLine: (body)        => axios.post(`${B}/forecast/manual`, body).then(r => r.data),

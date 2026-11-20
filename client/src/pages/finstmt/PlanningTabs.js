@@ -251,6 +251,7 @@ export function DebtSection({ rights, flash }) {
   if (d.loading && !doc) return <Loading text="Loading the debt schedule…" />;
   if (d.error) return <div style={{ ...S.card, color: C.bad }}>{d.error}</div>;
   const F = doc.fields;
+  const lmMsg = r => `${r.file}: ${r.live} live loan${r.live === 1 ? '' : 's'} (${r.closed} closed left out), balances as at the end of ${r.asOf} — ${r.added} added, ${r.updated} updated, ${r.removed} removed, ${r.scheduleRows} instalments.${r.kept?.length ? ` Kept your own entries for: ${r.kept.join(', ')}.` : ''}${r.flags?.length ? ` ${r.flags.length} point(s) to check are listed under the table.` : ''}`;
   const totals = doc.facilities.reduce((s, x) => ({ out: s.out + (x.outstanding || 0), n12: s.n12 + (x.next12Principal || 0) }), { out: 0, n12: 0 });
   const saveFac = () => act('fac', () => fsApi.saveFacility(form).then(r => `${form.facilityName}: saved${r.generated ? ` — ${r.generated} instalments generated from the terms` : ''}.`), [d.reload, () => setForm(null)]);
   const inputOf = ([k, label, type, req]) => {
@@ -272,6 +273,8 @@ export function DebtSection({ rights, flash }) {
       <button style={S.btn('outline')} onClick={() => fsApi.download('/debt/template', {}, 'Debt_schedule_and_covenants.xlsx').catch(e => alert(errText(e)))}><Download size={14} />Excel format</button>
       {can && <><select style={S.select} value={mode} onChange={e => setMode(e.target.value)} title="Merge: facilities of the same name are replaced, others kept. Replace: the upload becomes the whole debt schedule."><option value="merge">Upload: merge</option><option value="replace">Upload: replace all</option></select>
         <FileButton label="Upload filled format" onFile={file => { if (mode === 'replace' && !window.confirm('Replace every facility, schedule row, covenant and test with the upload?')) return; act('upd', () => fsApi.uploadDebt(file, mode).then(r => `${r.facilities} facilit${r.facilities === 1 ? 'y' : 'ies'}, ${r.scheduleRows} instalments, ${r.covenants} covenant(s) read from ${file.name}.${r.errors?.length ? ` Notes: ${r.errors.join('; ')}` : ''}`), [d.reload]); }} />
+        {doc.loanMasterFile && <button style={S.btn('primary')} title={`Loan Module folder: ${doc.loanMasterFile}`} onClick={() => act('lm', () => fsApi.importLoanMaster().then(lmMsg), [d.reload])}>Import Loan Master (live loans)</button>}
+        <FileButton label={doc.loanMasterFile ? 'Upload another Loan Master' : 'Upload Loan Master (live loans)'} onFile={file => act('lmu', () => fsApi.importLoanMaster(file).then(lmMsg), [d.reload])} />
         <button style={S.btn('outline')} onClick={() => act('loans', () => fsApi.importLoans().then(r => `${r.added} facilit${r.added === 1 ? 'y' : 'ies'} added from the Loan module (${r.skipped} already here). Complete the outstanding-as-at, first due and maturity dates, then generate the schedule.`), [d.reload])}>Add from Loan module</button>
         <button style={S.btn('primary')} onClick={() => setForm({ basis: 'SA', repaymentType: 'EMI', frequency: 'Monthly' })}><Plus size={14} />New facility</button></>}
     </>}>
@@ -284,7 +287,7 @@ export function DebtSection({ rights, flash }) {
       {!doc.facilities.length ? <Note tone="warn">No facility entered. DSCR uses the repayments in the cash flow until a schedule is entered, and lender covenants are never assumed.</Note> : <>
         <Tbl head={['Lender / facility', 'Type', 'Basis', 'Outstanding (₹ lakh)', 'As at', 'Rate', 'Repayment', 'Maturity', 'Instalments', 'Next due', 'Principal next 12 months (₹ lakh)', '']} num={[3, 8, 10]} maxHeight={480}>
           {doc.facilities.map(x => <tr key={x.id} style={{ background: sel === x.id ? C.tint : 'transparent' }}>
-            <td style={{ ...S.td, minWidth: 180 }}><b>{x.lender}</b><div style={{ fontSize: '0.72rem' }}>{x.facilityName}</div>{x.endText && <div style={{ fontSize: '0.64rem', color: C.ink2 }}>Loan module end: {x.endText}</div>}</td>
+            <td style={{ ...S.td, minWidth: 180 }}><b>{x.lender}</b><div style={{ fontSize: '0.72rem' }}>{x.facilityName}</div>{x.endText && <div style={{ fontSize: '0.64rem', color: C.ink2 }}>Loan module end: {x.endText}</div>}{x.imported === 'loan-master' && <div style={{ fontSize: '0.64rem', color: C.ink2 }}>from the Loan Master</div>}{(x.flags || []).map((t, i) => <div key={i} style={{ fontSize: '0.64rem', color: C.warn }}>{t}</div>)}</td>
             <td style={S.td}>{x.facilityType}</td><td style={S.td}>{x.basis === 'CO' ? 'Cons.' : 'Stand.'}</td><td style={{ ...S.td, ...S.num }}>{lakhOfRs(x.outstanding)}</td><td style={{ ...S.td, whiteSpace: 'nowrap' }}>{x.outstandingAsAt || <span style={{ color: C.warn }}>missing</span>}</td>
             <td style={S.td}>{x.interestRate != null ? `${x.interestRate}%` : ''}{x.rateType ? ` ${x.rateType.toLowerCase()}` : ''}</td><td style={{ ...S.td, fontSize: '0.72rem' }}>{x.repaymentType} · {x.frequency}{x.instalment ? ` · ₹${new Intl.NumberFormat('en-IN').format(x.instalment)}` : ''}</td>
             <td style={{ ...S.td, whiteSpace: 'nowrap' }}>{x.maturityDate || <span style={{ color: C.warn }}>missing</span>}</td><td style={{ ...S.td, ...S.num }}>{x.scheduleRows || <span style={{ color: C.warn }}>none</span>}</td>
@@ -297,6 +300,10 @@ export function DebtSection({ rights, flash }) {
           <tr style={{ background: C.tint }}><td style={{ ...S.td, fontWeight: 700 }} colSpan={3}>Total</td><td style={{ ...S.td, ...S.num, fontWeight: 700 }}>{lakhOfRs(totals.out)}</td><td style={S.td} colSpan={6} /><td style={{ ...S.td, ...S.num, fontWeight: 700 }}>{lakhOfRs(totals.n12)}</td><td style={S.td} /></tr>
         </Tbl>
       </>}
+      {doc.loanMaster && <Note tone={doc.loanMaster.flags?.length ? 'warn' : 'info'}>
+        <div>Loan Master: <b>{doc.loanMaster.file}</b> — {doc.loanMaster.live} live loans (closed ones left out), balances as at the end of {doc.loanMaster.asOf}; imported by {doc.loanMaster.by} on {new Date(doc.loanMaster.at).toLocaleString('en-IN')}. Past months are the actual repayments in the sheet, later months its schedule. Importing again replaces these loans and keeps facilities entered by hand.</div>
+        {doc.loanMaster.flags?.length > 0 && <><div style={{ marginTop: 6, fontWeight: 600 }}>To check in the Loan Master:</div><ul style={{ margin: '4px 0 0', paddingLeft: 18 }}>{doc.loanMaster.flags.map((t, i) => <li key={i}>{t}</li>)}</ul></>}
+      </Note>}
     </Card>
     {sel && <ScheduleEditor key={sel} fac={doc.facilities.find(x => x.id === sel)} rows={doc.schedule.filter(r => r.facilityId === sel)} can={can} act={act} reload={d.reload} />}
     <Covenants doc={doc} can={can} act={act} reload={d.reload} facName={facName} />
@@ -307,13 +314,13 @@ function ScheduleEditor({ fac, rows, can, act, reload }) {
   const [list, setList] = useState(() => [...rows].sort((a, b) => a.dueDate.localeCompare(b.dueDate)).map(r => ({ ...r })));
   const [dirty, setDirty] = useState(false);
   const set = (i, k, v) => { setList(l => l.map((r, j) => (j === i ? { ...r, [k]: v } : r))); setDirty(true); };
-  const tot = list.reduce((s, r) => ({ p: s.p + (Number(r.principal) || 0), i: s.i + (Number(r.interest) || 0) }), { p: 0, i: 0 });
+  const tot = list.reduce((s, r) => ({ p: s.p + (Number(r.principal) || 0), i: s.i + (Number(r.interest) || 0), after: s.after + (!fac?.outstandingAsAt || (r.dueDate || '') > fac.outstandingAsAt ? Number(r.principal) || 0 : 0) }), { p: 0, i: 0, after: 0 });
   if (!fac) return null;
   return <Card title={`Repayment schedule — ${fac.facilityName} (${list.length} instalments, ₹)`} right={can && <>
     <button style={S.btn('outline')} onClick={() => { setList(l => [...l, { dueDate: '', principal: '', interest: '', note: '' }]); setDirty(true); }}><Plus size={14} />Add row</button>
     <button style={S.btn(dirty ? 'primary' : 'outline')} disabled={!dirty} onClick={() => act('sch', () => fsApi.saveSchedule(fac.id, list).then(r => `${r.rows} instalments saved.`), [reload, () => setDirty(false)])}>Save schedule</button>
   </>}>
-    <div style={{ ...S.small, marginBottom: 8 }}>Total principal ₹{new Intl.NumberFormat('en-IN', { maximumFractionDigits: 0 }).format(tot.p)} against outstanding ₹{new Intl.NumberFormat('en-IN', { maximumFractionDigits: 0 }).format(fac.outstanding || 0)}{fac.outstanding && Math.abs(tot.p - fac.outstanding) > 1 ? <span style={{ color: C.warn }}> — they differ by ₹{new Intl.NumberFormat('en-IN', { maximumFractionDigits: 0 }).format(tot.p - fac.outstanding)}</span> : ''}; interest ₹{new Intl.NumberFormat('en-IN', { maximumFractionDigits: 0 }).format(tot.i)}.</div>
+    <div style={{ ...S.small, marginBottom: 8 }}>Principal due after {fac.outstandingAsAt || 'the as-at date'} ₹{new Intl.NumberFormat('en-IN', { maximumFractionDigits: 0 }).format(tot.after)} against outstanding ₹{new Intl.NumberFormat('en-IN', { maximumFractionDigits: 0 }).format(fac.outstanding || 0)}{fac.outstanding && Math.abs(tot.after - fac.outstanding) > 1 ? <span style={{ color: C.warn }}> — they differ by ₹{new Intl.NumberFormat('en-IN', { maximumFractionDigits: 0 }).format(tot.after - fac.outstanding)}</span> : ''}. All rows: principal ₹{new Intl.NumberFormat('en-IN', { maximumFractionDigits: 0 }).format(tot.p)}, interest ₹{new Intl.NumberFormat('en-IN', { maximumFractionDigits: 0 }).format(tot.i)}.</div>
     <Tbl head={['#', 'Due date', 'Principal', 'Interest', 'Total', 'Note', '']} num={[4]} maxHeight={520}>
       {list.map((r, i) => <tr key={i}><td style={S.td}>{i + 1}</td>
         <td style={S.td}><input type="date" disabled={!can} style={S.input} value={r.dueDate || ''} onChange={e => set(i, 'dueDate', e.target.value)} /></td>
