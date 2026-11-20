@@ -962,6 +962,10 @@ function RecurringExpenseReport({ data, loading, branch, onBranchChange, head, o
 }
 
 function RentReport({ data, loading, branch, onBranchChange, vendor, onVendorChange, vendorCategory, onVendorCategoryChange, subCategory, onSubCategoryChange, fy, onFYChange, quarter, onQuarterChange, onRowClick }) {
+  // Branch expand/collapse: branch name → true (open) / false (closed).
+  // A branch not in the map is closed, except when it is the only branch shown.
+  const [openBranches, setOpenBranches] = useState({});
+
   const allMonths            = data?.months               || [];
   const allRows              = data?.rows                 || [];
   const allBranches          = data?.all_branches         || ['All Branches'];
@@ -1056,6 +1060,15 @@ function RentReport({ data, loading, branch, onBranchChange, vendor, onVendorCha
     else groups.push({ branch: row.branch_full, rows: [row] });
   }
 
+  const isBranchOpen = br => (br in openBranches ? openBranches[br] : groups.length === 1);
+  const toggleBranch = br => setOpenBranches(p => ({ ...p, [br]: !isBranchOpen(br) }));
+  const setAllBranches = open => setOpenBranches(p => {
+    const next = { ...p };
+    for (const g of groups) next[g.branch] = open;
+    return next;
+  });
+  const openCount = groups.filter(g => isBranchOpen(g.branch)).length;
+
   const grpCell = { ...VCS.td, ...VCS.num, fontWeight: 700 };
   const totCell = { ...grpCell, paddingTop: '0.75rem' };
 
@@ -1134,6 +1147,23 @@ function RentReport({ data, loading, branch, onBranchChange, vendor, onVendorCha
             </div>
           )}
 
+          {/* ── Expand / Collapse controls ── */}
+          {groups.length > 0 && (
+            <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem', flexWrap: 'wrap' }}>
+              <span style={{ color: '#5D6C7B', fontSize: '0.75rem' }}>
+                {openCount} of {groups.length} branch{groups.length !== 1 ? 'es' : ''} expanded · click a branch row to open or close it
+              </span>
+              <button onClick={() => setAllBranches(true)} disabled={openCount === groups.length}
+                style={{ ...VCS.clearBtn, opacity: openCount === groups.length ? 0.5 : 1, cursor: openCount === groups.length ? 'default' : 'pointer' }}>
+                Expand all
+              </button>
+              <button onClick={() => setAllBranches(false)} disabled={openCount === 0}
+                style={{ ...VCS.clearBtn, opacity: openCount === 0 ? 0.5 : 1, cursor: openCount === 0 ? 'default' : 'pointer' }}>
+                Collapse all
+              </button>
+            </div>
+          )}
+
           {/* ── Pivot Table ── */}
           <div style={{ overflowX: 'auto' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem', minWidth: 900 }}>
@@ -1162,11 +1192,17 @@ function RentReport({ data, loading, branch, onBranchChange, vendor, onVendorCha
                   const brColor   = branchColorMap[br] || '#64748b';
                   const bAgrTotal = rows.reduce((s, r) => s + months.reduce((ms, m) => ms + (r.agreed_monthly?.[m.key] || 0), 0), 0);
                   const bActTotal = rows.reduce((s, r) => s + months.reduce((ms, m) => ms + (r.monthly[m.key] || 0), 0), 0);
+                  const isOpen    = isBranchOpen(br);
                   return (
                     <React.Fragment key={br}>
-                      {/* Branch row */}
-                      <tr style={VCS.grpRow}>
+                      {/* Branch row — click to expand / collapse its offices */}
+                      <tr style={{ ...VCS.grpRow, cursor: 'pointer' }}
+                        role="button" tabIndex={0} aria-expanded={isOpen}
+                        title={isOpen ? 'Click to collapse' : 'Click to expand'}
+                        onClick={() => toggleBranch(br)}
+                        onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleBranch(br); } }}>
                         <td colSpan={2} style={{ ...VCS.td, fontWeight: 700, color: brColor, whiteSpace: 'nowrap' }}>
+                          <span style={{ display: 'inline-block', width: 14, color: '#475569', fontSize: '0.7rem' }}>{isOpen ? '▼' : '▶'}</span>
                           <span style={{ ...VCS.dot, background: brColor }} />
                           {br}
                           <span style={VCS.count}>({rows.length} developer{rows.length !== 1 ? 's' : ''})</span>
@@ -1180,8 +1216,8 @@ function RentReport({ data, loading, branch, onBranchChange, vendor, onVendorCha
                         {sumCells('total', bAgrTotal, bActTotal, grpCell)}
                       </tr>
 
-                      {/* Office rows */}
-                      {rows.map((row, i) => {
+                      {/* Office rows (only when the branch is expanded) */}
+                      {isOpen && rows.map((row, i) => {
                         const rowActTotal = months.reduce((s, m) => s + (row.monthly[m.key] || 0), 0);
                         const rowAgrTotal = months.reduce((s, m) => s + (row.agreed_monthly?.[m.key] || 0), 0);
                         const hasAgr = months.some(m => row.agreed_monthly?.[m.key] != null);
