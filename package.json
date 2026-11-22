@@ -9,7 +9,8 @@
         "test:bill-booking": "node --test --no-warnings --test-concurrency=1 --test-reporter=spec \"server/bill-booking/tests/*.test.js\"",
         "test:gstr2b": "node --test --no-warnings --test-concurrency=1 --test-reporter=spec \"server/gstr2b/tests/*.test.js\"",
         "test:fin-reporting": "node --test --no-warnings --test-concurrency=1 --test-reporter=spec \"server/fin-reporting/tests/*.test.js\"",
-        "test:compliance2": "node --test --no-warnings --test-concurrency=1 --test-reporter=spec \"server/compliance2/tests/*.test.js\""
+        "test:compliance2": "node --test --no-warnings --test-concurrency=1 --test-reporter=spec \"server/compliance2/tests/*.test.js\"",
+        "test:tds26as": "node --test --no-warnings --test-concurrency=1 --test-reporter=spec \"server/tds26as/tests/*.test.js\""
     },
     "devDependencies": {
         "nodemon": "^3.0.2"

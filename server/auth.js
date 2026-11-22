@@ -96,6 +96,15 @@ const MODULES = {
       fs_inputs: 'Management inputs (budgets, seats, schedules, covenants, share data, thresholds)',
     },
   },
+  // 26AS Reconciliation: seen only when ticked; each right ticked one by one (see server/tds26as/index.js `rights`)
+  tds26as:     {
+    label: '26AS Reconciliation',
+    sections: {
+      t26_prepare: 'Prepare (Zoho sync, upload Form 26AS statements, re-run reconciliation)',
+      t26_review:  'Review (final status, remarks, attachments, carry forward, client mapping, owners)',
+      t26_config:  'Configure (entities, PAN, Zoho organisation, TDS Receivable ledgers, settings)',
+    },
+  },
   budget:      { label: 'Budget vs. Actual', sections: {} },
   portal:      { label: 'Finance Portal', sections: {} },
   activity:    { label: 'Activity Tracker', sections: {} },

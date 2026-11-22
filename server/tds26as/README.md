@@ -1,0 +1,206 @@
+# 26AS Reconciliation
+
+TDS receivable booked in Zoho Books against the credit shown in Form 26AS, per legal entity and period.
+
+- **Where:** sidebar → **26AS Reconciliation**, directly below Financial Statements.
+- **Page:** `client/src/pages/Tds26asReco.js` plus `client/src/pages/tds26as/`.
+- **Server:** `server/tds26as/`, mounted at `/api/tds26as` in `server/index.js`.
+
+It answers three questions for a chosen entity and period:
+
+1. How much TDS receivable is booked in Zoho, and how much credit does Form 26AS show?
+2. Which differences come from rounding, timing, a wrong amount or a missing entry?
+3. Which clients need follow-up, for how much, and on which transactions?
+
+**TDS difference = Zoho TDS receivable − 26AS tax deposited.** A positive difference means the books show more TDS than the statement credits. The 26AS tax deducted is shown separately.
+
+## Access
+
+| Right (User Settings → 26AS Reconciliation) | Allows |
+|---|---|
+| module ticked | viewing the dashboard, reports, exports, statements and mapping |
+| `t26_prepare` Prepare | Zoho sync, uploading statements, re-running the reconciliation |
+| `t26_review` Review | final status, remarks, references and attachments, carry forward, reviewer links, client mapping, owners |
+| `t26_config` Configure | entities, ledgers, settings, schedule |
+
+- The module is shown only to admins and to users ticked for it (`grantOnly`).
+- Each right is ticked one by one.
+- An admin can limit a user to some entities (Settings & audit → Access by entity).
+
+## Sources
+
+### Zoho Books (read-only)
+
+The Zoho client has GET only (`server/gstr2b/lib/zohoRead.js`). The fields below were verified live on DevX on 22 Nov 2026.
+
+| What | Call | Fields used |
+|---|---|---|
+| **Control amount** | `GET /chartofaccounts/transactions?account_id&date.start&date.end`, per mapped TDS Receivable ledger | `categorized_transaction_id`, `transaction_type` (invoice / customer_payment / journal / creditnote …), `transaction_id` (**empty for customer_payment**), `transaction_date`, `customer_id`, `payee`, `description`, `entry_number` (the invoice number on invoice and payment rows), `debit_amount`, `credit_amount` |
+| Invoice | `GET /invoices/{id}` | `sub_total` (basic), `tax_total` (GST), `total` (net of TDS), `tds_amount`, `tds_percent`, `tds_summary[].tds_name`, and the client's TAN when kept in a custom field (DevX: `cf_organization_tan_number`) |
+| Payment | `GET /customerpayments/{id}` | `invoices[].tax_amount_withheld`, `amount_applied`, `total`. The payment behind a posting is found by customer, date and invoice number. The dashboard's central `customer_payments_fy` cache is used where it covers the month. |
+| Journal | `GET /journals/{id}` | `line_items[].customer_id`. The TDS line often has no customer, but the receivable line does. The notes and reference supply invoice numbers. |
+
+How postings become Zoho entries (`lib/booksModel.js`):
+
+- **The ledger posting is the amount.** Documents only add detail, so one TDS amount is counted once.
+- **Journal lines:**
+  - Lines on mapped ledgers are netted per customer and section.
+  - A journal that only moves TDS between the entity's own TDS ledgers nets to zero. It is listed as a transfer and not counted.
+  - A journal whose customer cannot be identified is **unallocated** and shown separately.
+- **Comparable base:**
+  - TDS booked on an invoice uses the invoice basic value.
+  - A payment uses the share of the invoice it settles: (applied + TDS) ÷ gross.
+
+**Sync** (`lib/booksSync.js`), started with "Sync the selected period":
+
+- **Ledger listing:** for each ledger, windows of up to three months inside one quarter. A window with more than one page is split.
+- **Fresh data:** each listing replaces what was stored, so edits and deletions in Zoho are picked up.
+- **Details:** fetched only for new or changed documents (incremental).
+- **Daily allowance:** this module's own allowance of Zoho calls per day (20,000).
+- **PC schedule:** the office PC re-reads the current financial year daily (default 13:40 IST) for entities whose first sync is done. The online copy has no scheduler.
+
+> **Zoho limit (learned 22 Nov 2026):** the account-transactions **report** has its own per-minute limit, well below the 150-a-minute limit of normal APIs.
+>
+> - About 50 calls in 38 seconds got that report blocked for 60 minutes (code 43). Ordinary APIs kept working.
+> - Report calls are therefore paced separately: `sync.ledger_rate_per_min`, default 25 a minute.
+> - After a block the module records `blocked_until` and does not call the report again before then.
+> - Other dashboard features use the same report (Branch P&L prefetch, RPT loan ledgers). Do not raise the pace.
+
+### Form 26AS (`lib/parse26as.js`)
+
+Accepted formats:
+
+- PDF from the e-filing portal or TRACES, including password-protected files (a password prompt; the password is never stored)
+- The TRACES text export (`^`-separated), as `.txt` or inside the ZipCrypto-protected `.zip`
+- Excel or CSV: the text file split into columns, or a flat sheet with its own headings
+
+How it is read:
+
+- **Part read:** only **PART-I** (Details of Tax Deducted at Source).
+- **Columns:** found by their headings, never by position alone.
+- **Source kept:** every row keeps the file, the line, sheet row or PDF page, and the text as printed.
+- **Checked against a published statement:** the PDF layout and the booking-status legend (U, M, P, F, O, Z). Two layout facts worth knowing: dates print as `15-Apr-2026`, and a date can be printed in two pieces.
+
+Before import, the preview validates:
+
+- the PAN against the selected entity (a mismatch blocks the import)
+- the statement period and date
+- the row count
+- deductor control totals against their rows
+- unreadable rows and missing fields
+
+Versions (`lib/statements.js`):
+
+- **Version in use:** one per entity and financial year, the one with the latest statement date.
+- **Same file again:** a re-upload of the same bytes changes nothing.
+- **Revised statement:** replaces the earlier credits; credits are not added up. The preview shows the rows added, removed and changed.
+- **Credit key:** entity + FY + TAN + section + transaction date + amount paid + tax deducted + occurrence. A revised deposit keeps the credit and its review decisions.
+
+## Reconciliation (`lib/match.js`)
+
+Cut-off: Zoho entries by **TDS posting date**, 26AS credits by **transaction date**. Invoice, payment and booking dates are shown separately.
+
+| Step | Rule |
+|---|---|
+| 0 | Reviewer links: pairs or groups a reviewer confirmed, with both sides inside the period. Carry-forward settlements consume their credits first. |
+| 1 | **Identify the client** through the entity's approved mapping (Client mapping): one client = Zoho customer(s) + TAN(s). Unmapped → Need to Check. A TAN can be marked "no Zoho customer". |
+| 2 | **Transaction-wise:** TDS equal within ₹2 to the 26AS tax deducted or deposited. Among equal candidates, an exact amount, the section family (194I(a)/(b) → 194I), the base (amount paid vs Books base) or a clearly closer date decides. Otherwise → **Need to Check — ambiguous**. |
+| 3 | **Client total:** a unique subset (one credit = several entries, or the reverse), then the remaining totals per client. Method "Client total"; invoice attribution stays open. |
+| 4 | **Investigate:** first, timing (a credit or booking of the same client in another period → **Need to Check — timing**, with both periods shown and the other-period amount kept out of this period's totals). Then leftovers paired on evidence → **Not Matched**. The rest are one-sided: **Not in 26AS / Not in Zoho Books** only when the other source covers the date, otherwise **Need to Check — coverage gap**. A quarter counts as covered when its statement is dated on or after the deductors' filing date (31 Jul / 31 Oct / 31 Jan / 31 May). |
+
+Each source amount is used once. The ₹2 tolerance applies once per match or group.
+
+Statuses:
+
+| Status | When |
+|---|---|
+| Matched | difference exactly ₹0 |
+| Matched Rounding Diff. | difference above ₹0 and up to ₹2.00 inclusive |
+| Not Matched | both sides identified, difference above ₹2 |
+| Not in 26AS | booked in Zoho only |
+| Not in Zoho Books | credited in 26AS only |
+| Need to Check | timing, ambiguous, unmapped, unallocated, coverage gap |
+| Carry Forward | reviewer-approved |
+
+**Likely reason** comes with its figures. Examples: short booking in Zoho, short deduction by the client, deducted > deposited, base including GST, part of the invoice, insufficient evidence. Responsibility is named only where the record shows it: a 26AS row whose deducted amount exceeds the deposit names the deductor.
+
+**Review** (`lib/review.js`):
+
+- **What a reviewer records:** final status, remarks, references and attachments.
+- **History:** every save is kept, with the system status at that time.
+- **Confirmed non-deposit:** needs evidence (a description plus a reference or attachment).
+- **Carry Forward:** records the origin, balance, target quarter or year, and reason. A later credit (or booking) of the same client and amount, from the target period on, settles the item once. The original period keeps its picture. A reviewer can also close an item with a reason.
+
+## Reports (`lib/reports.js`, Excel via `lib/exporter.js`)
+
+All reports filter by entity, period, client, TAN, section and status, and export to Excel.
+
+- **Dashboard:**
+  - figures: Zoho TDS receivable (checked against the ledger postings), 26AS deducted and deposited, matched credit, rounding difference, open on each side, carry-forward balance
+  - every figure drills down to its items
+  - the bridge ties Zoho to 26AS deposited (unexplained = ₹0.00)
+  - coverage panel: statement dates, last Zoho sync, gaps
+- **Client follow-up (priority report):**
+  - **follow-up amount** = credit missing + deducted not deposited + other short credit + confirmed non-deposit, from **open** items only
+  - shown separately: excess credit (never netted), subsequent-period credit, needs review first
+  - also: owner, remarks, oldest open date
+  - rows for unmapped customers or deductors and unallocated postings, so the totals tie to both sources
+- **Transactions:** both source references, dates, base values, TDS amounts, signed difference, method, system and final status, likely reason. A side-by-side drawer shows the comparison.
+- **Zoho corrections:**
+  - 26AS credits missing from Zoho, with candidate invoices
+  - TDS amount errors and TDS booked twice
+  - customer mapping (TAN on the invoice ≠ deductor)
+  - ledger allocation (another FY's ledger, section differences)
+  - unallocated journals
+  - links to the Zoho records
+- **Carry forward:** quarter-wise or year-wise opening, additions, credits identified later, closures and closing balance, with drill-down from each item to its origin and settlement.
+
+## Storage
+
+Store keys start with `t26_`:
+
+- Office PC: files in `server/tds26as/data/`
+- Online: Neon `kv_store`
+
+Every key holding entity data carries the entity id: `ledger_<entity>_<fy>`, `docs_<entity>`, `sync_<entity>`, `clients_<entity>`, `review_<entity>`, `cf_<entity>`. Statements are `stmt_idx` and `stmt_<id>`.
+
+Original files (statements and attachments):
+
+- Office PC: `server/tds26as/files/<sha256>`
+- Online: private Blob `tds26as/<sha256>`
+
+Both folders are git-ignored. The audit trail is hash-chained (`audit_YYYY_MM`), and Settings & audit → Verify checks the chain.
+
+## Setting up
+
+1. **Map an entity.**
+   - Go to Settings & audit → Entities → Add an entity.
+   - Click **Load my Zoho organisations** and choose the organisation.
+   - Enter the legal name and the **PAN** printed on its Form 26AS.
+   - Click **Find ledgers in Zoho** and tick every TDS Receivable ledger: 194C, 194I, 194J, 194A, 194H, 194Q and the year-wise "TDS Receivable U/s. … F.Y. …" ledgers.
+   - Save, then click **Check Zoho access**.
+2. **First Zoho sync.** On Statements & Zoho sync, choose the financial year above and click **Sync the selected period**. Keep the tab open until it says finished.
+3. **Upload the first statement.**
+   - On the same tab, choose the PDF, text or ZIP file.
+   - Click **Preview** and enter the password if asked.
+   - Read the checks, then click **Import this statement**.
+4. **Map clients.** On Client mapping, click **Approve all … backed by the TAN on Zoho invoices**, then review the name suggestions and the unmapped deductors.
+5. **Export the follow-up report.** On Client follow-up, set the filters and click **Export to Excel**.
+
+Admins can load **demo data** (Settings & audit) to see every case first. It is synthetic, labelled on every screen, and removable.
+
+## Tests
+
+`npm run test:tds26as` (33 tests):
+
+- parser: text, Excel, CSV, PDF, protected PDF, protected ZIP
+- every acceptance case on the demo scenario
+- sync on a fake Zoho with the live response shapes, the report pacing and the block handling
+- the HTTP routes: rights, entity limits, upload, review, export, audit
+
+## Not yet validated with live data
+
+- **No real company Form 26AS has been imported.** The layout was checked on a published individual's statement whose Part I was empty. The TRACES text and Excel layouts are built from the documented format.
+- **Tax Year 2026-27 (Income-tax Act, 2025):** Form 168 and section 393 table codes have not been seen. Unknown codes are kept as printed and can be mapped under Settings → Section aliases.
+- **Zoho web links:** invoice links use the same pattern as the dashboard's bill links. The links for payments, journals and credit notes are not verified. Credit notes are not linked to their invoice.
+- **Online (Vercel):** the sync runs in steps while the page is open; there is no online scheduler. Uploads are limited to 4 MB.

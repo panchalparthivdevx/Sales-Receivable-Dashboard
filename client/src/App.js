@@ -29,6 +29,7 @@ import ComplianceDashboard from './pages/ComplianceDashboard';
 import Compliance2 from './pages/Compliance2';
 import BillBooking from './pages/BillBooking';
 import Gstr2bReco from './pages/Gstr2bReco';
+import Tds26asReco from './pages/Tds26asReco';
 
 class ErrorBoundary extends React.Component {
   constructor(props) { super(props); this.state = { error: null }; }
@@ -106,6 +107,8 @@ function AppInner() {
           {page === 'portal'       && <FinancePortal />}
           {page === 'activity'     && <ActivityTracker />}
           {page === 'fin-stmt'     && <FinancialStatements />}
+          {/* Granted explicitly (the server checks the same) */}
+          {page === 'tds26as' && (user.role === 'admin' || user.permissions?.tds26as?.enabled === true) && <Tds26asReco />}
           {page === 'budget'       && <BudgetVsActual />}
           {page === 'admin'        && user.role === 'admin'     && <AdminPage />}
           {page === 'sync-monitor' && user.role === 'admin'     && <SyncMonitor />}

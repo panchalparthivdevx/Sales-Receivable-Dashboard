@@ -16170,6 +16170,19 @@ finReporting.init({
 });
 app.use('/api/fin-reporting', finReporting);
 
+// ─── 26AS Reconciliation (Zoho TDS receivable ledgers, read-only × uploaded Form 26AS statements, per legal entity) ─
+// Self-contained module — see server/tds26as/README.md. It only READS from Zoho Books and keeps its own data; customer payments and
+// invoices are taken from an organisation's central sync data when that exists (DevX's engine, or an MSME company engine by Zoho org).
+const tds26as = require('./tds26as');
+tds26as.init({
+  readSynced: async (orgId, entity) => {
+    if (String(orgId) === String(process.env.ZOHO_ORG_ID)) return _devxSyncEngine.readSyncedData(entity);
+    const co = Object.values(companyCtx.COMPANIES).find(c => String(c.orgId) === String(orgId));
+    return co && _companyEngines[co.id] ? _companyEngines[co.id].readSyncedData(entity) : null;
+  },
+});
+app.use('/api/tds26as', tds26as);
+
 // ─── Serve React build (must be after all API routes) ─────────────────────────
 
 const buildPath = path.join(__dirname, '..', 'client', 'build');
@@ -16233,6 +16246,8 @@ db.initDB()
     setTimeout(() => billBooking.startScheduler(), 150000);
     // GSTR-2B Reco: its own Zoho sync at the hours set in its Settings (default 1:20, 3:20, 6:20, 9:20 PM IST; not the shared sync schedule)
     setTimeout(() => gstr2b.startScheduler(), 170000);
+    // 26AS Reconciliation: a daily "changes" sync of the current financial year for entities whose first load was done (Settings → Schedule)
+    setTimeout(() => tds26as.startScheduler(), 180000);
     // MSME companies: own scheduler (a few minutes after DevX) and own first full sync. A failure
     // there is logged and stays in that company's sync status — DevX is not affected.
     for (const [co, eng] of Object.entries(_companyEngines)) {

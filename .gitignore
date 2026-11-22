@@ -29,6 +29,9 @@ server/bill-booking/data/
 # GSTR-2B Reco: Books documents synced from Zoho, uploaded GSTR-2B statements (originals), reconciliation results, audit trail
 server/gstr2b/files/
 server/gstr2b/data/
+# 26AS Reconciliation: Zoho TDS postings, uploaded Form 26AS statements (originals), mappings, review decisions, audit trail
+server/tds26as/data/
+server/tds26as/files/
 # Financial Reporting: imported statement versions, adjustments, decisions, management inputs
 server/fin-reporting/data/
 # Compliance Dashboard Vr.2.0: entities, tasks, audit trail and the encrypted evidence files (confidential, never in git)

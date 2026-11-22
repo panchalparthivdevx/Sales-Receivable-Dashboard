@@ -4,7 +4,7 @@ import {
   Landmark, Users, ShieldCheck, BarChart3,
   ChevronLeft, ChevronRight, ChevronDown, GitMerge, ClipboardList,
   Settings, LogOut, CreditCard, TrendingDown, Inbox, Activity, BookOpen, Target, BadgeCheck, RefreshCw, Layers, CheckSquare,
-  ScanText, GitCompareArrows,
+  ScanText, GitCompareArrows, FileCheck2,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 
@@ -35,6 +35,8 @@ const NAV = [
   // grantOnly: shown only to admins and to users ticked for it in User Settings
   { id: 'compliance2',  label: 'Compliance Dashboard Vr.2.0', icon: ShieldCheck, live: true, module: 'compliance_v2', grantOnly: true },
   { id: 'fin-stmt',     label: 'Financial Statements',  icon: BookOpen,     live: true,  module: 'fin_stmt'    },
+  // grantOnly: shown only to admins and to users ticked for it in User Settings
+  { id: 'tds26as',      label: '26AS Reconciliation',   icon: FileCheck2,   live: true,  module: 'tds26as', grantOnly: true },
   { id: 'budget',       label: 'Budget vs. Actual',     icon: Target,       live: true,  module: 'budget'      },
   { id: 'loan',         label: 'Loan Module',           icon: CreditCard,   live: true,  module: 'loan'        },
   { id: 'pocm',         label: 'POCM Dashboard',        icon: TrendingDown, live: true,  module: 'pocm'        },

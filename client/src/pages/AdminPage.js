@@ -80,6 +80,14 @@ const MODULES = {
       fs_inputs: 'Management inputs (budgets, seats, schedules, covenants, share data, thresholds)',
     },
   },
+  tds26as: {
+    label: '26AS Reconciliation',
+    sections: {
+      t26_prepare: 'Prepare (Zoho sync, upload Form 26AS statements, re-run reconciliation)',
+      t26_review:  'Review (final status, remarks, attachments, carry forward, client mapping, owners)',
+      t26_config:  'Configure (entities, PAN, Zoho organisation, TDS Receivable ledgers, settings)',
+    },
+  },
   budget:       { label: 'Budget vs. Actual',          sections: {} },
   portal:       { label: 'Finance Portal',             sections: {} },
   activity:     { label: 'Activity Tracker',           sections: {} },
@@ -95,7 +103,7 @@ function emptyPerms() {
 }
 
 // Edit rights (not just viewing): ticked one by one — never by "All" or a new user's default access
-const GRANT_ONLY = new Set(['vpr_purchase_team', 'vpr_accounts_team', 'bb_review', 'bb_create_draft', 'bb_config', 'g2b_prepare', 'g2b_review', 'g2b_approve', 'g2b_config', 'fs_import', 'fs_adjust', 'fs_inputs']);
+const GRANT_ONLY = new Set(['vpr_purchase_team', 'vpr_accounts_team', 'bb_review', 'bb_create_draft', 'bb_config', 'g2b_prepare', 'g2b_review', 'g2b_approve', 'g2b_config', 'fs_import', 'fs_adjust', 'fs_inputs', 't26_prepare', 't26_review', 't26_config']);
 
 function fullPerms() {
   const p = {};
