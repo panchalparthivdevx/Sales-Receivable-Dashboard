@@ -124,6 +124,7 @@ const PUBLIC_API = new Set([
   'GET /api/cron/pl',
   'GET /api/cron/gstr2b',
   'GET /api/cron/gstr2b-recheck',
+  'GET /api/cron/fin-gl',
   // Mailbox sign-in returns here from Microsoft / Google; it checks its own signed state
   'GET /api/bill-booking/oauth/callback',
 ]);
@@ -16169,6 +16170,10 @@ finReporting.init({
   },
 });
 app.use('/api/fin-reporting', finReporting);
+// Financial Statements: the Zoho Books ledger behind the provisional statements is read every hour (minute 45, India time) —
+// on the office PC by an in-process timer, on Vercel by the cron below (vercel.json)
+if (!IS_VERCEL) finReporting.startScheduler();
+app.get('/api/cron/fin-gl', cronAuth, (req, res) => finReporting.cronRun(req, res));
 
 // ─── Serve React build (must be after all API routes) ─────────────────────────
 

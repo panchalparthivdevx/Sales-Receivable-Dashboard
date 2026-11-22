@@ -54,22 +54,28 @@ function notesView(ctx, b, periodIds) {
     // two notes of one workbook can point to the same line (e.g. two notes numbered 12): the one whose total agrees
     // with the statement line comes first, then the usual source priority
     const agrees = (n, p) => { const t = n.items.filter(i => i.total).pop()?.v[p]; const st = stmtOf(p); return t && t.v != null && st != null && Math.abs(t.v - st) < 0.02 ? 1 : 0; };
-    const pick = p => { const withP = cands.filter(n => n.items.some(i => i.v[p])); return withP.length ? withP.sort((x, y) => agrees(y, p) - agrees(x, p) || noteRank(ctx, y, p) - noteRank(ctx, x, p))[0] : null; };
+    const zohoMode = ctx.mode === 'zoho';
+    const fromList = (list, p) => { const withP = list.filter(n => n.items.some(i => i.v[p])); return withP.length ? withP.sort((x, y) => agrees(y, p) - agrees(x, p) || noteRank(ctx, y, p) - noteRank(ctx, x, p))[0] : null; };
+    const wbNotes = cands.filter(n => !n.zoho), liveNotes = cands.filter(n => n.zoho && n.role === 'live'), zNotes = cands.filter(n => n.zoho && n.role === 'zoho');
+    const pick = p => (zohoMode ? fromList(zNotes, p) : fromList(wbNotes, p));
     const chosen = {};
     for (const p of periodIds) { const n = pick(p); if (n) chosen[p] = n; }
     // a flow period no workbook has a note for (e.g. Q2 when the workbooks give Q1 and H1) is derived item by item from
     // the notes of the periods it is made of — shown as derived, never as reported; balance-sheet dates are never derived
     const derivedP = {};
     for (const p of periodIds) {
-      if (chosen[p] || P.fromId(p)?.type === 'BS') continue;
+      if (chosen[p] || P.fromId(p)?.type === 'BS' || zohoMode) continue;
       for (const d of M.derivationsFor(p)) {
         const parts = [...d.plus.map(q => ({ q, sign: 1 })), ...d.minus.map(q => ({ q, sign: -1 }))].map(x => ({ ...x, n: pick(x.q) }));
         if (parts.every(x => x.n)) { derivedP[p] = { f: d.f, parts }; break; }
       }
     }
+    if (!zohoMode) for (const p of periodIds) if (!chosen[p] && !derivedP[p]) { const n = fromList(liveNotes, p) || fromList(zNotes, p); if (n) chosen[p] = n; }
     if (!Object.keys(chosen).length && !Object.keys(derivedP).length) continue;
     // rows follow the note of the latest workbook; items only in other workbooks' notes go in above the total
-    const primaryNote = Object.values(chosen).sort((x, y) => (ctx.ix.fileDate[y.f] || '').localeCompare(ctx.ix.fileDate[x.f] || ''))[0] || Object.values(derivedP)[0].parts[0].n;
+    // rows follow the note of the latest workbook (a Zoho note only when no workbook note is shown)
+    const shown = Object.values(chosen);
+    const primaryNote = (shown.filter(n => !n.zoho).length ? shown.filter(n => !n.zoho) : shown).sort((x, y) => (ctx.ix.fileDate[y.f] || '').localeCompare(ctx.ix.fileDate[x.f] || ''))[0] || Object.values(derivedP)[0].parts[0].n;
     const kindOf = it => `${it.key}|${it.total ? 'T' : it.subhead ? 'S' : 'I'}`;
     const rows = [];
     const byKey = new Map();
@@ -96,7 +102,7 @@ function notesView(ctx, b, periodIds) {
         if (it.subhead && n !== primaryNote) continue;      // other workbooks' headings would only repeat empty
         const row = it === closing && mainTotal && !mainTotal.cells[p] && !byKey.has(kindOf(it)) ? mainTotal : addRow(it, p);
         const c = it.v[p];
-        if (c) row.cells[p] = { v: c.st === 'ok' || c.st === 'dash' ? c.v : null, st: c.st, err: c.err, src: { f: n.f, sh: n.sheet, c: c.c, note: n.num, fx: c.fx } };
+        if (c) row.cells[p] = { v: c.st === 'ok' || c.st === 'dash' ? c.v : null, st: c.st, err: c.err, src: { f: n.f, sh: n.sheet, c: c.c, note: n.num, fx: c.fx, ...(n.zoho ? { zoho: 1, role: c.role || n.role, asAt: c.asAt || null } : {}) } };
       }
     }
     const gaps = {};
@@ -136,7 +142,7 @@ function notesView(ctx, b, periodIds) {
       text: primaryNote.text });
   }
   // notes not tied to a statement line (disclosures, sub-schedules) from the latest workbook of this basis
-  const latestF = [...new Set(notes.map(n => n.f))].sort((a, c) => (ctx.ix.fileDate[c] || '').localeCompare(ctx.ix.fileDate[a] || ''))[0];
+  const latestF = [...new Set(notes.filter(n => !n.zoho).map(n => n.f))].sort((a, c) => (ctx.ix.fileDate[c] || '').localeCompare(ctx.ix.fileDate[a] || ''))[0];
   const other = notes.filter(n => !n.lines?.length && n.f === latestF && !n.hid).map(n => ({ num: n.num, title: n.title, sheet: n.sheet, f: n.f, periods: n.periods, items: n.items.slice(0, 80), text: n.text }));
   const narrative = ctx.ix.version.narrative.filter(nn => nn.b === b && nn.f === latestF);
   return { basis: b, periods: periodIds.map(P.fromId), groups, other, narrative, narrativeFile: ctx.ix.version.files[latestF]?.name };

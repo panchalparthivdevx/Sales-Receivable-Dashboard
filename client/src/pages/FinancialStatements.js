@@ -10,6 +10,7 @@ import PerformanceTab from './finstmt/PerformanceTab';
 import RatiosTab from './finstmt/RatiosTab';
 import InputsTab from './finstmt/InputsTab';
 import ValidationTab from './finstmt/ValidationTab';
+import AccountMappingTab from './finstmt/AccountMappingTab';
 import { BranchTab, ArTab, ApTab, CashTab, DebtTab, CapexTab, ClientTab, ComplianceTab } from './finstmt/OpsTabs';
 
 // ─── Period definitions (5 periods, configurable) ─────────────────────────────
@@ -1425,8 +1426,10 @@ export default function FinancialStatements() {
   const [fsStatus, setFsStatus] = useState(null);
   const [periodsInfo, setPeriodsInfo] = useState(null);
   const [source, setSource]     = useState({ bs: 'imported', pl: 'imported', notes: 'imported' });
-  const [F, setF] = useState({ basis: 'SA', mode: 'original', unit: 'lakh', fy: null, period: null, cmp: 'auto', budget: '', branch: '', display: 'amount', withAdj: false });
+  const [F, setF] = useState({ basis: 'SA', mode: 'original', source: 'final', unit: 'lakh', fy: null, period: null, cmp: 'auto', budget: '', branch: '', display: 'amount', withAdj: false });
 
+  // "Provisional – Zoho Books" asks every report for Zoho's own figures; "Final – Workbook" for the workbooks (open periods provisional)
+  const Fx = useMemo(() => ({ ...F, mode: F.source === 'zoho' ? 'zoho' : F.mode }), [F]);
   const [budgetVersions, setBudgetVersions] = useState([]);
   useEffect(() => { if (['cfo', 'performance'].includes(tab)) fsApi.budgetVersions().then(r => setBudgetVersions(r.versions || [])).catch(() => setBudgetVersions([])); }, [tab]);
   // only the bases the active import holds can be chosen (the import can be standalone only)
@@ -1437,7 +1440,7 @@ export default function FinancialStatements() {
   useEffect(() => { reloadStatus(); }, [reloadStatus]);
   useEffect(() => {
     if (!fsStatus?.active) { setPeriodsInfo(null); return; }
-    fsApi.periods(F.basis, F.mode).then(pi => {
+    fsApi.periods(F.basis, Fx.mode).then(pi => {
       setPeriodsInfo(pi);
       setF(f => {
         const ids = new Set(pi.PL.available.map(p => p.id));
@@ -1446,7 +1449,7 @@ export default function FinancialStatements() {
         return { ...f, period: latestQ?.id || pi.PL.available[0]?.id, fy: latestQ?.fy || pi.PL.available[0]?.fy };
       });
     }).catch(() => setPeriodsInfo(null));
-  }, [fsStatus?.active?.id, F.basis, F.mode]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [fsStatus?.active?.id, F.basis, Fx.mode]); // eslint-disable-line react-hooks/exhaustive-deps
   // keep the chosen period inside the chosen financial year
   useEffect(() => {
     if (!periodsInfo || !F.fy) return;
@@ -1605,7 +1608,7 @@ export default function FinancialStatements() {
   const SourceSwitch = ({ k, other }) => (
     <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
       <span style={{ fontSize: '0.72rem', color: '#5D6C7B', fontWeight: 600 }}>SOURCE</span>
-      {[['imported', `Published results workbooks${imported ? '' : ' (not imported yet)'}`], ['legacy', other]].map(([v, l]) => (
+      {[['imported', `Financial statements — final workbooks${periodsInfo?.zoho ? ' + provisional Zoho Books' : ''}${imported ? '' : ' (not imported yet)'}`], ['legacy', other]].map(([v, l]) => (
         <button key={v} disabled={v === 'imported' && !imported} onClick={() => setSource(s => ({ ...s, [k]: v }))} style={{ ...S.tab(source[k] === v && (v !== 'imported' || imported)), opacity: v === 'imported' && !imported ? 0.5 : 1 }}>{l}</button>
       ))}
       {!imported && <button onClick={goImport} style={S.btn('primary', true)}>Import the workbooks</button>}
@@ -1619,7 +1622,7 @@ export default function FinancialStatements() {
         <div>
           <h1 style={S.h1}>Financial Statements</h1>
           <div style={{ fontSize: '0.75rem', color: '#5D6C7B', marginTop: 3 }}>
-            SEBI-format statements imported from the published results workbooks, notes, comparisons, ratios and CFO analytics{fsStatus.active ? ` · import ${fsStatus.active.id} (${new Date(fsStatus.active.builtAt).toLocaleDateString('en-IN')})` : ''}
+            SEBI-format statements from the final results workbooks, with open periods provisional from Zoho Books{fsStatus.active ? ` · import ${fsStatus.active.id} (${new Date(fsStatus.active.builtAt).toLocaleDateString('en-IN')})` : ''}{periodsInfo?.zoho ? ` · Zoho Books accounting cut-off ${new Date(periodsInfo.zoho.cutoff + 'T00:00:00').toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}, last sync ${periodsInfo.zoho.lastSuccess ? new Date(periodsInfo.zoho.lastSuccess).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—'}` : ''}
           </div>
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -1656,16 +1659,16 @@ export default function FinancialStatements() {
       {/* Balance Sheet */}
       {tab === 'bs' && <>
         <SourceSwitch k="bs" other="Trial-balance figures entered earlier (31 Mar 2026 / 2025)" />
-        {isImported('bs') ? <StatementTab stmt="BS" F={F} periodsInfo={periodsInfo} onGoImport={goImport} /> : <BsTab lines={bsData.lines || {}} values={bsData.values || {}} />}
+        {isImported('bs') ? <StatementTab stmt="BS" F={Fx} periodsInfo={periodsInfo} onGoImport={goImport} /> : <BsTab lines={bsData.lines || {}} values={bsData.values || {}} />}
       </>}
 
       {/* P&L Statement */}
       {tab === 'pl' && (
         <div>
-          <SourceSwitch k="pl" other="Zoho account mapping (live, editable)" />
+          <SourceSwitch k="pl" other="Earlier Zoho P&L item mapping (legacy)" />
           {isImported('pl') ? <>
-            <StatementTab stmt="PL" F={F} periodsInfo={periodsInfo} onGoImport={goImport} />
-            <StatementTab stmt="RT" F={F} periodsInfo={periodsInfo} onGoImport={goImport} />
+            <StatementTab stmt="PL" F={Fx} periodsInfo={periodsInfo} onGoImport={goImport} />
+            <StatementTab stmt="RT" F={Fx} periodsInfo={periodsInfo} onGoImport={goImport} />
           </> : <>
             <div style={{ textAlign: 'center', marginBottom: 16 }}>
               <div style={{ fontWeight: 700, fontSize: '1rem', color: '#18191B', letterSpacing: '0.04em', textTransform: 'uppercase' }}>Dev Accelerator Ltd</div>
@@ -1678,12 +1681,12 @@ export default function FinancialStatements() {
       )}
 
       {/* Cash Flow */}
-      {tab === 'cf' && (imported ? <StatementTab stmt="CF" F={F} periodsInfo={periodsInfo} onGoImport={goImport} /> : <SourceSwitch k="pl" other="—" />)}
+      {tab === 'cf' && (imported ? <StatementTab stmt="CF" F={Fx} periodsInfo={periodsInfo} onGoImport={goImport} /> : <SourceSwitch k="pl" other="—" />)}
 
       {/* Notes to Accounts */}
       {tab === 'notes' && <>
         <SourceSwitch k="notes" other="Zoho-mapped notes and trial-balance notes (earlier)" />
-        {isImported('notes') ? <NotesTab F={F} periodsInfo={periodsInfo} onGoImport={goImport} /> : (
+        {isImported('notes') ? <NotesTab F={Fx} periodsInfo={periodsInfo} onGoImport={goImport} /> : (
           <div>
             <div style={{ marginBottom: 28 }}>
               <div style={{ fontWeight: 700, color: '#1C4942', fontSize: '0.82rem', padding: '6px 0', borderBottom: '2px solid #DFE7E3', marginBottom: 12, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Balance Sheet Notes</div>
@@ -1709,20 +1712,20 @@ export default function FinancialStatements() {
       {!imported && !['bs', 'pl', 'notes', 'cf', 'coa', 'mapping', 'validation', 'inputs', 'branch', 'client', 'compliance'].includes(tab) && (
         <div style={S.card}><div style={{ color: '#5D6C7B', fontSize: '0.85rem', marginBottom: 10 }}>No financial statements have been imported yet. The analysis is built from the imported, validated figures.</div><button onClick={goImport} style={S.btn('primary')}>Go to Data Validation & Reconciliation → Import</button></div>
       )}
-      {imported && tab === 'cfo' && <CfoTab F={F} onGoImport={goImport} goTab={setTab} />}
-      {imported && tab === 'compare' && <CompareTab F={F} periodsInfo={periodsInfo} onGoImport={goImport} />}
-      {imported && tab === 'performance' && <PerformanceTab F={F} onGoImport={goImport} />}
-      {imported && tab === 'ratios' && <RatiosTab F={F} periodsInfo={periodsInfo} onGoImport={goImport} />}
-      {tab === 'branch' && <BranchTab F={F} />}
-      {imported && tab === 'ar' && <ArTab F={F} onGoImport={goImport} />}
-      {imported && tab === 'ap' && <ApTab F={F} onGoImport={goImport} />}
-      {imported && tab === 'cash' && <CashTab F={F} onGoImport={goImport} />}
-      {imported && tab === 'debt' && <DebtTab F={F} onGoImport={goImport} />}
-      {imported && tab === 'capex' && <CapexTab F={F} onGoImport={goImport} />}
-      {tab === 'client' && <ClientTab F={F} />}
-      {tab === 'compliance' && <ComplianceTab F={F} goTab={setTab} />}
+      {imported && tab === 'cfo' && <CfoTab F={Fx} onGoImport={goImport} goTab={setTab} />}
+      {imported && tab === 'compare' && <CompareTab F={Fx} periodsInfo={periodsInfo} onGoImport={goImport} />}
+      {imported && tab === 'performance' && <PerformanceTab F={Fx} onGoImport={goImport} />}
+      {imported && tab === 'ratios' && <RatiosTab F={Fx} periodsInfo={periodsInfo} onGoImport={goImport} />}
+      {tab === 'branch' && <BranchTab F={Fx} />}
+      {imported && tab === 'ar' && <ArTab F={Fx} onGoImport={goImport} />}
+      {imported && tab === 'ap' && <ApTab F={Fx} onGoImport={goImport} />}
+      {imported && tab === 'cash' && <CashTab F={Fx} onGoImport={goImport} />}
+      {imported && tab === 'debt' && <DebtTab F={Fx} onGoImport={goImport} />}
+      {imported && tab === 'capex' && <CapexTab F={Fx} onGoImport={goImport} />}
+      {tab === 'client' && <ClientTab F={Fx} />}
+      {tab === 'compliance' && <ComplianceTab F={Fx} goTab={setTab} />}
       {tab === 'inputs' && <InputsTab rights={fsStatus.rights} goValidation={goValidation} />}
-      {tab === 'validation' && <ValidationTab F={F} status={fsStatus} reloadStatus={reloadStatus} />}
+      {tab === 'validation' && <ValidationTab F={Fx} status={fsStatus} reloadStatus={reloadStatus} />}
 
       {/* Chart of Accounts */}
       {tab === 'coa' && (
@@ -1732,11 +1735,7 @@ export default function FinancialStatements() {
       )}
 
       {/* Account Mapping */}
-      {tab === 'mapping' && (
-        <div style={S.card}>
-          <MappingTab mappings={mappings} coa={coa} onSaveMapping={handleSaveMapping} fetchZohoStatus={fetchStatus} onFetchZoho={handleFetchZoho} periods={periods} />
-        </div>
-      )}
+      {tab === 'mapping' && <AccountMappingTab rights={fsStatus.rights || {}} legacy={<MappingTab mappings={mappings} coa={coa} onSaveMapping={handleSaveMapping} fetchZohoStatus={fetchStatus} onFetchZoho={handleFetchZoho} periods={periods} />} />}
 
       {showPeriodModal && (
         <PeriodModal periods={periods} onSave={handleSavePeriods} onClose={() => setShowPeriodModal(false)} />

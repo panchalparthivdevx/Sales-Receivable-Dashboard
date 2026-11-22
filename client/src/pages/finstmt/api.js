@@ -72,6 +72,14 @@ export const fsApi = {
   forecastSettings: (body)    => axios.put(`${B}/forecast/settings`, body).then(r => r.data),
   forecastLine: (body)        => axios.post(`${B}/forecast/manual`, body).then(r => r.data),
   deleteForecastLine: (id)    => axios.delete(`${B}/forecast/manual/${id}`).then(r => r.data),
+  // Zoho Books ledger sync, account mapping (built from the final workbook's trial balance) and its reconciliation
+  glStatus:     ()            => axios.get(`${B}/gl/status`).then(r => r.data),
+  glRun:        (mode)        => axios.post(`${B}/gl/run`, { mode }, { timeout: 300000 }).then(r => r.data),
+  mapping:      ()            => axios.get(`${B}/mapping`, { timeout: 120000 }).then(r => r.data),
+  mappingBuild: (file)        => { const f = new FormData(); if (file) f.append('file', file); return axios.post(`${B}/mapping/build`, f, { timeout: 180000 }).then(r => r.data); },
+  mappingEdit:  (body)        => axios.post(`${B}/mapping/edit`, body).then(r => r.data),
+  mappingReview: (ids, reviewed = true) => axios.post(`${B}/mapping/review`, { ids, reviewed }).then(r => r.data),
+  mappingRecon: ()            => axios.get(`${B}/mapping/recon`, { timeout: 120000 }).then(r => r.data),
   // downloads go through axios so the login header is sent
   download:     async (path, params, filename) => {
     const r = await axios.get(`${B}${path}`, { params: q(params), responseType: 'blob', timeout: 120000 });

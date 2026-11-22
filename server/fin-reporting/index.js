@@ -32,8 +32,13 @@ const V = require('./lib/views');
 const EX = require('./lib/exporter');
 const P = require('./lib/periods');
 const L = require('./lib/lines');
+const G = require('./lib/gl');
+const AC = require('./lib/acmap');
+const LV = require('./lib/live');
 
 const router = express.Router();
+const ZR = require('./lib/zohoRoutes');
+const scheduler = ZR.scheduler;
 const IS_VERCEL = !!process.env.VERCEL;
 const DEFAULT_FOLDER = path.join(__dirname, '..', '..', 'Financials & Presentations', 'Financials');
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024, files: 1 } });
@@ -42,7 +47,16 @@ const bad = (res, status, error, extra = {}) => res.status(status).json({ error,
 
 let usersOf = loadUsers;
 let legacyRead = async () => null;
-router.init = (deps = {}) => { if (deps.loadUsers) usersOf = deps.loadUsers; if (deps.readLegacy) legacyRead = deps.readLegacy; if (deps.ops) require('./lib/sources').setOps(deps.ops); };
+let zget = null;          // Zoho Books reader (server/zoho.js); tests inject a stand-in
+let opsRef = {};
+router.init = (deps = {}) => {
+  if (deps.loadUsers) usersOf = deps.loadUsers; if (deps.readLegacy) legacyRead = deps.readLegacy;
+  if (deps.ops) { require('./lib/sources').setOps(deps.ops); opsRef = { ...opsRef, ...deps.ops }; }
+  if (deps.zohoGet) zget = deps.zohoGet;
+};
+const zohoGet = (p, q) => (zget || (zget = require('../zoho').zohoGet))(p, q);
+const gl = G.createGL({ store, zget: zohoGet, readSynced: e => (opsRef.readSynced ? opsRef.readSynced(e) : null), log: m => console.log(m) });
+router.gl = gl;
 
 // ── rights ───────────────────────────────────────────────────────────────────
 async function rights(req) {
@@ -79,11 +93,71 @@ async function active() {
 async function ctxFor(req) {
   const a = await active();
   if (!a) return null;
-  const mode = req.query.mode === 'latest' ? 'latest' : 'original';
+  const lc = await liveState(a).catch(e => { console.error('[fin-reporting] Zoho figures not available:', e.message); return null; });
+  let mode = ['latest', 'zoho'].includes(req.query.mode) ? req.query.mode : 'original';
+  if (mode === 'zoho' && !lc) mode = 'original';
   const dec = await store.read('decisions', { items: {} });
   const adj = await store.read('adjustments', { items: [] });
   const decisions = Object.fromEntries(Object.entries(dec.items).map(([k, d]) => [k, d.factKey]));
-  return { a, ctx: M.makeCtx(a.version, { ix: a.ix, mode, decisions, adjustments: adj.items, withAdj: req.query.adj === '1' }), mode };
+  const version = lc ? lc.merged : a.version, ix = lc ? lc.ix : a.ix;
+  const ctx = M.makeCtx(version, { ix, mode, decisions, adjustments: adj.items, withAdj: req.query.adj === '1' });
+  // the reconciliation of the imported workbooks keeps to the workbooks
+  const wbCtx = M.makeCtx(a.version, { ix: a.ix, mode: mode === 'zoho' ? 'original' : mode, decisions, adjustments: adj.items, withAdj: req.query.adj === '1' });
+  return { a, version, ix, ctx, wbCtx, mode, live: lc };
+}
+
+// ── Zoho Books figures (provisional): the ledger + the account mapping, merged with the imported workbooks ──
+let liveCache = null;
+async function liveState(a) {
+  const st = await gl.readState();
+  if (!st.initial?.doneAt || !st.cutoff) return null;
+  const map = await store.read('acmap', null);
+  if (!map) return null;
+  const edits = await store.read('acmap_edits', { items: {}, at: null });
+  const key = `${a.id}|${st.lastSuccess?.at}|${map.meta.builtAt}|${edits.at}`;
+  if (liveCache?.key === key) return liveCache;
+  const ds = await gl.dataset();
+  const finalCtx = M.makeCtx(a.version, { ix: a.ix, mode: 'original' });
+  const lv = LV.createLive({ map, edits: edits.items, ds, version: a.version, finalCtx, M });
+  const zf = a.version.files.length;
+  const zfile = { f: zf, name: `Zoho Books (provisional, accounting cut-off ${P.fromId(`BS-${st.cutoff}`)?.headerDate || st.cutoff})`, basis: 'SA', reportingDate: st.cutoff, zoho: true, syncedAt: st.lastSuccess?.at || null };
+  const merged = { ...a.version, files: [...a.version.files, zfile], facts: [...a.version.facts, ...lv.facts.map(f => ({ ...f, f: zf }))], notes: [...a.version.notes, ...lv.notes.map(n => ({ ...n, f: zf }))] };
+  liveCache = { key, lv, merged, ix: M.index(merged), zf, st, map, edits };
+  return liveCache;
+}
+/** Default columns: with Zoho figures, the open quarter in the results layout; otherwise the latest workbook's columns */
+function defaultsFor(c, b, stmt) {
+  const wb = M.defaultColumns(c.a.version, b, stmt === 'RT' ? 'PL' : stmt);
+  if (!c.live || b !== 'SA' || stmt === 'RT') return wb;
+  const lv = c.live.lv;
+  const fyNow = P.fyOf(lv.cutoff);
+  const q = lv.flowIds.map(P.fromId).find(p => p.type === 'Q' && p.start <= lv.cutoff && p.end >= lv.cutoff && p.end > lv.finalEnd);
+  if (!q) return wb;
+  if (stmt === 'PL') {
+    const prevQ = q.q === 1 ? `FY${q.fy - 1}-Q4` : `FY${q.fy}-Q${q.q - 1}`;
+    const ytd = { 1: null, 2: `FY${q.fy}-H1`, 3: `FY${q.fy}-9M`, 4: `FY${q.fy}-FY` }[q.q];
+    return [q.id, prevQ, `FY${q.fy - 1}-Q${q.q}`, ...(ytd ? [ytd, ytd.replace(`FY${q.fy}`, `FY${q.fy - 1}`)] : []), ...(q.q !== 4 ? [`FY${q.fy - 1}-FY`] : [])];
+  }
+  if (stmt === 'BS') return [`BS-${fyNow}-03-31`, ...wb.filter(p => p !== `BS-${fyNow}-03-31`)];
+  if (stmt === 'CF') return [`FY${fyNow}-FY`, ...wb.filter(p => p !== `FY${fyNow}-FY`)];
+  return wb;
+}
+function notesDefaultsFor(c, b) {
+  const wb = M.notesDefaultColumns(c.a.version, b);
+  if (!c.live || b !== 'SA') return wb;
+  const lv = c.live.lv;
+  const fyNow = P.fyOf(lv.cutoff);
+  const q = lv.flowIds.map(P.fromId).find(p => p.type === 'Q' && p.start <= lv.cutoff && p.end >= lv.cutoff && p.end > lv.finalEnd);
+  const ytd = q ? { 2: `FY${q.fy}-H1`, 3: `FY${q.fy}-9M`, 4: `FY${q.fy}-FY` }[q.q] : null;
+  return [...new Set([`BS-${fyNow}-03-31`, ...wb.filter(p => P.fromId(p)?.type === 'BS'), ...(q ? [q.id] : []), ...(ytd ? [ytd] : []), ...wb.filter(p => P.fromId(p)?.type !== 'BS')])];
+}
+/** What the page shows next to Zoho figures: cut-off date, last successful sync, next run, notes on the shown periods */
+async function zohoInfo(c, periods = []) {
+  if (!c.live) return null;
+  const lv = c.live.lv;
+  const notes = {};
+  for (const p of periods) for (const k of [`PL|${p}`, `BS|${p}`, `CF|${c.mode === 'zoho' ? 'zoho' : 'live'}|${p}`]) if (lv.flags[k]) notes[k] = lv.flags[k];
+  return { cutoff: lv.cutoff, lastSuccess: c.live.st.lastSuccess?.at || null, nextRun: scheduler.next ? new Date(scheduler.next).toISOString() : null, finalEnd: lv.finalEnd, awaiting: lv.awaiting.length, notes, file: c.live.zf };
 }
 const noData = res => bad(res, 404, 'No financial statements have been imported yet. Use Data Validation & Reconciliation → Import workbooks.', { code: 'NO_IMPORT' });
 const basisOf = req => (req.query.basis === 'CO' ? 'CO' : 'SA');
@@ -197,8 +271,10 @@ router.get('/periods', wrap(async (req, res) => {
   const c = await ctxFor(req); if (!c) return noData(res);
   const b = basisOf(req);
   const out = {};
-  for (const st of ['PL', 'BS', 'CF', 'RT']) out[st] = { available: M.periodsFor(c.ctx.ix, b, st), defaults: M.defaultColumns(c.a.version, b, st === 'RT' ? 'PL' : st) };
-  out.notesDefaults = M.notesDefaultColumns(c.a.version, b);
+  for (const st of ['PL', 'BS', 'CF', 'RT']) out[st] = { available: M.periodsFor(c.ix, b, st, c.mode === 'zoho'), defaults: defaultsFor(c, b, st) };
+  out.notesDefaults = notesDefaultsFor(c, b);
+  out.zoho = await zohoInfo(c);
+  out.mode = c.mode;
   res.json(out);
 }));
 
@@ -207,9 +283,10 @@ router.get('/statement', wrap(async (req, res) => {
   const b = basisOf(req);
   const stmt = ['PL', 'BS', 'CF', 'RT'].includes(req.query.stmt) ? req.query.stmt : 'PL';
   const periods = String(req.query.periods || '').split(',').filter(p => P.fromId(p));
-  const cols = periods.length ? periods : M.defaultColumns(c.a.version, b, stmt === 'RT' ? 'PL' : stmt);
+  const cols = periods.length ? periods : defaultsFor(c, b, stmt);
   const view = M.statementView(c.ctx, b, stmt, cols);
-  view.files = c.a.version.files.map(f => ({ f: f.f, name: f.name, reportingDate: f.reportingDate }));
+  view.files = c.version.files.map(f => ({ f: f.f, name: f.name, reportingDate: f.reportingDate, zoho: f.zoho || undefined }));
+  view.zoho = await zohoInfo(c, cols);
   view.mode = c.mode; view.versionId = c.a.id;
   if (stmt === 'RT') view.ratioDefs = Object.fromEntries(Object.entries(c.a.version.ratioDefs || {}).filter(([k]) => k.startsWith(`${b}|`)).map(([k, d]) => [k.split('|')[1], d.definition]));
   res.json(view);
@@ -219,9 +296,10 @@ router.get('/notes', wrap(async (req, res) => {
   const c = await ctxFor(req); if (!c) return noData(res);
   const b = basisOf(req);
   let periods = String(req.query.periods || '').split(',').filter(p => P.fromId(p));
-  if (!periods.length) periods = M.notesDefaultColumns(c.a.version, b);
+  if (!periods.length) periods = notesDefaultsFor(c, b);
   const view = V.notesView(c.ctx, b, periods);
-  view.files = c.a.version.files.map(f => ({ f: f.f, name: f.name }));
+  view.files = c.version.files.map(f => ({ f: f.f, name: f.name, zoho: f.zoho || undefined }));
+  view.zoho = await zohoInfo(c, periods);
   res.json(view);
 }));
 
@@ -231,7 +309,7 @@ async function reconFor(c) {
   const key = `${c.mode}|${JSON.stringify(c.ctx.decisions)}|${JSON.stringify(inputs.settings?.thresholds || {})}`;
   if (c.a.recon.has(key)) return c.a.recon.get(key);
   const legacy = await legacyRead().catch(() => null);
-  const r = RC.reconcile(c.a.version, { ctx: c.ctx, legacy, thresholds: inputs.settings?.thresholds, mode: c.mode });
+  const r = RC.reconcile(c.a.version, { ctx: c.wbCtx, legacy, thresholds: inputs.settings?.thresholds, mode: c.mode === 'zoho' ? 'original' : c.mode });
   c.a.recon.clear(); c.a.recon.set(key, r);
   return r;
 }
@@ -371,17 +449,18 @@ router.get('/export', wrap(async (req, res) => {
   const b = basisOf(req);
   const what = req.query.what;
   const fmtUnit = u => ({ lakh: '₹ lakh', inr: '₹', times: 'times', fraction: '%', days: 'days', nos: 'nos' })[u] || u || '';
-  const meta = extra => EX.contextMeta({ basis: b, mode: c.mode, version: { id: c.a.id, builtAt: c.a.version.builtAt, builtBy: c.a.version.builtBy, files: c.a.version.files }, ...extra });
+  const zi = await zohoInfo(c);
+  const meta = extra => EX.contextMeta({ basis: b, mode: c.mode, version: { id: c.a.id, builtAt: c.a.version.builtAt, builtBy: c.a.version.builtBy, files: c.a.version.files }, zoho: zi, ...extra });
   const file = (n, buf) => { res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'); res.setHeader('Content-Disposition', `attachment; filename="${n}.xlsx"`); res.send(buf); };
-  const srcRef = cl => (cl?.src ? `${c.a.version.files[cl.src.f]?.name} › ${cl.src.sh}!${cl.src.c}` : cl?.derived ? `derived: ${cl.derived.formula}` : '');
+  const srcRef = cl => (cl?.src?.zoho ? `${cl.src.role === 'live' ? 'Provisional: final figures rolled forward with Zoho Books movement' : 'Zoho Books (provisional)'}${cl.src.asAt ? `, accounting cut-off ${cl.src.asAt}` : ''}${cl.src.pending ? ` — PENDING: ${cl.src.pending}` : ''}` : cl?.src ? `${c.version.files[cl.src.f]?.name} › ${cl.src.sh}!${cl.src.c}` : cl?.derived ? `derived: ${cl.derived.formula}` : '');
   if (what === 'statement') {
     const stmt = ['PL', 'BS', 'CF', 'RT'].includes(req.query.stmt) ? req.query.stmt : 'PL';
     const periods = String(req.query.periods || '').split(',').filter(p => P.fromId(p));
-    const cols = periods.length ? periods : M.defaultColumns(c.a.version, b, stmt);
+    const cols = periods.length ? periods : defaultsFor(c, b, stmt);
     const v = M.statementView(c.ctx, b, stmt, cols);
     const name = { PL: 'Statement of profit and loss', BS: 'Balance sheet', CF: 'Cash flow statement', RT: 'Ratios disclosed in results' }[stmt];
     return file(`${name.replace(/ /g, '_')}_${b}`, EX.workbook([{ name, title: `${name} (${b === 'CO' ? 'consolidated' : 'standalone'})`, meta: meta({ periods: v.periods.map(p => p.label).join('; ') }),
-      columns: [{ label: 'Particulars', get: r => `${'  '.repeat(r.indent || 0)}${r.label}`, width: 60 }, { label: 'Unit', get: r => fmtUnit(r.unit) }, ...cols.flatMap(p => [{ label: P.fromId(p).label, get: r => r.cells[p]?.v ?? (r.cells[p]?.st === 'error' ? r.cells[p]?.src?.err : r.cells[p]?.st === 'missing' ? 'Not available' : '') , width: 22 }, { label: `Source — ${P.fromId(p).short}`, get: r => srcRef(r.cells[p]), width: 50 }])],
+      columns: [{ label: 'Particulars', get: r => `${'  '.repeat(r.indent || 0)}${r.label}`, width: 60 }, { label: 'Unit', get: r => fmtUnit(r.unit) }, ...cols.flatMap(p => [{ label: `${P.fromId(p).label}${v.periods.find(x => x.id === p)?.prov ? ` — PROVISIONAL${v.periods.find(x => x.id === p).prov.asAt ? ` (balances / actuals as at ${v.periods.find(x => x.id === p).prov.asAt})` : ''}` : ''}`, get: r => r.cells[p]?.v ?? (r.cells[p]?.st === 'error' ? r.cells[p]?.src?.err : r.cells[p]?.st === 'missing' ? 'Not available' : '') , width: 22 }, { label: `Source — ${P.fromId(p).short}`, get: r => srcRef(r.cells[p]), width: 50 }])],
       rows: v.rows }]));
   }
   if (what === 'recon') {
@@ -929,6 +1008,9 @@ router.post('/forecast/manual', need('inputs'), wrap(async (req, res) => {
   res.json({ ok: true, item });
 }));
 router.delete('/forecast/manual/:id', need('inputs'), wrap(async (req, res) => { await store.update('forecast', { settings: {}, manual: [] }, d => { d.manual = d.manual.filter(y => y.id !== req.params.id); }); res.json({ ok: true }); }));
+
+// ══ Zoho Books ledger sync, account mapping and its reconciliation (lib/zohoRoutes.js) ══
+ZR.mount(router, { store, gl, active, liveState, need, wrap, bad, who, M, IS_VERCEL, DEFAULT_FOLDER, upload, xlsxOut });
 
 router.use((err, req, res, next) => { console.error('[fin-reporting]', err); if (res.headersSent) return next(err); bad(res, err.status || 500, err.message || 'Error'); });
 

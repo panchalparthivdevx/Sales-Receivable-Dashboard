@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { api } from '../utils/api';
+import ZohoSyncPanel from './finstmt/ZohoSyncPanel';
 
 const STAGE_LABELS = {
   1: 'Stage 1 — Master Data',
@@ -664,6 +665,8 @@ export default function SyncMonitor() {
           </div>
         )}
       </div>
+
+      <div style={{ marginTop: '1.5rem' }}><ZohoSyncPanel canRun /></div>
 
       <WorkbooksPanel />
     </div>

@@ -18,6 +18,7 @@ export const S = {
     background: v === 'primary' ? C.green : v === 'danger' ? C.bad : v === 'outline' ? C.white : '#DFE7E3', color: v === 'primary' || v === 'danger' ? '#fff' : C.ink, display: 'inline-flex', alignItems: 'center', gap: 6 }),
   select: { border: `1px solid ${C.line}`, borderRadius: 6, padding: '5px 8px', fontSize: '0.78rem', background: C.white, color: C.ink },
   input: { border: `1px solid ${C.line}`, borderRadius: 6, padding: '5px 8px', fontSize: '0.78rem', background: C.white, color: C.ink },
+  tab: active => ({ padding: '5px 12px', borderRadius: 6, border: `1px solid ${active ? C.green : C.line}`, cursor: 'pointer', fontSize: '0.74rem', fontWeight: active ? 700 : 500, background: active ? C.green : C.white, color: active ? '#fff' : C.ink2 }),
 };
 
 // ── numbers ──────────────────────────────────────────────────────────────────
@@ -109,7 +110,8 @@ export function FilterBar({ F, setF, show = {}, periods = [], budgetVersions = [
       {show.comparator && <Lbl t="Compare with"><select style={S.select} value={F.cmp || 'auto'} onChange={e => set('cmp', e.target.value)}>
         <option value="auto">Auto (same period last year)</option>{flow.map(p => <option key={p.id} value={p.id}>{p.short}{p.availability === 'derived' ? ' — derived' : ''}</option>)}
       </select></Lbl>}
-      <Lbl t="Financial version"><select style={S.select} value={F.mode} onChange={e => set('mode', e.target.value)} title="As originally reported: the workbook prepared for the period (e.g. FY2025-26 from the audited annual workbook). Latest reported: the most recent workbook that repeats the period (restated / regrouped comparatives)."><option value="original">As originally reported</option><option value="latest">Latest reported / regrouped</option></select></Lbl>
+      {show.source !== false && <Lbl t="Source"><select style={S.select} value={F.source || 'final'} onChange={e => set('source', e.target.value)} title="Final – Workbook: the imported final workbooks; a period after the latest workbook (still open) shows provisional figures — the final figures rolled forward with Zoho Books movement, marked Provisional. Provisional – Zoho Books: every figure from Zoho Books through the account mapping, for reconciliation."><option value="final">Final – Workbook</option><option value="zoho">Provisional – Zoho Books</option></select></Lbl>}
+      <Lbl t="Financial version"><select style={S.select} value={F.mode} disabled={F.source === 'zoho'} onChange={e => set('mode', e.target.value)} title="As originally reported: the workbook prepared for the period (e.g. FY2025-26 from the audited annual workbook). Latest reported: the most recent workbook that repeats the period (restated / regrouped comparatives)."><option value="original">As originally reported</option><option value="latest">Latest reported / regrouped</option></select></Lbl>
       {show.budget && <Lbl t="Budget version"><select style={S.select} value={F.budget || ''} onChange={e => set('budget', e.target.value)}><option value="">{budgetVersions.length ? 'Newest version' : 'No budget yet'}</option>{budgetVersions.map(v => <option key={v.id} value={v.id}>{v.name}{v.frozen ? ' (frozen)' : ''}</option>)}</select></Lbl>}
       {show.branch && <Lbl t="Branch / project"><select style={S.select} value={F.branch || ''} onChange={e => set('branch', e.target.value)}><option value="">All (company)</option>{branches.map(b => <option key={b}>{b}</option>)}</select></Lbl>}
       <Lbl t="Units"><select style={S.select} value={F.unit} onChange={e => set('unit', e.target.value)}><option value="inr">₹</option><option value="lakh">₹ lakh</option><option value="crore">₹ crore</option></select></Lbl>
@@ -133,7 +135,12 @@ export function SourceDrill({ open, onClose, label, period, cell, files = [], un
         </div>
         <table style={{ width: '100%', borderCollapse: 'collapse' }}><tbody>
           <Row k="Figure shown" v={<b>{cell.v == null ? (cell.st === 'blank' ? '— (nil: blank in the source)' : cell.st === 'error' ? `Excel error ${s?.err || ''} — not treated as zero` : 'Not available') : fmtVal(cell.v, unit, du)}{unit === 'lakh' && cell.v != null ? ` ${unitLabel(du)}` : ''}</b>} />
-          {s && <><Row k="Source file" v={fname(s.f)} /><Row k="Sheet / cell" v={`${s.sh} ! ${s.c}${s.hid ? ' (hidden sheet)' : ''}`} />
+          {s?.zoho && <><Row k="Source" v={s.role === 'live' ? 'Provisional — the final figures rolled forward with Zoho Books movement since the latest final workbook' : 'Zoho Books (provisional), through the account mapping'} />
+            <Row k="Accounting cut-off" v={s.asAt ? `Actuals / balances as at ${fmtDate(s.asAt)} (the period is still open)` : 'Whole period'} />
+            {s.base && <Row k="Rolled forward from" v={`Final balance sheet as at ${fmtDate(s.base)}`} />}
+            {s.pending && <Row k="Pending" v={<span style={{ color: C.warn }}>{s.pending}</span>} />}
+            <Row k="Where to check" v="Financial Statements → Account Mapping: the ledgers behind each line, the reconciliation to the final workbook and the accounts awaiting mapping." /></>}
+          {s && !s.zoho && <><Row k="Source file" v={fname(s.f)} /><Row k="Sheet / cell" v={`${s.sh} ! ${s.c}${s.hid ? ' (hidden sheet)' : ''}`} />
             <Row k="Formula in the workbook" v={s.fx ? <code style={{ fontSize: '0.75rem' }}>={s.fx}</code> : 'typed value (no formula)'} />
             <Row k="Column role" v={`${s.role === 'primary' ? 'Primary — the workbook prepared for this period' : s.role === 'comparative' ? 'Comparative column in a later / other workbook' : 'Working column outside the published statement'}${s.aud ? ` · ${s.aud}` : ''}`} />
             <Row k="Source row label" v={s.lbl} />
@@ -170,7 +177,26 @@ export function exportPdf({ title, meta = [], columns, rows, landscape = true })
 }
 export function pdfMeta(F, extra = {}) {
   return [['Company', 'Dev Accelerator Ltd'], ['Reporting basis', F.basis === 'CO' ? 'Consolidated' : 'Standalone'], ['Periods', extra.periods || ''], ['Units', `${unitLabel(F.unit)} (EPS in ₹; ratios, days and % unscaled)`],
-    ['Financial version', F.mode === 'latest' ? 'Latest reported / regrouped' : 'As originally reported'], ['Source version', extra.version || ''], ['Filters', extra.filters || '—'], ['Generated', new Date().toLocaleString('en-IN')]];
+    ['Source', F.mode === 'zoho' ? 'Provisional – Zoho Books' : extra.zoho ? 'Final – Workbook (open periods provisional: final figures + Zoho Books movement)' : 'Final – Workbook'],
+    ...(extra.zoho ? [['Zoho Books accounting cut-off', fmtDate(extra.zoho.cutoff)], ['Last successful Zoho sync', fmtTime(extra.zoho.lastSuccess)]] : []),
+    ['Financial version', F.mode === 'latest' ? 'Latest reported / regrouped' : F.mode === 'zoho' ? '—' : 'As originally reported'], ['Source version', extra.version || ''], ['Filters', extra.filters || '—'], ['Generated', new Date().toLocaleString('en-IN')]];
+}
+
+const fmtDate = d => (d ? new Date(`${d.slice(0, 10)}T00:00:00`).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : '—');
+const fmtTime = t => (t ? new Date(t).toLocaleString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—');
+export { fmtDate, fmtTime };
+
+/** The line under a statement that shows the Zoho Books cut-off date, kept apart from the last successful sync */
+export function ZohoStrip({ info, mode }) {
+  if (!info) return null;
+  return <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', alignItems: 'center', fontSize: '0.72rem', color: C.ink2, background: mode === 'zoho' ? '#FEF3C7' : C.tint, border: `1px solid ${C.line}`, borderRadius: 8, padding: '6px 10px', marginBottom: 10 }}>
+    <b style={{ color: C.green }}>{mode === 'zoho' ? 'Provisional – Zoho Books' : 'Open periods: provisional'}</b>
+    <span>Accounting cut-off: <b style={{ color: C.ink }}>{fmtDate(info.cutoff)}</b></span>
+    <span>Last successful Zoho sync: <b style={{ color: C.ink }}>{fmtTime(info.lastSuccess)}</b></span>
+    {info.nextRun && <span>Next sync: {fmtTime(info.nextRun)}</span>}
+    {mode !== 'zoho' && info.finalEnd && <span>Final workbooks cover periods to {fmtDate(info.finalEnd)}</span>}
+    {info.awaiting > 0 && <span style={{ color: C.warn }}>{info.awaiting} Zoho account(s) awaiting mapping (Account Mapping tab)</span>}
+  </div>;
 }
 export function ExportButtons({ xlsx, pdf }) {
   const [busy, setBusy] = useState(false);
