@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { fsApi } from './api';
-import { C, S, Card, Note, Loading, ErrorBox, SourceDrill, fmtVal, unitLabel, ExportButtons, exportPdf, pdfMeta, useLoad, ZohoStrip, fmtDate } from './ui';
+import { C, S, Card, Note, Loading, ErrorBox, SourceDrill, fmtVal, unitLabel, ExportButtons, exportPdf, pdfMeta, useLoad } from './ui';
 
 const TITLES = { BS: 'Balance Sheet', PL: 'Statement of Profit and Loss', CF: 'Cash Flow Statement', RT: 'Ratios disclosed in the results' };
 const BS_HEAD = { nca: ['I. ASSETS', '1. Non-current assets'], ca: [null, '2. Current assets'], eq: ['II. EQUITY AND LIABILITIES', '1. Equity'], ncl: [null, '2. Non-current liabilities'], cl: [null, '3. Current liabilities'] };
@@ -61,25 +61,23 @@ export default function StatementTab({ stmt, F, periodsInfo, onGoImport }) {
       {error && <ErrorBox error={error} onGo={onGoImport} />}
       <Card title={`${TITLES[stmt]} — ${F.basis === 'CO' ? 'Consolidated' : 'Standalone'}`} right={<>
         <ExportButtons xlsx={{ path: '/export', params: { what: 'statement', basis: F.basis, stmt, periods: (cols || []).join(','), mode: F.mode }, filename: `${TITLES[stmt].replace(/ /g, '_')}_${F.basis}.xlsx` }}
-          pdf={() => exportPdf({ title: `${TITLES[stmt]} (${F.basis === 'CO' ? 'consolidated' : 'standalone'})`, meta: pdfMeta(F, { periods: periods.map(p => `${p.label}${p.prov ? ` — provisional${p.prov.asAt ? ` to ${fmtDate(p.prov.asAt)}` : ''}` : ''}`).join('; '), version: data?.versionId, zoho: data?.zoho }),
-            columns: [{ label: 'Particulars', get: x => `${'  '.repeat(x.r.indent || 0)}${x.r.label}` }, ...periods.map(p => ({ label: `${p.short}${p.prov ? ' (prov.)' : ''}`, align: 'right', get: x => { const c = x.r.cells[p.id]; const t = transform(x.r, p.id, c?.v); return c?.st === 'error' ? c.src?.err : fmtVal(t.v, t.unit, F.unit); } }))], rows: exportRows })} />
+          pdf={() => exportPdf({ title: `${TITLES[stmt]} (${F.basis === 'CO' ? 'consolidated' : 'standalone'})`, meta: pdfMeta(F, { periods: periods.map(p => p.label).join('; '), version: data?.versionId }),
+            columns: [{ label: 'Particulars', get: x => `${'  '.repeat(x.r.indent || 0)}${x.r.label}` }, ...periods.map(p => ({ label: p.short, align: 'right', get: x => { const c = x.r.cells[p.id]; const t = transform(x.r, p.id, c?.v); return c?.st === 'error' ? c.src?.err : fmtVal(t.v, t.unit, F.unit); } }))], rows: exportRows })} />
       </>}>
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', marginBottom: 10 }}>
           <span style={S.small}>Columns:</span>
           {(cols || []).map((id, i) => { const p = avail.find(x => x.id === id); return (
             <span key={id} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, background: C.tint, borderRadius: 12, padding: '2px 4px 2px 10px', fontSize: '0.72rem', color: C.green }}>
-              {p?.short || id}{p?.availability === 'derived' ? ' (derived)' : p?.availability === 'provisional' ? ' (provisional)' : ''}
+              {p?.short || id}{p?.availability === 'derived' ? ' (derived)' : ''}
               {i > 0 && <button title="Move left" onClick={() => { const c = [...cols]; [c[i - 1], c[i]] = [c[i], c[i - 1]]; saveCols(c); }} style={{ border: 'none', background: 'none', cursor: 'pointer', color: C.green, padding: 0 }}>‹</button>}
               <button title="Remove column" onClick={() => saveCols(cols.filter(x => x !== id))} style={{ border: 'none', background: 'none', cursor: 'pointer', color: C.ink2, padding: '0 4px' }}>×</button>
             </span>); })}
           <select style={S.select} value="" onChange={e => addCol(e.target.value)}>
             <option value="">+ add period…</option>
-            {avail.filter(p => !(cols || []).includes(p.id)).map(p => <option key={p.id} value={p.id}>{p.label}{p.availability === 'derived' ? ' — derived' : p.availability === 'working' ? ' — working column (unpublished)' : p.availability === 'provisional' ? ` — provisional (Zoho Books${p.asAt ? `, to ${fmtDate(p.asAt)}` : ''})` : ''}</option>)}
+            {avail.filter(p => !(cols || []).includes(p.id)).map(p => <option key={p.id} value={p.id}>{p.label}{p.availability === 'derived' ? ' — derived' : p.availability === 'working' ? ' — working column (unpublished)' : ''}</option>)}
           </select>
           <button style={S.btn('outline')} onClick={() => saveCols(info.defaults)}>Published layout</button>
         </div>
-        <ZohoStrip info={data?.zoho} mode={F.mode} />
-        {data?.zoho && Object.keys(data.zoho.notes || {}).length > 0 && <Note>{Object.entries(data.zoho.notes).map(([k, list]) => <div key={k}>{list.map((t, i) => <div key={i}>• {t}</div>)}</div>)}</Note>}
         {stmt === 'PL' && F.display === 'pctrev' && <Note>Showing each line as a percentage of revenue from operations of the same period. EPS is shown as reported.</Note>}
         {anyMissingDen && <Note tone="warn">Per-seat / per-sq-ft figures need branch capacity seats and operational area with effective dates (Management Inputs → Branch seats, occupancy & area). Periods without them show “Missing input”.</Note>}
         {stmt === 'RT' && <Note>These are the ratios exactly as disclosed in the SEBI results, with the definition printed under each one. The module's own recalculated ratios (with stated definitions and statuses) are on the Ratio Analytics tab — they are never mixed.</Note>}
@@ -91,8 +89,7 @@ export default function StatementTab({ stmt, F, periodsInfo, onGoImport }) {
                 {periods.map(p => <th key={p.id} style={{ ...S.th, ...S.num, minWidth: 130 }}>
                   <div style={{ fontSize: '0.62rem', color: C.ink2, fontWeight: 500, textTransform: 'uppercase' }}>{p.colType}</div>
                   <div>{p.headerDate}</div>
-                  <div style={{ fontSize: '0.62rem', color: p.prov ? C.warn : C.ink3, fontWeight: p.prov ? 700 : 500 }}>{p.prov ? '(Provisional)' : audOf(p) ? `(${audOf(p)})` : avail.find(x => x.id === p.id)?.availability === 'derived' ? '(derived)' : ''}</div>
-                  {p.prov?.asAt && <div style={{ fontSize: '0.6rem', color: C.warn, fontWeight: 600, whiteSpace: 'normal' }}>{p.type === 'BS' ? `FY${String(p.fy).slice(2)} closing column · balances as at ${fmtDate(p.prov.asAt)}` : `actuals to ${fmtDate(p.prov.asAt)}`}</div>}
+                  <div style={{ fontSize: '0.62rem', color: C.ink3, fontWeight: 500 }}>{audOf(p) ? `(${audOf(p)})` : avail.find(x => x.id === p.id)?.availability === 'derived' ? '(derived)' : ''}</div>
                   <div style={{ fontSize: '0.62rem', color: C.ink2, fontWeight: 500 }}>{stmt === 'RT' ? 'as disclosed' : F.display === 'pctrev' && stmt === 'PL' ? '% of revenue' : needDen ? '₹ per month' : unitLabel(F.unit)}</div>
                 </th>)}
               </tr></thead>
@@ -111,7 +108,7 @@ export default function StatementTab({ stmt, F, periodsInfo, onGoImport }) {
                       const txt = c?.st === 'error' ? (c.src?.err || 'error') : c?.st === 'missing' ? '' : c?.st === 'blank' ? '—' : t.missing ? 'Missing input' : fmtVal(t.v, t.unit, F.unit);
                       return <td key={p.id} onClick={() => c && c.st !== 'missing' && setDrill({ r, p, c })} title={c?.derived ? `Derived: ${c.derived.formula}` : conflict(c) ? 'Other source figures differ — click for details' : 'Click to see the source'}
                         style={{ ...S.td, ...S.num, fontWeight: r.bold ? 700 : 400, cursor: c && c.st !== 'missing' ? 'pointer' : 'default', color: c?.st === 'error' ? C.bad : c?.derived ? C.info : C.ink, fontStyle: c?.derived ? 'italic' : 'normal' }}>
-                        {txt}{c?.src?.pending && <span style={{ color: C.warn, marginLeft: 2, fontSize: '0.65rem', verticalAlign: 'top', lineHeight: 1 }} title={c.src.pending}>⏳</span>}{conflict(c) && <span style={{ color: C.warn, marginLeft: 2, fontSize: '0.65rem', verticalAlign: 'top', lineHeight: 1 }} title="Another source shows a different figure">≠</span>}{c?.decided && <span style={{ color: C.good, marginLeft: 2, fontSize: '0.65rem', verticalAlign: 'top', lineHeight: 1 }}>✓</span>}{c?.st === 'adjusted' && <span style={{ color: C.info, marginLeft: 2, fontSize: '0.6rem', verticalAlign: 'top', lineHeight: 1 }}>adj</span>}
+                        {txt}{conflict(c) && <span style={{ color: C.warn, marginLeft: 2, fontSize: '0.65rem', verticalAlign: 'top', lineHeight: 1 }} title="Another source shows a different figure">≠</span>}{c?.decided && <span style={{ color: C.good, marginLeft: 2, fontSize: '0.65rem', verticalAlign: 'top', lineHeight: 1 }}>✓</span>}{c?.st === 'adjusted' && <span style={{ color: C.info, marginLeft: 2, fontSize: '0.6rem', verticalAlign: 'top', lineHeight: 1 }}>adj</span>}
                       </td>;
                     })}
                   </tr>
@@ -119,7 +116,6 @@ export default function StatementTab({ stmt, F, periodsInfo, onGoImport }) {
               </tbody>
             </table>
             <div style={{ ...S.small, marginTop: 8, lineHeight: 1.6 }}>
-              {data?.zoho && <><b style={{ color: C.warn }}>Provisional</b> columns come from Zoho Books through the account mapping (a period after the latest final workbook: the final figures rolled forward with Zoho's movement); <span style={{ color: C.warn }}>⏳</span> = pending (usually posted at the quarter end, or needs a management input). </>}
               Click any figure for its file, sheet, cell, formula and any competing source figures. <span style={{ color: C.info, fontStyle: 'italic' }}>Blue italic</span> = derived by the module because the period is not reported directly (formula shown on hover). <span style={{ color: C.warn }}>≠</span> = another workbook shows a different figure (see Data Validation). “—” = nil (blank in the source). Excel errors are shown as errors, never as zero.
               {stmt === 'BS' && ' Balance sheets are never derived: only dates for which a balance sheet exists can be chosen.'}
             </div>
