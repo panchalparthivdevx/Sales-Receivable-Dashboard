@@ -3772,155 +3772,27 @@ app.get('/api/purchase/debug/recur-coa', async (req, res) => {
 });
 
 // ─── Purchase: Month-wise & Branch-wise Recurring Expense Report ──────────────
-// Reads from branchSync cache (branch_bills_cache/*.json) — no Zoho API calls needed.
-// Tea Machine vs Tea Milk split is derived from account_name in monthlyBillsByItem.
+// Bill-based (server/recurring-expense.js): which bills = Zoho ledger of the seven expense accounts
+// (the Branch P&L per-account cache, refreshed when older than an hour); basic / bill / outstanding /
+// paid from the synced bills and payments; bill DETAIL (paced, kept per bill) only where needed.
+// Replaced the old version that read the Budget-vs-Actual branch cache (branch_bills_cache), which
+// had stopped updating on 2 Sep 2026.
+const recurringExpense = require('./recurring-expense').create({
+  db, syncEngine, zohoGet, pacedGet: rptZohoGet,
+  readLedger: readPLAcctTxnsDisk, writeLedger: writePLAcctTxnsDisk,
+  isLedgerBusy: fy => !!_plPrefetchStatus[fy]?.running,
+  onChange: () => cache.keys().filter(k => k.startsWith('pur-recur-exp-')).forEach(k => cache.del(k)),
+  localDate, currentFYTag, isVercel: IS_VERCEL,
+});
 app.get('/api/purchase/charts/recurring-expense-report', async (req, res) => {
-  const fyParam  = req.query.fy || 'current';
-  const cacheKey = `pur-recur-exp-v5-${fyParam}`;
-  const hit      = cache.get(cacheKey);
+  const fy = req.query.fy === 'fy2526' ? 'fy2526' : 'current';
+  const cacheKey = `pur-recur-exp-v6-${fy}`;
+  const hit = cache.get(cacheKey);
   if (hit) return res.json(hit);
-
   try {
-    const now = new Date();
-    let fyStart, fyEnd, fyLabel;
-    if (fyParam === 'fy2526') {
-      fyStart = '2025-04-01'; fyEnd = '2026-03-31'; fyLabel = 'FY 2025-26';
-    } else {
-      const fyStartDate = now.getMonth() >= 3
-        ? new Date(now.getFullYear(), 3, 1)
-        : new Date(now.getFullYear() - 1, 3, 1);
-      fyStart  = localDate(fyStartDate);
-      fyEnd    = localDate(now);
-      const fy1 = fyStartDate.getFullYear();
-      fyLabel  = `FY ${fy1}-${String(fy1 + 1).slice(2)}`;
-    }
-
-    const HEADS = [
-      { key: 'hk_material', label: 'Housekeeping Material Expense' },
-      { key: 'hk_service',  label: 'Housekeeping Service' },
-      { key: 'internet',    label: 'Internet Connect. Charges' },
-      { key: 'security',    label: 'Security Services' },
-      { key: 'tc_machine',  label: 'Tea & Coffee Machine Maint.' },
-      { key: 'tc_milk',     label: 'Tea, Coffee & Milk Expense' },
-      { key: 'electricity', label: 'Electricity Expense' },
-    ];
-    const HEADS_BY_KEY = Object.fromEntries(HEADS.map(h => [h.key, h]));
-
-    // Build month key list for the FY
-    const monthKeys = [];
-    for (let d = new Date(fyStart + 'T00:00:00'); localDate(d) <= fyEnd; d.setMonth(d.getMonth() + 1)) {
-      const mk = localDate(d).slice(0, 7);
-      if (!monthKeys.includes(mk)) monthKeys.push(mk);
-    }
-    const monthKeySet = new Set(monthKeys);
-
-    // Classify a tea_coffee bill item as tc_machine or tc_milk by account_name
-    function tcHead(accountName) {
-      const n = (accountName || '').toLowerCase();
-      if (n.includes('machine')) return 'tc_machine';
-      return 'tc_milk';
-    }
-
-    // ── Read all branchSync cache files ──────────────────────────────────────
-    const emptyCell = () => ({ amount: 0, transactions: [] });
-    const rowMap = {};
-    const getRow = (headKey, branchName) => {
-      const rkey = `${headKey}|||${branchName}`;
-      if (!rowMap[rkey]) {
-        rowMap[rkey] = { head_key: headKey, head_label: HEADS_BY_KEY[headKey].label, branch: branchName,
-          monthly: Object.fromEntries(monthKeys.map(m => [m, emptyCell()])) };
-      }
-      return rowMap[rkey];
-    };
-
-    const allBranchData = await db.listBranchCaches(BRANCH_BILLS_DIR);
-
-    for (const branchData of allBranchData) {
-      if (!branchData) continue;
-
-      const branchName = branchData.branchName || '';
-      const mt  = branchData.monthlyTotals       || {};
-      const mbi = branchData.monthlyBillsByItem   || {};
-
-      // Map each budget field to the correct head key
-      const HEAD_FIELD = {
-        hk_material: 'hk_materials',
-        hk_service:  'hk_service',
-        internet:    'internet',
-        security:    'security',
-        electricity: 'elec_util',
-      };
-
-      for (const mk of monthKeys) {
-        const totals = mt[mk];
-        if (!totals) continue;
-
-        // Simple 1:1 head → budget field mapping
-        for (const [headKey, field] of Object.entries(HEAD_FIELD)) {
-          const amt = parseFloat(totals[field] || 0);
-          if (amt === 0) continue;
-          const row = getRow(headKey, branchName);
-          row.monthly[mk].amount += amt;
-          // Transaction detail from monthlyBillsByItem
-          for (const b of (mbi[mk]?.[field === 'hk_materials' ? 'hk_materials' : field === 'elec_util' ? 'elec_util' : field] || [])) {
-            row.monthly[mk].transactions.push({
-              type:   b.type === 'journal' ? 'Journal' : 'Bill',
-              ref:    b.bill_number || b.bill_id || '',
-              vendor: b.vendor || b.account_name || '',
-              date:   b.date || '',
-              amount: Math.round((b.line_item_total || b.bill_total || 0) * 100) / 100,
-            });
-          }
-        }
-
-        // Tea machine + tea milk — split from combined tea_coffee budget item
-        const tcBills = mbi[mk]?.tea_coffee || [];
-        for (const b of tcBills) {
-          const hk = tcHead(b.account_name);
-          const amt = parseFloat(b.line_item_total || b.bill_total || 0);
-          if (amt === 0) continue;
-          const row = getRow(hk, branchName);
-          row.monthly[mk].amount += amt;
-          row.monthly[mk].transactions.push({
-            type:   b.type === 'journal' ? 'Journal' : 'Bill',
-            ref:    b.bill_number || b.bill_id || '',
-            vendor: b.vendor || b.account_name || '',
-            date:   b.date || '',
-            amount: Math.round(amt * 100) / 100,
-          });
-        }
-      }
-    }
-
-    // Round accumulated amounts
-    for (const row of Object.values(rowMap)) {
-      for (const cell of Object.values(row.monthly)) {
-        cell.amount = Math.round(cell.amount * 100) / 100;
-      }
-    }
-
-    const rows = Object.values(rowMap)
-      .map(r => ({ ...r, total: monthKeys.reduce((s, m) => s + (r.monthly[m].amount || 0), 0) }))
-      .filter(r => r.total > 0)
-      .sort((a, b) => {
-        const hi = HEADS.findIndex(h => h.key === a.head_key) - HEADS.findIndex(h => h.key === b.head_key);
-        return hi !== 0 ? hi : a.branch.localeCompare(b.branch);
-      });
-
-    const months = monthKeys.map(k => {
-      const dt = new Date(k + '-01');
-      return { key: k, label: dt.toLocaleString('en-IN', { month: 'short', year: '2-digit' }) };
-    });
-
-    const result = {
-      fy:           fyLabel,
-      months,
-      rows,
-      heads:        HEADS.map(h => ({ key: h.key, label: h.label, meta: [] })),
-      all_branches: ['All Branches', ...new Set(rows.map(r => r.branch))].sort((a, b) => a === 'All Branches' ? -1 : b === 'All Branches' ? 1 : a.localeCompare(b)),
-    };
-
-    cache.set(cacheKey, result, 300); // 5-minute cache — refreshes when branchSync updates
+    const result = await recurringExpense.report(fy);
+    const busy = result.details_pending || result.bills_pending || result.ledger.refreshing || result.ledger.missing;
+    cache.set(cacheKey, result, busy ? 120 : 600);
     res.json(result);
   } catch (e) {
     console.error('[recurring-expense-report]', e.message);

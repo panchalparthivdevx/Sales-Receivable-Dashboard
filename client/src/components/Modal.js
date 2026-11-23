@@ -5,7 +5,8 @@ import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { formatINR, formatDate, statusColor } from '../utils/format';
 
-export default function Modal({ title, data, columns, onClose }) {
+// Optional: `totals` adds a TOTAL row summing the currency columns of the rows shown; `wide` widens the window
+export default function Modal({ title, data, columns, onClose, totals = false, wide = false }) {
   const [branchFilter, setBranchFilter] = useState('All');
   const [statusFilter, setStatusFilter] = useState('All');
 
@@ -48,6 +49,12 @@ export default function Modal({ title, data, columns, onClose }) {
     return true;
   }), [dataArr, branchFilter, statusFilter, vendorFilter, categoryFilter]);
 
+  let sums = null;
+  if (totals) {
+    sums = {};
+    for (const c of colsArr) if (c.type === 'currency') sums[c.key] = filtered.reduce((t, r) => t + (Number(r[c.key]) || 0), 0);
+  }
+
   const cellText = (row, col) => {
     if (col.type === 'currency') return formatINR(row[col.key]);
     if (col.type === 'date') return formatDate(row[col.key]);
@@ -62,6 +69,7 @@ export default function Modal({ title, data, columns, onClose }) {
           : col.type === 'date' ? formatDate(row[col.key])
           : (row[col.key] ?? '')
       )),
+      ...(sums ? [colsArr.map((col, ci) => (col.key in sums ? sums[col.key] : ci === 0 ? 'TOTAL' : ''))] : []),
     ]);
     const colWidths = colsArr.map((col, ci) => ({
       wch: Math.max(col.label.length, ...filtered.map(r => String(r[col.key] ?? '').length).slice(0, 200)) + 2
@@ -92,6 +100,8 @@ export default function Modal({ title, data, columns, onClose }) {
       startY: 68,
       head: [colsArr.map(c => c.label)],
       body: filtered.map(row => colsArr.map(col => cellText(row, col))),
+      ...(sums ? { foot: [colsArr.map((col, ci) => (col.key in sums ? formatINR(sums[col.key]) : ci === 0 ? 'TOTAL' : ''))],
+                   footStyles: { fillColor: [234, 244, 239], textColor: [24, 25, 27], fontStyle: 'bold' }, showFoot: 'lastPage' } : {}),
       styles: { fontSize: 8, cellPadding: 5, textColor: [24, 25, 27] },
       headStyles: { fillColor: [28, 73, 66], textColor: [255, 255, 255], fontStyle: 'bold', lineColor: [223, 231, 227], lineWidth: 0.5 },
       alternateRowStyles: { fillColor: [242, 242, 242] },
@@ -107,7 +117,7 @@ export default function Modal({ title, data, columns, onClose }) {
 
   return (
     <div style={S.overlay} onClick={onClose}>
-      <div style={S.modal} onClick={e => e.stopPropagation()}>
+      <div style={{ ...S.modal, ...(wide ? { maxWidth: '1400px' } : {}) }} onClick={e => e.stopPropagation()}>
 
         {/* Header */}
         <div style={S.header}>
@@ -180,7 +190,7 @@ export default function Modal({ title, data, columns, onClose }) {
                 {filtered.map((row, i) => (
                   <tr key={i} style={i % 2 === 0 ? S.rowEven : S.rowOdd}>
                     {colsArr.map(c => (
-                      <td key={c.key} style={{ ...S.td, textAlign: c.align || 'left' }}>
+                      <td key={c.key} style={{ ...S.td, textAlign: c.align || 'left', ...(c.type === 'currency' || c.type === 'date' ? { whiteSpace: 'nowrap' } : {}) }}>
                         {c.type === 'status' ? (
                           <span style={{ ...S.badge, background: statusColor(row[c.key]) + '22', color: statusColor(row[c.key]) }}>
                             {row[c.key] || '-'}
@@ -191,6 +201,17 @@ export default function Modal({ title, data, columns, onClose }) {
                   </tr>
                 ))}
               </tbody>
+              {sums && (
+                <tfoot>
+                  <tr>
+                    {colsArr.map((c, ci) => (
+                      <td key={c.key} style={{ ...S.td, ...S.totalCell, textAlign: c.align || 'left' }}>
+                        {c.key in sums ? formatINR(sums[c.key]) : ci === 0 ? 'TOTAL' : ''}
+                      </td>
+                    ))}
+                  </tr>
+                </tfoot>
+              )}
             </table>
           )}
         </div>
@@ -226,7 +247,8 @@ const S = {
   exportBtn: { display: 'flex', alignItems: 'center', gap: '0.35rem', background: '#EAF4EF', border: '1px solid #BBF7D0', color: '#15803D', padding: '0.35rem 0.85rem', borderRadius: 6, fontSize: '0.8rem', cursor: 'pointer', fontWeight: 600, whiteSpace: 'nowrap' },
   exportBtnPdf: { background: '#FEF2F2', border: '1px solid #FECACA', color: '#DC2626' },
 
-  body: { overflowY: 'auto', padding: '0 1.5rem 0.5rem' },
+  body: { overflow: 'auto', padding: '0 1.5rem 0.5rem' },
+  totalCell: { fontWeight: 700, background: '#EAF4EF', borderTop: '2px solid #DFE7E3', position: 'sticky', bottom: 0, whiteSpace: 'nowrap' },
   footer: { padding: '0.65rem 1.5rem', borderTop: '1px solid #DFE7E3', flexShrink: 0 },
   table: { width: '100%', borderCollapse: 'collapse', fontSize: '0.83rem' },
   th: { padding: '0.6rem 0.75rem', color: '#5D6C7B', fontWeight: 600, textAlign: 'left', borderBottom: '1px solid #DFE7E3', whiteSpace: 'nowrap', position: 'sticky', top: 0, background: '#FFFFFF', zIndex: 1 },

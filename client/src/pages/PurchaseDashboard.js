@@ -474,14 +474,27 @@ export default function PurchaseDashboard() {
         onFYChange={fy => { setRecurFY(fy); loadRecur(fy); }}
         quarter={recurQuarter}
         onQuarterChange={setRecurQuarter}
-        onCellClick={(title, transactions) => {
-          openModal(title, transactions, [
-            { label:'Type',    key:'type' },
-            { label:'Ref #',   key:'ref' },
-            { label:'Vendor/Account', key:'vendor' },
-            { label:'Date',    key:'date' },
-            { label:'Amount',  key:'amount', format: v => formatINR(v) },
-          ]);
+        onCellClick={(title, bills) => {
+          // Note column only when some row is part of a bill or still an estimate
+          const rows = bills.map(b => ({
+            ...b,
+            note: [b.part != null ? `Part of bill (${b.part}%)` : '', b.est ? 'Estimate — exact figures loading' : ''].filter(Boolean).join(' · '),
+          }));
+          setModal({ title, rows, totals: true, wide: true, columns: [
+            { key: 'account_name', label: 'Category' },
+            { key: 'branch_name',  label: 'Branch' },
+            { key: 'vendor_name',  label: 'Vendor Name' },
+            { key: 'bill_number',  label: 'Bill No.' },
+            { key: 'date',         label: 'Bill Date',          type: 'date' },
+            { key: 'basic',        label: 'Basic Amount',       type: 'currency', align: 'right' },
+            { key: 'gst',          label: 'GST Amount',         type: 'currency', align: 'right' },
+            { key: 'tds',          label: 'TDS',                type: 'currency', align: 'right' },
+            { key: 'bill_amount',  label: 'Bill Amount',        type: 'currency', align: 'right' },
+            { key: 'paid_date',    label: 'Paid Date',          type: 'date' },
+            { key: 'paid_amount',  label: 'Paid Amount',        type: 'currency', align: 'right' },
+            { key: 'outstanding',  label: 'Outstanding Amount', type: 'currency', align: 'right' },
+            ...(rows.some(r => r.note) ? [{ key: 'note', label: 'Note' }] : []),
+          ] });
         }}
       />
 
@@ -501,7 +514,7 @@ export default function PurchaseDashboard() {
         <POReport data={poData} loading={poLoading} />
       )}
 
-      {modal && <Modal title={modal.title} data={modal.rows} columns={modal.columns} onClose={closeModal} />}
+      {modal && <Modal title={modal.title} data={modal.rows} columns={modal.columns} totals={!!modal.totals} wide={!!modal.wide} onClose={closeModal} />}
 
       {/* ── Vendor Unused Credits Aging ──────────────────────────────────── */}
       <VendorCreditsAging
@@ -662,18 +675,24 @@ export function FYToggle({ fy, onChange }) {
   );
 }
 
+// Value colours of the recurring expense table
+const RX = { basic: '#18191B', bill: '#2563EB', out: '#DC2626', dash: '#9BA8B0', total: '#B45309' };
+const RX_COLS = [['basic', 'Basic Amt.'], ['bill', 'Bill Amt.'], ['outstanding', 'Outstanding Amt.']];
+
 function RecurringExpenseReport({ data, loading, branch, onBranchChange, head, onHeadChange, fy, onFYChange, quarter, onQuarterChange, onCellClick }) {
   // Expense-head expand/collapse: head key → true (open) / false (closed).
   // A head not in the map is closed, except when only one head is shown or a single branch is picked.
   const [openHeads, setOpenHeads] = useState({});
 
-  const allMonths   = data?.months     || [];
-  const allRows     = data?.rows       || [];
+  const allMonths   = data?.months       || [];
+  const allRows     = data?.rows         || [];
   const allBranches = data?.all_branches || ['All Branches'];
-  const allHeads    = data?.heads      || [];
+  const allHeads    = data?.heads        || [];
 
-  const qMonthNums  = QUARTER_MONTHS[quarter] || null;
-  const months      = qMonthNums ? allMonths.filter(m => qMonthNums.includes(parseInt(m.key.slice(5,7),10))) : allMonths;
+  const qMonthNums = QUARTER_MONTHS[quarter] || null;
+  const months     = qMonthNums ? allMonths.filter(m => qMonthNums.includes(parseInt(m.key.slice(5, 7), 10))) : allMonths;
+  const monthKeys  = months.map(m => m.key);
+  const periodText = qMonthNums ? `${QUARTER_LABELS[quarter]} ${data?.fy || ''}`.trim() : (data?.fy || 'FY');
 
   const rows = allRows.filter(r => {
     if (branch !== 'All Branches' && r.branch !== branch) return false;
@@ -681,16 +700,13 @@ function RecurringExpenseReport({ data, loading, branch, onBranchChange, head, o
     return true;
   });
 
-  // Group rows by head_key
+  // Group rows by head_key (the server sends them in head order)
   const groups = [];
-  let curKey = null, curGroup = [];
   for (const r of rows) {
-    if (r.head_key !== curKey) {
-      if (curGroup.length) groups.push({ key: curKey, label: curGroup[0].head_label, rows: curGroup });
-      curKey = r.head_key; curGroup = [r];
-    } else { curGroup.push(r); }
+    const last = groups[groups.length - 1];
+    if (last && last.key === r.head_key) last.rows.push(r);
+    else groups.push({ key: r.head_key, label: r.head_label, rows: [r] });
   }
-  if (curGroup.length) groups.push({ key: curKey, label: curGroup[0].head_label, rows: curGroup });
 
   const headOpenByDefault = groups.length === 1 || branch !== 'All Branches';
   const isHeadOpen   = k => (k in openHeads ? openHeads[k] : headOpenByDefault);
@@ -702,78 +718,95 @@ function RecurringExpenseReport({ data, loading, branch, onBranchChange, head, o
   });
   const openHeadCount = groups.filter(g => isHeadOpen(g.key)).length;
 
-  // Chart: expense head totals per month
+  // Basic / Bill / Outstanding (and the bills behind them) over some rows × some months
+  const sumOf = (list, keys) => {
+    const s = { basic: 0, bill: 0, outstanding: 0, bills: [] };
+    for (const r of list) for (const k of keys) {
+      const c = r.monthly?.[k];
+      if (!c) continue;
+      s.basic += c.basic || 0; s.bill += c.bill || 0; s.outstanding += c.outstanding || 0;
+      for (const b of c.bills || []) s.bills.push(b);
+    }
+    return s;
+  };
+
+  // Chart: basic amount per expense head per month
   const chartData = months.map(m => {
     const pt = { name: m.label };
-    for (const h of allHeads) {
-      pt[h.key] = rows.filter(r => r.head_key === h.key)
-        .reduce((s, r) => s + (r.monthly[m.key]?.amount || 0), 0);
-    }
+    for (const h of allHeads) pt[h.key] = sumOf(rows.filter(r => r.head_key === h.key), [m.key]).basic;
     return pt;
   });
 
-  const fmtAmt = v => v > 0 ? formatINR(v) : '—';
-  const fmtMeta = (cell, metaDefs) => metaDefs.map(({ field, label }) => {
-    const val = cell[field] || 0;
-    return val > 0 ? `${label}: ${field.includes('unit') || field.includes('milk') ? val.toLocaleString('en-IN') : val}` : null;
-  }).filter(Boolean).join(' | ');
+  // Click on a figure → its bills (an Outstanding figure lists only the bills still unpaid)
+  const openBills = (title, s, kind) => {
+    const list = kind === 'outstanding' ? s.bills.filter(b => b.outstanding > 0.5) : s.bills;
+    if (list.length) onCellClick(`${title}${kind === 'outstanding' ? ' — outstanding bills' : ''}`, list);
+  };
+  const cells = (key, title, s, base, withCount) => {
+    const show = { basic: Math.abs(s.basic) >= 0.5, bill: Math.abs(s.bill) >= 0.5, outstanding: s.outstanding >= 0.5 };
+    const color = { basic: RX.basic, bill: RX.bill, outstanding: RX.out };
+    return RX_COLS.map(([k]) => (
+      <td key={`${key}-${k}`}
+        onClick={show[k] ? e => { e.stopPropagation(); openBills(title, s, k); } : undefined}
+        title={show[k] ? 'Click to see the bills' : undefined}
+        style={{ ...base, color: show[k] ? color[k] : RX.dash, cursor: show[k] ? 'pointer' : 'default' }}>
+        {show[k] ? formatINR(s[k]) : '—'}
+        {k === 'basic' && withCount && show.basic && <span style={{ fontSize: '0.62rem', color: '#3b82f6', marginLeft: 3 }}>({s.bills.length})</span>}
+      </td>
+    ));
+  };
 
-  const _fmtNum = v => v > 0 ? '₹' + Math.round(v).toLocaleString('en-IN') : '—';
+  const _fmtNum = v => (Math.abs(v) >= 0.5 ? '₹' + Math.round(v).toLocaleString('en-IN') : '—');
+  const exportLines = () => {
+    // [label, kind, sums per month…, total] for every head, its branches and the grand total
+    const out = [];
+    for (const { label: hLabel, rows: hRows } of groups) {
+      out.push({ label: hLabel, kind: 'head', per: months.map(m => sumOf(hRows, [m.key])), tot: sumOf(hRows, monthKeys) });
+      for (const r of hRows) out.push({ label: r.branch, kind: 'branch', per: months.map(m => sumOf([r], [m.key])), tot: sumOf([r], monthKeys) });
+    }
+    out.push({ label: 'GRAND TOTAL', kind: 'grand', per: months.map(m => sumOf(rows, [m.key])), tot: sumOf(rows, monthKeys) });
+    return out;
+  };
 
   const exportToCSV = () => {
-    const cols = ['Branch', ...months.map(m => m.label), 'Total'];
-    const esc  = s => `"${String(s).replace(/"/g, '""')}"`;
-    const lines = [cols.map(esc).join(',')];
-    for (const { label: hLabel, rows: hRows } of groups) {
-      lines.push([esc(`=== ${hLabel} ===`), ...months.map(() => '""'), '""'].join(','));
-      for (const r of hRows) {
-        const rowTotal = months.reduce((s, m) => s + (r.monthly[m.key]?.amount || 0), 0);
-        lines.push([esc(r.branch), ...months.map(m => ((r.monthly[m.key]?.amount || 0).toFixed(2))), rowTotal.toFixed(2)].join(','));
-      }
-      const gTotal = hRows.reduce((s, r) => s + months.reduce((ms, m) => ms + (r.monthly[m.key]?.amount || 0), 0), 0);
-      lines.push([esc(`Sub Total — ${hLabel}`), ...months.map(m => hRows.reduce((s, r) => s + (r.monthly[m.key]?.amount || 0), 0).toFixed(2)), gTotal.toFixed(2)].join(','));
-      lines.push('');
+    const esc = s => `"${String(s).replace(/"/g, '""')}"`;
+    const head1 = ['Expense Head / Branch', ...[...months.map(m => m.label), 'Total'].flatMap(l => RX_COLS.map(([, c]) => `${l} ${c}`))];
+    const lines = [head1.map(esc).join(',')];
+    for (const l of exportLines()) {
+      const label = l.kind === 'branch' ? `   ${l.label}` : l.label;
+      lines.push([esc(label), ...[...l.per, l.tot].flatMap(s => RX_COLS.map(([k]) => s[k].toFixed(2)))].join(','));
     }
-    const grandTotal = rows.reduce((s, r) => s + months.reduce((ms, m) => ms + (r.monthly[m.key]?.amount || 0), 0), 0);
-    lines.push([esc('GRAND TOTAL'), ...months.map(m => rows.reduce((s, r) => s + (r.monthly[m.key]?.amount || 0), 0).toFixed(2)), grandTotal.toFixed(2)].join(','));
     const blob = new Blob(['﻿' + lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement('a');
-    a.href = url; a.download = `recurring-expenses-${(data?.fy || 'fy').replace(/\s/g,'-')}-${new Date().toISOString().slice(0,10)}.csv`;
+    a.href = url; a.download = `recurring-expenses-${(data?.fy || 'fy').replace(/\s/g, '-')}-${new Date().toISOString().slice(0, 10)}.csv`;
     document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
   };
 
   const exportToPDF = () => {
-    const colHeaders = ['Branch', ...months.map(m => m.label), 'Total'];
-    let tableRows = '';
-    for (const { label: hLabel, rows: hRows } of groups) {
-      tableRows += `<tr class="gh"><td colspan="${colHeaders.length}">${hLabel}</td></tr>`;
-      for (const r of hRows) {
-        const rowTotal = months.reduce((s, m) => s + (r.monthly[m.key]?.amount || 0), 0);
-        tableRows += `<tr><td>${r.branch}</td>${months.map(m => `<td>${_fmtNum(r.monthly[m.key]?.amount || 0)}</td>`).join('')}<td class="tot">${_fmtNum(rowTotal)}</td></tr>`;
-      }
-      const gTotal = hRows.reduce((s, r) => s + months.reduce((ms, m) => ms + (r.monthly[m.key]?.amount || 0), 0), 0);
-      tableRows += `<tr class="st"><td>Sub Total — ${hLabel}</td>${months.map(m => `<td>${_fmtNum(hRows.reduce((s, r) => s + (r.monthly[m.key]?.amount || 0), 0))}</td>`).join('')}<td>${_fmtNum(gTotal)}</td></tr>`;
-    }
-    const grand = rows.reduce((s, r) => s + months.reduce((ms, m) => ms + (r.monthly[m.key]?.amount || 0), 0), 0);
-    tableRows += `<tr class="gt"><td>GRAND TOTAL</td>${months.map(m => `<td>${_fmtNum(rows.reduce((s, r) => s + (r.monthly[m.key]?.amount || 0), 0))}</td>`).join('')}<td>${_fmtNum(grand)}</td></tr>`;
-    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Recurring Expenses — ${data?.fy||''}</title><style>
-      body{font-family:Arial,sans-serif;font-size:9px;margin:16px;color:#18191B}
-      h2{font-size:13px;margin:0 0 3px}p{font-size:9px;color:#5D6C7B;margin:0 0 10px}
+    const groupsHead = [...months.map(m => m.label), 'Total'];
+    const thead = `<tr><th rowspan="2">Expense Head / Branch</th>${groupsHead.map(l => `<th colspan="3" class="c">${l}</th>`).join('')}</tr>`
+      + `<tr>${groupsHead.map(() => RX_COLS.map(([, c]) => `<th>${c}</th>`).join('')).join('')}</tr>`;
+    const body = exportLines().map(l => {
+      const cls = l.kind === 'head' ? 'gh' : l.kind === 'grand' ? 'gt' : '';
+      const label = l.kind === 'branch' ? `&nbsp;&nbsp;↳ ${l.label}` : l.label;
+      return `<tr class="${cls}"><td>${label}</td>${[...l.per, l.tot].map(s => RX_COLS.map(([k]) => `<td>${_fmtNum(s[k])}</td>`).join('')).join('')}</tr>`;
+    }).join('');
+    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Recurring Expenses — ${data?.fy || ''}</title><style>
+      body{font-family:Arial,sans-serif;font-size:8px;margin:12px;color:#18191B}
+      h2{font-size:12px;margin:0 0 3px}p{font-size:8px;color:#5D6C7B;margin:0 0 8px}
       table{border-collapse:collapse;width:100%}
-      th{background:#1C4942;color:#fff;padding:5px 7px;text-align:right;white-space:nowrap;font-size:9px}
-      th:first-child{text-align:left;min-width:160px}
-      td{padding:3px 7px;text-align:right;border-bottom:1px solid #e2e8f0;white-space:nowrap}
+      th{background:#1C4942;color:#fff;padding:3px 5px;text-align:right;white-space:nowrap;font-size:8px;border:1px solid #2D6B62}
+      th.c{text-align:center}th:first-child{text-align:left;min-width:140px}
+      td{padding:2px 5px;text-align:right;border-bottom:1px solid #e2e8f0;white-space:nowrap}
       td:first-child{text-align:left}
-      tr.gh td{background:#EAF4EF;color:#1C4942;font-weight:700;text-align:left;padding:5px 7px}
-      tr.st td{background:#F0FDF4;color:#15803D;font-weight:700;border-top:1px solid #BBF7D0}
-      tr.gt td{background:#1C4942;color:#fff;font-weight:700;font-size:10px;border-top:2px solid #002B31}
-      td.tot{color:#B45309;font-weight:700}
-      @media print{@page{size:landscape;margin:10mm}body{margin:0}}
+      tr.gh td{background:#EAF4EF;color:#1C4942;font-weight:700}
+      tr.gt td{background:#1C4942;color:#fff;font-weight:700}
+      @media print{@page{size:A3 landscape;margin:8mm}body{margin:0}}
     </style></head><body>
-    <h2>Month-wise &amp; Branch-wise Recurring Expense Report — ${data?.fy||''}</h2>
-    <p>Generated: ${new Date().toLocaleString('en-IN')}${branch!=='All Branches'?' · Branch: '+branch:''}${head!=='all'?' · Head: '+allHeads.find(h=>h.key===head)?.label:''}</p>
-    <table><thead><tr>${colHeaders.map(c=>`<th>${c}</th>`).join('')}</tr></thead><tbody>${tableRows}</tbody></table>
+    <h2>Month-wise &amp; Branch-wise Recurring Expense Report — ${periodText}</h2>
+    <p>Basic Amt. = amount posted to the expense head · Bill Amt. = bill total payable (after TDS) · Outstanding Amt. = unpaid balance · Generated: ${new Date().toLocaleString('en-IN')}${branch !== 'All Branches' ? ' · Branch: ' + branch : ''}${head !== 'all' ? ' · Head: ' + (allHeads.find(h => h.key === head)?.label || head) : ''}</p>
+    <table><thead>${thead}</thead><tbody>${body}</tbody></table>
     </body></html>`;
     const w = window.open('', '_blank', 'width=1300,height=850');
     w.document.write(html); w.document.close();
@@ -782,9 +815,16 @@ function RecurringExpenseReport({ data, loading, branch, onBranchChange, head, o
 
   const anyFilter = branch !== 'All Branches' || head !== 'all' || (quarter || 'all') !== 'all';
   const clearAll  = () => { onBranchChange('All Branches'); onHeadChange('all'); onQuarterChange('all'); };
-  const monthSum  = (list, key) => list.reduce((s, r) => s + (r.monthly[key]?.amount || 0), 0);
-  const grpCell   = { ...VCS.td, ...VCS.num, fontWeight: 700, color: '#f59e0b' };
+  const numCell   = { ...VCS.td, ...VCS.num };
+  const grpCell   = { ...numCell, fontWeight: 700 };
   const totCell   = { ...grpCell, paddingTop: '0.75rem' };
+  const stickyCol = bg => ({ position: 'sticky', left: 0, zIndex: 1, background: bg });
+  const excl      = data?.excluded || {};
+  const exclText  = [
+    excl.journal       ? `${excl.journal.count} journal entr${excl.journal.count !== 1 ? 'ies' : 'y'}` : null,
+    excl.vendor_credit ? `${excl.vendor_credit.count} vendor credit${excl.vendor_credit.count !== 1 ? 's' : ''} (${formatINR(excl.vendor_credit.amount)})` : null,
+    ...Object.entries(excl).filter(([k]) => k !== 'journal' && k !== 'vendor_credit').map(([k, v]) => `${v.count} ${k.replace(/_/g, ' ')}`),
+  ].filter(Boolean).join(', ');
 
   return (
     <div style={VCS.card}>
@@ -818,6 +858,22 @@ function RecurringExpenseReport({ data, loading, branch, onBranchChange, head, o
         {anyFilter && <button onClick={clearAll} style={VCS.clearBtn}>Clear</button>}
       </div>
 
+      {!loading && data?.details_pending > 0 && (
+        <div style={VCS.notice}>
+          Reading exact GST and payment dates from Zoho for {data.details_pending} bill{data.details_pending !== 1 ? 's' : ''} — until then their figures are estimates (marked in the bill list). Refresh in a few minutes.
+        </div>
+      )}
+      {!loading && data?.bills_pending > 0 && (
+        <div style={VCS.notice}>
+          {data.bills_pending} bill{data.bills_pending !== 1 ? 's' : ''} of {data.fy} ({formatINR(data.bills_pending_basic)} basic) {data.bills_pending !== 1 ? 'are' : 'is'} still being read from Zoho and not in the figures yet. Refresh in a few minutes.
+        </div>
+      )}
+      {!loading && data?.ledger?.missing > 0 && (
+        <div style={{ ...VCS.notice, background: '#FEF2F2', borderColor: '#FECACA', color: '#991B1B' }}>
+          Zoho's ledger for {data.ledger.missing} expense head{data.ledger.missing !== 1 ? 's' : ''} could not be read{data.ledger.error ? ` (${data.ledger.error})` : ''}, so {data.ledger.missing !== 1 ? 'they are' : 'it is'} missing below. Try again in a few minutes.
+        </div>
+      )}
+
       {loading && <div style={VCS.empty}>Loading recurring expense data…</div>}
       {!loading && !data && <div style={VCS.empty}>No data available</div>}
       {!loading && data && rows.length === 0 && <div style={VCS.empty}>No data for selected filters.</div>}
@@ -827,14 +883,14 @@ function RecurringExpenseReport({ data, loading, branch, onBranchChange, head, o
           {/* Stacked Bar Chart */}
           {chartData.some(pt => allHeads.some(h => (pt[h.key] || 0) > 0)) && (
             <div style={{ marginBottom: '1rem' }}>
-              <p style={VCS.chartLbl}>Monthly Recurring Expense — By Head</p>
+              <p style={VCS.chartLbl}>Monthly Recurring Expense (Basic Amt.) — By Head</p>
               <ResponsiveContainer width="100%" height={200}>
                 <BarChart data={chartData} margin={{ top: 5, right: 10, bottom: 5, left: 10 }}>
                   <XAxis dataKey="name" tick={{ fill: '#5D6C7B', fontSize: 10 }} axisLine={{ stroke: '#DFE7E3' }} tickLine={false} />
-                  <YAxis tickFormatter={v => `₹${(v/100000).toFixed(0)}L`} tick={{ fill: '#5D6C7B', fontSize: 10 }} axisLine={false} tickLine={false} width={55} />
+                  <YAxis tickFormatter={v => `₹${(v / 100000).toFixed(0)}L`} tick={{ fill: '#5D6C7B', fontSize: 10 }} axisLine={false} tickLine={false} width={55} />
                   <Tooltip formatter={(v, name) => [formatINR(v), allHeads.find(h => h.key === name)?.label || name]} contentStyle={{ background: '#FFFFFF', border: '1px solid #DFE7E3', borderRadius: 8, fontSize: '0.8rem' }} labelStyle={{ color: '#5D6C7B' }} cursor={{ fill: 'rgba(28,73,66,0.06)' }} />
-                  {allHeads.filter(h => head === 'all' || h.key === head).map((h, i) => (
-                    <Bar key={h.key} dataKey={h.key} stackId="a" fill={HEAD_COLORS[h.key] || COLORS[i % COLORS.length]} radius={i === allHeads.length - 1 ? [3,3,0,0] : [0,0,0,0]} />
+                  {allHeads.filter(h => head === 'all' || h.key === head).map((h, i, arr) => (
+                    <Bar key={h.key} dataKey={h.key} stackId="a" fill={HEAD_COLORS[h.key] || COLORS[i % COLORS.length]} radius={i === arr.length - 1 ? [3, 3, 0, 0] : [0, 0, 0, 0]} />
                   ))}
                 </BarChart>
               </ResponsiveContainer>
@@ -851,7 +907,7 @@ function RecurringExpenseReport({ data, loading, branch, onBranchChange, head, o
           {/* Expand / Collapse controls */}
           <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem', flexWrap: 'wrap' }}>
             <span style={{ color: '#5D6C7B', fontSize: '0.75rem' }}>
-              {openHeadCount} of {groups.length} expense head{groups.length !== 1 ? 's' : ''} expanded · click an expense head row to open or close it
+              {openHeadCount} of {groups.length} expense head{groups.length !== 1 ? 's' : ''} expanded · click an expense head name to open or close it · click any amount to see its bills
             </span>
             <button onClick={() => setAllHeads(true)} disabled={openHeadCount === groups.length}
               style={{ ...VCS.clearBtn, opacity: openHeadCount === groups.length ? 0.5 : 1, cursor: openHeadCount === groups.length ? 'default' : 'pointer' }}>
@@ -863,81 +919,72 @@ function RecurringExpenseReport({ data, loading, branch, onBranchChange, head, o
             </button>
           </div>
 
-          {/* Pivot Table */}
+          {/* Pivot Table: per month Basic / Bill / Outstanding */}
           <div style={{ overflowX: 'auto' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem', minWidth: 700 }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.84rem', minWidth: 900 }}>
               <thead>
                 <tr>
-                  <th style={{ ...VCS.th, minWidth: 220 }}>Expense Head / Branch</th>
-                  {months.map(m => <th key={m.key} style={{ ...VCS.th, textAlign: 'right', minWidth: 110 }}>{m.label}</th>)}
-                  <th style={{ ...VCS.th, textAlign: 'right', minWidth: 120, color: '#f59e0b' }}>Total</th>
+                  <th rowSpan={2} style={{ ...VCS.th, minWidth: 240, verticalAlign: 'bottom', ...stickyCol('#F9F9F9'), zIndex: 2 }}>Expense Head / Branch</th>
+                  {months.map(m => (
+                    <th key={m.key} colSpan={3} style={{ ...VCS.th, textAlign: 'center', color: '#18191B', borderLeft: '1px solid #DFE7E3' }}>{m.label}</th>
+                  ))}
+                  <th colSpan={3} style={{ ...VCS.th, textAlign: 'center', color: RX.total, borderLeft: '1px solid #DFE7E3' }}>Total</th>
+                </tr>
+                <tr>
+                  {[...monthKeys, 'total'].flatMap(k => RX_COLS.map(([c, label], ci) => (
+                    <th key={`${k}-${c}`} style={{ ...VCS.th, textAlign: 'right', minWidth: 95, color: c === 'bill' ? RX.bill : c === 'outstanding' ? RX.out : '#5D6C7B', ...(ci === 0 ? { borderLeft: '1px solid #DFE7E3' } : {}) }}>{label}</th>
+                  )))}
                 </tr>
               </thead>
               <tbody>
                 {groups.map(({ key: hKey, label: hLabel, rows: hRows }) => {
-                  const metaDefs   = allHeads.find(h => h.key === hKey)?.meta || [];
-                  const headColor  = HEAD_COLORS[hKey] || '#64748b';
-                  const groupTotal = months.reduce((s, m) => s + monthSum(hRows, m.key), 0);
-                  const isOpen     = isHeadOpen(hKey);
+                  const headColor = HEAD_COLORS[hKey] || '#64748b';
+                  const isOpen    = isHeadOpen(hKey);
+                  const branchTxt = branch !== 'All Branches' ? branch : 'All branches';
                   return (
                     <React.Fragment key={hKey}>
-                      {/* Expense head row — click to expand / collapse its branches */}
-                      <tr style={{ ...VCS.grpRow, cursor: 'pointer' }}
-                        role="button" tabIndex={0} aria-expanded={isOpen}
-                        title={isOpen ? 'Click to collapse' : 'Click to expand'}
-                        onClick={() => toggleHead(hKey)}
-                        onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleHead(hKey); } }}>
-                        <td style={{ ...VCS.td, fontWeight: 700, color: headColor, whiteSpace: 'nowrap' }}>
+                      {/* Expense head (main) row — click its name to expand / collapse its branches */}
+                      <tr style={VCS.grpRow}>
+                        <td role="button" tabIndex={0} aria-expanded={isOpen}
+                          title={isOpen ? 'Click to collapse' : 'Click to expand'}
+                          onClick={() => toggleHead(hKey)}
+                          onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleHead(hKey); } }}
+                          style={{ ...VCS.td, fontWeight: 700, color: headColor, whiteSpace: 'nowrap', cursor: 'pointer', ...stickyCol('#F9F9F9') }}>
                           <span style={{ display: 'inline-block', width: 14, color: '#475569', fontSize: '0.7rem' }}>{isOpen ? '▼' : '▶'}</span>
                           <span style={{ ...VCS.dot, background: headColor }} />
                           {hLabel}
                           <span style={VCS.count}>({hRows.length} branch{hRows.length !== 1 ? 'es' : ''})</span>
                         </td>
-                        {months.map(m => <td key={m.key} style={grpCell}>{fmtAmt(monthSum(hRows, m.key))}</td>)}
-                        <td style={grpCell}>{fmtAmt(groupTotal)}</td>
+                        {months.flatMap(m => cells(m.key, `${hLabel} — ${branchTxt} — ${m.label}`, sumOf(hRows, [m.key]), grpCell))}
+                        {cells('total', `${hLabel} — ${branchTxt} — ${periodText}`, sumOf(hRows, monthKeys), grpCell)}
                       </tr>
-                      {/* Branch rows (only when the expense head is expanded) */}
-                      {isOpen && hRows.map((r, i) => {
-                        const rowTotal = months.reduce((s, m) => s + (r.monthly[m.key]?.amount || 0), 0);
-                        return (
-                          <tr key={`${hKey}|||${r.branch}`} style={VCS.vendRow(i)}>
-                            <td style={{ ...VCS.td, paddingLeft: '1.75rem', color: '#5D6C7B', fontSize: '0.82rem', whiteSpace: 'nowrap' }}>↳ {r.branch}</td>
-                            {months.map(m => {
-                              const cell = r.monthly[m.key] || { amount: 0, transactions: [] };
-                              const meta = fmtMeta(cell, metaDefs);
-                              const txns = cell.transactions || [];
-                              return (
-                                <td key={m.key} title={meta || undefined}
-                                  onClick={() => txns.length > 0 && onCellClick(`${hLabel} — ${r.branch} — ${m.label}`, txns)}
-                                  style={{ ...VCS.td, ...VCS.num, fontSize: '0.82rem', verticalAlign: 'top', cursor: txns.length > 0 ? 'pointer' : 'default' }}>
-                                  {cell.amount > 0 ? (
-                                    <>
-                                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-                                        {formatINR(cell.amount)}{txns.length > 0 && <span style={{ fontSize: '0.62rem', color: '#3b82f6' }}>({txns.length})</span>}
-                                      </span>
-                                      {meta && <div style={{ fontSize: '0.65rem', color: '#9BA8B0', marginTop: 2 }}>{meta}</div>}
-                                    </>
-                                  ) : <span style={{ color: '#9BA8B0' }}>—</span>}
-                                </td>
-                              );
-                            })}
-                            <td style={{ ...VCS.td, ...VCS.num, fontSize: '0.82rem', fontWeight: 600, color: '#f59e0b' }}>{fmtAmt(rowTotal)}</td>
-                          </tr>
-                        );
-                      })}
+                      {/* Branch (sub) rows, only when the expense head is expanded */}
+                      {isOpen && hRows.map((r, i) => (
+                        <tr key={`${hKey}|||${r.branch}`} style={VCS.vendRow(i)}>
+                          <td style={{ ...VCS.td, paddingLeft: '1.75rem', color: '#5D6C7B', fontSize: '0.82rem', whiteSpace: 'nowrap', ...stickyCol(i % 2 === 0 ? '#FFFFFF' : '#F9F9F9') }}>↳ {r.branch}</td>
+                          {months.flatMap(m => cells(m.key, `${hLabel} — ${r.branch} — ${m.label}`, sumOf([r], [m.key]), { ...numCell, fontSize: '0.82rem' }, true))}
+                          {cells('total', `${hLabel} — ${r.branch} — ${periodText}`, sumOf([r], monthKeys), { ...numCell, fontSize: '0.82rem', fontWeight: 600 })}
+                        </tr>
+                      ))}
                     </React.Fragment>
                   );
                 })}
               </tbody>
               <tfoot>
                 <tr style={{ borderTop: '2px solid #DFE7E3' }}>
-                  <td style={{ ...VCS.td, fontWeight: 700, color: '#18191B', paddingTop: '0.75rem' }}>GRAND TOTAL</td>
-                  {months.map(m => <td key={m.key} style={totCell}>{fmtAmt(monthSum(rows, m.key))}</td>)}
-                  <td style={{ ...totCell, fontSize: '0.95rem' }}>{fmtAmt(months.reduce((s, m) => s + monthSum(rows, m.key), 0))}</td>
+                  <td style={{ ...VCS.td, fontWeight: 700, color: '#18191B', paddingTop: '0.75rem', ...stickyCol('#FFFFFF') }}>GRAND TOTAL</td>
+                  {months.flatMap(m => cells(m.key, `All expense heads — ${m.label}`, sumOf(rows, [m.key]), totCell))}
+                  {cells('total', `All expense heads — ${periodText}`, sumOf(rows, monthKeys), { ...totCell, fontSize: '0.92rem' })}
                 </tr>
               </tfoot>
             </table>
           </div>
+
+          <p style={{ color: '#5D6C7B', fontSize: '0.72rem', margin: '0.75rem 0 0', lineHeight: 1.5 }}>
+            Basic Amt. = amount the bill posted to the expense head (as in Zoho's P&amp;L) · Bill Amt. = bill total payable to the vendor (after TDS) · Outstanding Amt. = unpaid balance · month = bill date.
+            {exclText && <> Not included (not bills): {exclText}.</>}
+            {data.ledger?.fetched_at && <> Zoho ledger read {new Date(data.ledger.fetched_at).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}{data.ledger.refreshing ? ' — updating now' : ''}.</>}
+          </p>
         </>
       )}
     </div>
