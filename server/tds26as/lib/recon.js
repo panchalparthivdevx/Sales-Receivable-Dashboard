@@ -29,7 +29,9 @@ function create({ sync, cfgNow }) {
     const books = BM.build({ entity, rows, docs, centralInvoices: central ? central.data : [] });
     // section aliases apply at read time too, so a new alias needs no re-import
     for (const c of credits) { const fam = require('./config').sectionFamily(c.section_raw, cfg.settings.section_aliases); if (fam) c.section = fam; }
-    const v = { entity, settings: cfg.settings, books, items: books.items, credits, clientsDoc, clients: CL.index(clientsDoc), review, cf, statements: stmts, sync: syncState,
+    // reversal pairs inside a statement (+X and (X), remark G) cancel each other before matching — see statements.netReversals
+    const net = ST.netReversals(credits);
+    const v = { entity, settings: cfg.settings, books, items: books.items, credits: net.credits, reversals: net.pairs, clientsDoc, clients: CL.index(clientsDoc), review, cf, statements: stmts, sync: syncState,
       zohoMonths: new Set(Object.keys(syncState.listed || {})), docs };
     memo.set(k, { at: Date.now(), v });
     return v;

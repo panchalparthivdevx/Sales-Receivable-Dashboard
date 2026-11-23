@@ -141,7 +141,7 @@ router.post('/onboard/check', gate('config'), wrap(async (req, res) => {
   const zr = need().zr, out = [];
   const probe = async (label, path, params) => { try { await zr.get(e.org_id, path, params, { paceMs: 600 }); out.push({ label, ok: true }); } catch (x) { out.push({ label, ok: false, message: zr.errText(x) }); } };
   await probe('Organisation', `/organizations/${e.org_id}`, {});
-  for (const l of e.ledgers) await probe(`Ledger postings — ${l.name}`, '/chartofaccounts/transactions', { account_id: l.account_id, 'date.start': `${PER.fyOf(todayIST()).slice(0, 4)}-04-01`, 'date.end': todayIST(), per_page: 1 });
+  for (const l of e.ledgers) await probe(`Ledger postings — ${l.name}`, '/chartofaccounts/transactions', { account_id: l.account_id, date_start: `${PER.fyOf(todayIST()).slice(0, 4)}-04-01`, date_end: todayIST(), per_page: 1 });
   await probe('Invoices', '/invoices', { per_page: 1 });
   await probe('Customer payments', '/customerpayments', { per_page: 1 });
   await probe('Journals', '/journals', { per_page: 1 });

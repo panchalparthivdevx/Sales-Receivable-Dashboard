@@ -123,6 +123,7 @@ function dashboard(d, res, period) {
   totals.ledger_control = sum(lr, r => r.dr - r.cr);
   totals.ledger_postings = lr.length;
   totals.transfers = d.books.transfers.filter(t => inP(t.date)).length;
+  totals.reversal_pairs = (d.reversals || []).filter(p => inP(p.txn_date)).length;          // +X / (X) pairs in 26AS, netted to ₹0 before matching
   const byStatus = Object.keys(STATUS).map(s => ({ status: s, label: STATUS[s], units: eff(s).length, zoho: sum(eff(s), u => u.z_amount), deposited: sum(eff(s), u => u.deposited), diff: sum(eff(s), u => u.diff) }));
   const byMethod = Object.keys(METHOD).map(m => ({ method: m, label: METHOD[m], units: U.filter(u => u.method === m).length })).filter(x => x.units);
   return { totals, by_status: byStatus, by_method: byMethod, bridge: bridge(d, res, totals), definitions: DEFINITIONS, transfers: d.books.transfers.filter(t => t.date >= period.from && t.date <= period.to) };

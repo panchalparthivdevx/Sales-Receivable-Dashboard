@@ -29,7 +29,7 @@ export default function ImportsTab({ meta, entity, params, stamp, onChanged }) {
     setBusy('preview'); setErr(''); setOk(''); setPv(null);
     const fd = new FormData(); fd.append('entity', entity.id); fd.append('file', file); if (password) fd.append('password', password);
     try { const x = await t.preview(fd); setPv(x); setNeedPw(false); setExtra({ fy: x.header.fy || '', statement_date: x.header.statement_date || '', ack: false }); }
-    catch (e) { const b = e?.response?.data; if (b && b.needs_password) { setNeedPw(true); setErr(b.wrong_password ? 'That password is not correct — try again.' : b.error); } else setErr(errMsg(e)); }
+    catch (e) { const b = e?.response?.data; if (b && b.needs_password) { setNeedPw(true); setErr(b.wrong_password ? 'That password is not correct — try again.' : errMsg(e)); } else setErr(errMsg(e)); }
     finally { setBusy(''); }
   };
   const commit = async () => {
@@ -48,7 +48,8 @@ export default function ImportsTab({ meta, entity, params, stamp, onChanged }) {
       let x = await t.syncStep({ entity: entity.id, start: true, mode, ...params });
       setProg(x);
       for (let i = 0; x.more && !stop.current && i < 200; i++) { x = await t.syncStep({ entity: entity.id }); setProg(x); }
-      if (x.error) setErr(`Zoho sync: ${x.error}`); else if (stop.current) setOk('Stopped after the current step — start again to continue.'); else setOk(`Zoho sync finished (${x.calls} calls in the last step). The reconciliation is up to date.`);
+      if (x.busy) setErr(String(x.message || 'A sync step for this entity is already running — wait a few minutes and try again.'));
+      else if (x.error) setErr(`Zoho sync: ${String(x.error)}`); else if (stop.current) setOk('Stopped after the current step — start again to continue.'); else setOk(`Zoho sync finished (${x.calls} calls in the last step). The reconciliation is up to date.`);
       onChanged();
     } catch (e) { setErr(errMsg(e)); } finally { setBusy(''); loadSt(); }
   };
@@ -81,7 +82,7 @@ export default function ImportsTab({ meta, entity, params, stamp, onChanged }) {
                 <div style={{ fontSize: '0.8rem', lineHeight: 1.6 }}>
                   Last successful sync: <b>{st && st.last_ok_at ? dtm(st.last_ok_at) : 'never'}</b>{st && st.last_period ? ` (${st.last_period.from} to ${st.last_period.to})` : ''}<br />
                   Ledgers: {entity.ledgers.map(l => <Tag key={l.account_id}>{l.name}{l.section ? ` · ${l.section}` : ''}</Tag>)}<br />
-                  {st && st.last_error && <span style={{ color: '#B91C1C' }}>Last problem: {st.last_error}</span>}
+                  {st && st.last_error && <span style={{ color: '#B91C1C' }}>Last problem: {String(st.last_error)}</span>}
                 </div>
                 <p style={{ ...S.small, lineHeight: 1.5 }}>Reads the ledger postings for the period chosen above (month by month), then the invoices, payments and journals behind them — only new or changed ones after the first load. On the office PC the current year is also re-checked every day at {meta.schedule.times.join(', ')}.</p>
                 {meta.rights.prepare && (
@@ -114,6 +115,8 @@ export default function ImportsTab({ meta, entity, params, stamp, onChanged }) {
                 <div><b>Rows:</b> {pv.totals.rows} · <b>deductors:</b> {pv.totals.deductors}</div>
                 <div><b>Amount paid:</b> {r(pv.totals.amount_paid)} · <b>deducted:</b> {r(pv.totals.deducted)} · <b>deposited:</b> {r(pv.totals.deposited)}</div>
                 <div><b>Parts found:</b> {pv.parts_seen.join(', ') || '—'}</div>
+                {pv.sections && pv.sections.length > 0 && <div><b>Sections:</b> {pv.sections.map(x => <Tag key={x.code} title={`${x.label ? `${x.label} — ` : ''}${x.rows} row(s), deposited ${r(x.deposited)}`}>{x.code === x.family ? x.code : `${x.code} → ${x.family}`} · {x.rows}</Tag>)}</div>}
+                {pv.reversals && (pv.reversals.pairs > 0 || pv.reversals.unpaired > 0) && <div><b>Reversals:</b> {pv.reversals.pairs} pair(s) of a row and the same row in brackets cancel out before matching ({r(pv.reversals.deposited)} each way){pv.reversals.unpaired ? ` · ${pv.reversals.unpaired} bracketed row(s) without a pair — shown for checking` : ''}</div>}
                 {pv.revision && <div style={{ ...S.info, marginTop: 6 }}>Compared with version {pv.revision.against.version} (dated {dt(pv.revision.against.statement_date)}): {pv.revision.added} row(s) added ({r(pv.revision.added_deposited)}), {pv.revision.removed} removed ({r(pv.revision.removed_deposited)}), {pv.revision.changed} changed (deposit / status). Importing replaces its credits — they are not added on top.</div>}
               </div>
             </div>
@@ -127,7 +130,7 @@ export default function ImportsTab({ meta, entity, params, stamp, onChanged }) {
               <table style={table}>
                 <thead><tr>{['Deductor', 'TAN', 'Section', 'Transaction date', 'Status', 'Booking date', 'Amount paid', 'Tax deducted', 'TDS deposited', 'Source'].map((c, i) => <th key={c} style={{ ...S.th, ...(i >= 6 && i <= 8 ? S.thR : {}) }}>{c}</th>)}</tr></thead>
                 <tbody>{pv.rows.slice(0, 200).map((x, i) => (
-                  <tr key={i}><td style={S.td}>{x.deductor}</td><td style={S.td}>{x.tan}</td><td style={S.td}>{x.section}</td><td style={S.td}>{dt(x.txn_date)}</td><td style={S.td}>{x.status}</td><td style={S.td}>{dt(x.booking_date)}</td>
+                  <tr key={i}><td style={S.td}>{x.deductor}</td><td style={S.td}>{x.tan}</td><td style={S.td}>{x.section}{(() => { const f = (pv.sections || []).find(y => y.code === x.section); return f && f.family !== x.section ? <span style={S.small}> → {f.family}</span> : null; })()}</td><td style={S.td}>{dt(x.txn_date)}</td><td style={S.td}>{x.status}</td><td style={S.td}>{dt(x.booking_date)}</td>
                     <td style={{ ...S.td, ...S.num }}>{r(x.amount_paid)}</td><td style={{ ...S.td, ...S.num }}>{r(x.deducted)}</td><td style={{ ...S.td, ...S.num }}>{r(x.deposited)}</td><td style={{ ...S.td, ...S.small }}>{srcText(x.src)}</td></tr>))}</tbody>
               </table>
             </div>

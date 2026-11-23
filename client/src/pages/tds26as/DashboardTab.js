@@ -29,12 +29,12 @@ export default function DashboardTab({ meta, params, stamp, onDrill, go }) {
             <div style={{ marginTop: 4 }}>Entries affected by a gap are marked <b>Need to Check — coverage gap</b>. <button style={{ ...S.ghost, padding: '0.1rem 0.5rem' }} onClick={() => go('imports')}>Upload a statement / sync Zoho</button></div>
           </div>
         )}
-        {d.sync.last_error && <div style={{ ...S.error, margin: '0.6rem 0 0' }}>Last Zoho sync: {d.sync.last_error}</div>}
+        {d.sync.last_error && <div style={{ ...S.error, margin: '0.6rem 0 0' }}>Last Zoho sync: {String(d.sync.last_error)}</div>}
       </div>
 
       <div style={S.grid(210)}>
         <Card title="Zoho TDS receivable" value={r(T.zoho)} sub={`${T.zoho_entries} entries · ledger postings ${tie ? '= ' : '≠ '}${r(T.ledger_control)}`} tone={tie ? undefined : 'bad'} def={def.zoho} onDrill={() => onDrill({ side: 'zoho' })} />
-        <Card title="26AS tax deducted" value={r(T.deducted)} sub={`${T.credits} credits · amount paid ${r(T.amount_paid)}`} def={def.deducted} onDrill={() => onDrill({ side: '26as' })} />
+        <Card title="26AS tax deducted" value={r(T.deducted)} sub={`${T.credits} credits · amount paid ${r(T.amount_paid)}${T.reversal_pairs ? ` · ${T.reversal_pairs} reversal pair(s) netted` : ''}`} def={def.deducted} onDrill={() => onDrill({ side: '26as' })} />
         <Card title="26AS tax deposited" value={r(T.deposited)} sub={T.deducted !== T.deposited ? `deducted − deposited ${r(T.deducted - T.deposited)}` : 'equals tax deducted'} tone={T.deducted > T.deposited ? 'warn' : undefined} def={def.deposited} onDrill={() => onDrill({ side: '26as' })} />
         <Card title="Matched credit" value={r(T.matched)} sub={`${T.matched_units} matched item(s)`} tone="good" def={def.matched} onDrill={() => onDrill({ status: 'matched,rounding' })} />
         <Card title="Rounding difference" value={rs(T.rounding)} sub={`${T.rounding_units} item(s), each within ₹${meta.settings.rounding_tol_p / 100}`} def={def.rounding} onDrill={() => onDrill({ status: 'rounding' })} />

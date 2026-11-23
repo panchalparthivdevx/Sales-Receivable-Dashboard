@@ -33,6 +33,9 @@ const BOOKING_STATUS = {
   Z: 'Mismatch (challan not matched with OLTAS)',
 };
 
+// booking status as printed (letter or word) → the legend letter; "Mismatch" is Z, not M
+const STATUS_OF_WORD = { FINAL: 'F', OVERBOOKED: 'O', UNMATCHED: 'U', PROVISIONAL: 'P', MATCHED: 'M', MISMATCH: 'Z' };
+const statusLetter = v => { const t = String(v || '').trim().toUpperCase(); if (t.length === 1) return t; const w = (t.match(/^[A-Z]+/) || [''])[0]; return STATUS_OF_WORD[w] || t; };
 const problem = (level, code, message, src) => ({ level, code, message, ...(src ? { src } : {}) });
 const isAmount = s => typeof s === 'number' ? Number.isFinite(s) : /^\(?-?[\d,]+(\.\d{1,2})?\)?$/.test(String(s || '').trim()) && /\d/.test(String(s));
 const amt = v => (typeof v === 'number' ? toPaise(v) : toPaise(String(v || '').trim()));
@@ -65,8 +68,9 @@ function finishHeader(h, problems) {
 }
 
 // ── Rows of cells (text export and Excel) ────────────────────────────────────
-const COLS_DEDUCTOR = [['sr', /^sr\.?\s*no/i], ['name', /name of deductor/i], ['tan', /tan of deductor/i], ['paid', /amount paid/i], ['deducted', /tax deducted/i], ['deposited', /tds deposited|tax deposited/i]];
-const COLS_TXN = [['sr', /^sr\.?\s*no/i], ['section', /^section/i], ['txn_date', /transaction date/i], ['status', /status of booking/i], ['booking_date', /date of booking/i],
+const SR_HEAD = /^(sr|sl|s)\.?\s*no/i;                          // "Sr. No." (26AS) and "S.No." (Tax Year 2026-27 statement)
+const COLS_DEDUCTOR = [['sr', SR_HEAD], ['name', /name of deductor/i], ['tan', /tan of deductor/i], ['paid', /amount paid/i], ['deducted', /tax deducted/i], ['deposited', /tds deposited|tax deposited/i]];
+const COLS_TXN = [['sr', SR_HEAD], ['section', /^section/i], ['txn_date', /transaction date/i], ['status', /status of booking/i], ['booking_date', /date of booking/i],
   ['remarks', /^remarks/i], ['paid', /amount paid/i], ['deducted', /tax deducted/i], ['deposited', /tds deposited|tax deposited/i]];
 const COLS_FLAT = [['name', /name of deductor|deductor name|^deductor$/i], ['tan', /^tan|tan of deductor|deductor tan/i], ['section', /^section/i], ['txn_date', /transaction date|date of (payment|credit)/i],
   ['status', /status of booking|booking status/i], ['booking_date', /date of booking|booking date/i], ['remarks', /^remarks/i], ['paid', /amount paid|paid.*credited/i],
@@ -78,34 +82,43 @@ function columns(cells, defs) {
 }
 const isPart1Title = t => /part\s*-?\s*(i|1|a)\b(?![iv])/i.test(t) && /tax deducted at source/i.test(t) && !/15g|15h|194ia|194ib|194m|194s|buyer|seller/i.test(t);
 const otherPart = t => { const m = t.match(/^\s*part\s*-?\s*(ii|iii|iv|vi{0,3}|ix|x|[2-9]|10|[b-h])\b/i); return m ? `PART-${m[1].toUpperCase()}` : null; };
-const SKIP_LINE = /no transactions present|^gross total|^total\b|^assessee pan|^\(all amount values/i;
+// page furniture repeated on every page ("Page 2 of 59", "Annual Tax Statement") is skipped, not reported
+const SKIP_LINE = /no transactions present|^gross total|^total\b|^assessee pan|^\(all amount values|^page \d+ of\b|^annual tax statement$|^form (no\.?\s*)?(26as|168)$/i;
 
 function parseCells(rowsIn, format, { srcOf }) {
   const problems = [], deductors = [], rows = [], partsSeen = [];
   const h = {};
-  let part = null, dcols = null, tcols = null, current = null;
+  let part = null, dcols = null, tcols = null, current = null, gross = null;
   for (let i = 0; i < rowsIn.length; i++) {
     const cells = rowsIn[i].cells;
     const line = txt(cells.map(txt).filter(Boolean).join(' '));
     if (!line) continue;
-    // header block: a label row with the values on the next row, or label/value pairs side by side
-    const keys = cells.map(headerKey);
-    if (keys.some(k => k === 'pan' || k === 'fy' || k === 'ay' || k === 'tax_year' || k === 'file_created')) {
+    // header block (above PART-I): a label row with the values on the next row, "label: value" cells, label/value pairs side by side,
+    // or label and value in one cell — the Tax Year 2026-27 statement prints "Data updated till 14-Nov-2026" in one cell and
+    // "Name of Assessee" on its own row with the name below it (seen on a real statement, 23 Nov 2026)
+    const keys = part === null ? cells.map(headerKey) : [];
+    if (keys.some(Boolean)) {
       const next = (rowsIn[i + 1] || { cells: [] }).cells;
-      const nextHasPan = next.some(c => PAN_RE.test(normPan(c)));
+      const nextIsValues = !next.map(headerKey).some(Boolean) && (next.some(c => PAN_RE.test(normPan(c))) || keys.some((k, j) => k && txt(next[j])));
+      let usedNext = false;
       keys.forEach((k, j) => {
         if (!k || h[k]) return;
-        const inline = txt(cells[j]).split(/:\s*/)[1];
+        const c = txt(cells[j]);
+        const inline = c.includes(':') ? c.split(/:\s*/).slice(1).join(':').trim() : '';
+        const sameCell = (k === 'data_updated_till' || k === 'file_created') ? (c.match(/(\d{1,2}[-/.][A-Za-z0-9]{2,3}[-/.]\d{4})\s*$/) || [])[1] || '' : '';
+        const below = nextIsValues ? txt(next[j]) : '';
         const side = keys[j + 1] ? '' : txt(cells[j + 1]);
-        h[k] = inline || (nextHasPan ? txt(next[j]) : side) || h[k];
+        const v = inline || sameCell || below || side;
+        if (v) { h[k] = v; if (!inline && !sameCell && below) usedNext = true; }
       });
-      if (nextHasPan) i++;
+      if (usedNext) i++;
       continue;
     }
     if (isPart1Title(line)) { part = 'I'; partsSeen.push('PART-I'); continue; }
     const op = otherPart(line);
     if (op && /details|tds|tcs|refund|defaults|tax/i.test(line)) { partsSeen.push(op); part = 'other'; continue; }
     if (part !== 'I') continue;
+    if (/^gross total/i.test(line)) { gross = grossOf(cells.map(txt).filter(isAmount), srcOf(i)) || gross; continue; }
     if (SKIP_LINE.test(line)) continue;
     const dc = columns(cells, COLS_DEDUCTOR), tc = columns(cells, COLS_TXN);
     if (dc.name !== undefined && dc.tan !== undefined) { dcols = dc; continue; }
@@ -125,7 +138,14 @@ function parseCells(rowsIn, format, { srcOf }) {
     }
     problems.push(problem('warning', 'unreadable_row', `Line not understood inside PART-I: "${line.slice(0, 140)}"`, src));
   }
-  return { header: finishHeader(h, problems), deductors, rows, problems, parts_seen: [...new Set(partsSeen)], format };
+  return { header: finishHeader(h, problems), deductors, rows, problems, parts_seen: [...new Set(partsSeen)], format, gross };
+}
+
+/** PART-I "Gross Total" line: the last three amounts are paid / credited, tax deducted, TDS deposited (Tax Year 2026-27 statement) */
+function grossOf(amounts, src) {
+  if (amounts.length < 3) return null;
+  const [p, d, dep] = amounts.slice(-3).map(amt);
+  return { amount_paid: p, deducted: d, deposited: dep, src };
 }
 
 function rowFrom(cells, c, deductor, src, problems) {
@@ -135,7 +155,7 @@ function rowFrom(cells, c, deductor, src, problems) {
   const r = {
     deductor: deductor ? deductor.name : '', tan: deductor ? deductor.tan : '', deductor_sr: deductor ? deductor.sr : '',
     sr: raw.sr || '', section: raw.section || '', txn_date: parseDate(typeof cells[c.txn_date] === 'number' ? cells[c.txn_date] : raw.txn_date),
-    status: status.length === 1 ? status : (status.match(/^(FINAL|OVERBOOKED|UNMATCHED|PROVISIONAL|MATCHED|MISMATCH)/) || [''])[0].slice(0, 1) || status,
+    status: statusLetter(status),
     booking_date: parseDate(typeof cells[c.booking_date] === 'number' ? cells[c.booking_date] : raw.booking_date), remarks: raw.remarks && raw.remarks !== '-' ? raw.remarks : '',
     amount_paid: amt(cells[c.paid]), deducted: amt(cells[c.deducted]), deposited: amt(cells[c.deposited]), src, raw,
   };
@@ -253,8 +273,11 @@ async function pdfLines(buf, password) {
 
 const AMT = '\\(?-?\\d[\\d,]*\\.\\d{1,2}\\)?';
 const DATE = '\\d{1,2}-[A-Za-z]{3}-\\d{4}';
-const RE_DED = new RegExp(`^(\\d+)\\s+(.+?)\\s+([A-Z]{4}\\d{5}[A-Z])\\s+(${AMT})\\s+(${AMT})\\s+(${AMT})$`);
-const RE_TXN = new RegExp(`^(\\d+)\\s+(.+?)\\s+(${DATE})\\s+([A-Z])\\s+(${DATE}|-)\\s+(?:(.+?)\\s+)?(${AMT})\\s+(${AMT})\\s+(${AMT})$`);
+// The Tax Year 2026-27 statement adds "PAN of Deductor (If Available)" after the TAN ("-" when absent), numbers transactions 1.1, 1.2 …
+// and prints the booking status as a word ("Final"). Seen in the portal's Excel download (23 Nov 2026); its PDF is assumed to match.
+const STATUS_WORD = '(?:[A-Z]|Final|Overbooked|Unmatched|Provisional|Matched|Mismatch)';
+const RE_DED = new RegExp(`^(\\d+)\\s+(.+?)\\s+([A-Z]{4}\\d{5}[A-Z])\\s+(?:(?:[A-Z]{5}\\d{4}[A-Z]|-)\\s+)?(${AMT})\\s+(${AMT})\\s+(${AMT})$`);
+const RE_TXN = new RegExp(`^(\\d+(?:\\.\\d+)?)\\s+(.+?)\\s+(${DATE})\\s+(${STATUS_WORD})\\s+(${DATE}|-)\\s+(?:(.+?)\\s+)?(${AMT})\\s+(${AMT})\\s+(${AMT})$`);
 
 async function parsePdf(buf, fileName, password) {
   const lines = await pdfLines(buf, password);
@@ -266,7 +289,7 @@ async function parsePdf(buf, fileName, password) {
     fy: grab(/Financial Year[\s\S]{0,80}?(\d{4}\s*-\s*\d{2,4})/), ay: grab(/Assessment Year[\s\S]{0,80}?(\d{4}\s*-\s*\d{2,4})/), tax_year: grab(/Tax Year[\s\S]{0,80}?(\d{4}\s*-\s*\d{2,4})/),
     name: grab(/Name of (?:the )?Assessee\s*:?\s*(.+)/), data_updated_till: grab(/Data\s*updated\s*till\s*:?\s*(\d{1,2}[-/][A-Za-z0-9]{2,3}[-/]\d{4})/i),
   };
-  let part = null, current = null, txnSinceDeductor = 0, seenHeading = false;
+  let part = null, current = null, txnSinceDeductor = 0, seenHeading = false, gross = null;
   for (const l of lines) {
     const t = l.text;
     const src = { file: fileName, page: l.page, line: l.line };
@@ -274,12 +297,13 @@ async function parsePdf(buf, fileName, password) {
     const op = otherPart(t);
     if (op) { partsSeen.push(op); part = 'other'; continue; }
     if (part !== 'I') continue;
+    if (/^gross total/i.test(t)) { gross = grossOf(t.match(new RegExp(AMT, 'g')) || [], src) || gross; continue; }
     if (SKIP_LINE.test(t) || /^Assessee PAN:/i.test(t) || /^(Sr\.? No\.?|Credited|Deposited|Debited)\b/i.test(t) || /Name of Deductor|Transaction Date|Status of Booking/i.test(t)) { if (/Name of Deductor|Transaction Date/i.test(t)) seenHeading = true; continue; }
     let m = t.match(RE_DED);
     if (m) { current = { sr: m[1], name: m[2], tan: m[3], total_paid: toPaise(m[4]), total_deducted: toPaise(m[5]), total_deposited: toPaise(m[6]), src }; deductors.push(current); txnSinceDeductor = 0; continue; }
     m = t.match(RE_TXN);
     if (m) {
-      const r = { deductor: current ? current.name : '', tan: current ? current.tan : '', deductor_sr: current ? current.sr : '', sr: m[1], section: m[2].replace(/\s+/g, ''), txn_date: parseDate(m[3]), status: m[4],
+      const r = { deductor: current ? current.name : '', tan: current ? current.tan : '', deductor_sr: current ? current.sr : '', sr: m[1], section: m[2].replace(/\s+/g, ''), txn_date: parseDate(m[3]), status: statusLetter(m[4]),
         booking_date: m[5] === '-' ? null : parseDate(m[5]), remarks: m[6] && m[6] !== '-' ? m[6] : '', amount_paid: toPaise(m[7]), deducted: toPaise(m[8]), deposited: toPaise(m[9]), src,
         raw: { sr: m[1], section: m[2], txn_date: m[3], status: m[4], booking_date: m[5], remarks: m[6] || '', paid: m[7], deducted: m[8], deposited: m[9] } };
       checkRow(r, problems);
@@ -292,7 +316,7 @@ async function parsePdf(buf, fileName, password) {
   }
   // names completed after their transactions were read
   for (const r of rows) { const d = deductors.find(x => x.tan === r.tan && x.sr === r.deductor_sr); if (d) r.deductor = d.name; }
-  return { format: 'pdf', header: finishHeader(h, problems), deductors, rows, problems, parts_seen: [...new Set(partsSeen)], pages: lines.length ? lines[lines.length - 1].page : 0 };
+  return { format: 'pdf', header: finishHeader(h, problems), deductors, rows, problems, parts_seen: [...new Set(partsSeen)], pages: lines.length ? lines[lines.length - 1].page : 0, gross };
 }
 
 // ── ZIP (TRACES delivers the text export in a ZIP protected with ZipCrypto) ─────

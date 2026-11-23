@@ -285,6 +285,7 @@ function reconcile(ctx) {
     }
     for (const c of b.c) {
       if (used.has(c.key)) continue;
+      if (c.deposited < 0 || c.deducted < 0) { addUnit({ method: 'single', step: 4, group: g, zoho: [], credits: [c.key], status: 'need_check', reason: { code: 'reversal_26as', text: `26AS shows a reversal by ${c.deductor} (${fmtR(c.deposited)}, ${c.txn_date}${c.remarks ? `, remark ${c.remarks}` : ''}) with no matching earlier credit in the statement and no Zoho reversal — check the deductor's revised TDS statement` } }); continue; }
       const cv = covZ(c.txn_date);
       if (cv.state === 'complete') addUnit({ method: 'single', step: 4, group: g, zoho: [], credits: [c.key], status: 'not_in_zoho' });
       else addUnit({ method: 'single', step: 4, group: g, zoho: [], credits: [c.key], status: 'need_check', reason: { code: 'coverage_zoho', text: `Coverage gap: ${cv.text}` } });

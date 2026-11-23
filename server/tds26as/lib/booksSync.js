@@ -89,6 +89,10 @@ function create({ zr, cfgNow, readSynced = async () => null, log = console }) {
     const ledgerGap = Math.ceil(60000 / Math.max(5, limits.ledger_rate_per_min || 25));
     if (running.has(entity.id)) return { busy: true, message: 'A sync step for this entity is already running' };
     let st = await store.read(syncKey(entity.id), {});
+    // online every request may land on another server instance, which cannot see `running`: the stored lock tells it a step is under way
+    if (st.run && st.run.lock_until && Date.parse(st.run.lock_until) > Date.now()) {
+      return { busy: true, message: `A sync step for this entity is already running (started by ${st.run.by || 'someone'}) — wait until ${new Date(Date.parse(st.run.lock_until) + 330 * 60000).toISOString().slice(11, 16)} (India time) and try again` };
+    }
     if (st.blocked_until && Date.parse(st.blocked_until) > Date.now()) {
       return { more: false, error: `Zoho has paused its ledger report for this login until ${new Date(Date.parse(st.blocked_until) + 330 * 60000).toISOString().slice(11, 16)} (India time) — try again after that; nothing was lost`, blocked_until: st.blocked_until };
     }
@@ -111,10 +115,10 @@ function create({ zr, cfgNow, readSynced = async () => null, log = console }) {
         if (ctl.cancel) throw Object.assign(new Error('Stopped'), { stopped: true });
         if (st.calls_day.n >= limits.daily_budget) throw Object.assign(new Error(`This module's daily allowance of ${limits.daily_budget} Zoho calls is used up — the sync continues tomorrow (India time)`), { limit: true });
         const g = report ? ledgerGap : gap;
-        const last = report ? lastLedgerCall : lastCall;
-        const wait = last + g - Date.now();
-        if (report) lastLedgerCall = Math.max(Date.now(), last + g); else lastCall = Math.max(Date.now(), last + g);
-        if (wait > 0) await sleep(wait);
+        const target = Math.max(Date.now(), (report ? lastLedgerCall : lastCall) + g);
+        if (report) lastLedgerCall = target; else lastCall = target;
+        // timers can fire a few ms early against the wall clock (Node measures them from a cached loop time): wait out any remainder
+        while (Date.now() < target) await sleep(target - Date.now());
         st.calls_day.n++; calls.n++; st.run.calls++;
       };
       const get = (path, params) => zr.get(entity.org_id, path, params, { before: pace(path === '/chartofaccounts/transactions') });
@@ -209,10 +213,21 @@ function create({ zr, cfgNow, readSynced = async () => null, log = console }) {
     }
   }
 
-  /** Ledger rows for one account and date window; a window that needs more than one page is split (date-sorted paging can skip rows) */
+  /**
+   * Ledger rows for one account and date window; a window that needs more than one page is split (date-sorted paging can skip rows).
+   * The range goes in date_start / date_end: verified live on 22 Nov 2026, this report IGNORES date.start / date.end (and from_date /
+   * to_date) and then returns the account's whole history — answers are therefore checked, and a window that comes back with postings
+   * outside its dates stops the sync instead of being split again and again.
+   */
   async function listWindow(get, acc, from, to, depth = 0) {
-    const first = await get('/chartofaccounts/transactions', { account_id: acc, 'date.start': from, 'date.end': to, per_page: 200, page: 1 });
-    const rows = (first.transactions || first.account_transactions || []);
+    const ask = page => get('/chartofaccounts/transactions', { account_id: acc, date_start: from, date_end: to, per_page: 200, page });
+    const inWindow = list => {
+      const out = list.filter(t => { const d = String(t.transaction_date || '').slice(0, 10); return d >= from && d <= to; });
+      if (out.length !== list.length) throw new Error(`Zoho returned ledger postings outside ${from} … ${to} (the date filter was not applied) — the sync stopped instead of reading the whole ledger`);
+      return out;
+    };
+    const first = await ask(1);
+    const rows = inWindow(first.transactions || first.account_transactions || []);
     if (!(first.page_context && first.page_context.has_more_page)) return dedupe(rows.map(t => trimRow(t, acc)));
     if (from < to && depth < 6) {
       const mid = new Date((Date.parse(`${from}T00:00:00Z`) + Date.parse(`${to}T00:00:00Z`)) / 2).toISOString().slice(0, 10);
@@ -221,8 +236,8 @@ function create({ zr, cfgNow, readSynced = async () => null, log = console }) {
     }
     const all = rows.slice();                                   // one day with more than 200 postings: page through it
     for (let page = 2; page <= 50; page++) {
-      const d = await get('/chartofaccounts/transactions', { account_id: acc, 'date.start': from, 'date.end': to, per_page: 200, page });
-      all.push(...(d.transactions || []));
+      const d = await ask(page);
+      all.push(...inWindow(d.transactions || []));
       if (!(d.page_context && d.page_context.has_more_page)) break;
     }
     return dedupe(all.map(t => trimRow(t, acc)));

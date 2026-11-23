@@ -28,6 +28,7 @@ function fakeZoho() {
       T({ ct: 'ct2', type: 'journal', tid: 'jr1', date: '2026-10-20', acc: L194I, cust: 'c1', payee: 'SYN ONE PVT LTD', no: 'JR/0001', desc: 'TDS Booked Against Invoice No. IN/26-27/0001 (Previous FY TDS Transferred)', cr: 500 }),
       T({ ct: 'ct3', type: 'journal', tid: 'jr2', date: '2026-10-30', acc: L194I, no: 'JR/0002', desc: 'IN/26-27/0002 - TDS Receivable of group company', dr: 1000 }),
       T({ ct: 'ct9', type: 'invoice', tid: 'inv9', date: '2026-10-31', acc: L194I, cust: 'c3', payee: 'SYN THREE', no: 'IN/26-27/0009', dr: 99 }),
+      T({ ct: 'ctAug', type: 'invoice', tid: 'invAug', date: '2026-08-15', acc: L194I, cust: 'c3', payee: 'SYN THREE', no: 'IN/26-27/0008', dr: 77 }),    // outside every synced window
     ],
     [LFY]: [T({ ct: 'ct4', type: 'journal', tid: 'jr1', date: '2026-10-20', acc: LFY, cust: 'c1', payee: 'SYN ONE PVT LTD', no: 'JR/0001', dr: 500 })],
     [L194C]: [
@@ -55,7 +56,9 @@ function fakeZoho() {
       calls.push({ org, path, params: { ...params } });
       assert.equal(org, ORG, 'every call names the organisation');
       if (path === '/chartofaccounts/transactions') {
-        const rows = (ledger[params.account_id] || []).filter(r => !zr.deleted.has(r.categorized_transaction_id) && r.transaction_date >= params['date.start'] && r.transaction_date <= params['date.end']).sort((a, b) => b.transaction_date.localeCompare(a.transaction_date));
+        // like live Zoho (checked 22 Nov 2026): only date_start / date_end filter this report; date.start / date.end are silently ignored
+        const ranged = params.date_start && params.date_end;
+        const rows = (ledger[params.account_id] || []).filter(r => !zr.deleted.has(r.categorized_transaction_id) && (!ranged || (r.transaction_date >= params.date_start && r.transaction_date <= params.date_end))).sort((a, b) => b.transaction_date.localeCompare(a.transaction_date));
         const page = params.page || 1, per = params.per_page || 200;
         return { transactions: rows.slice((page - 1) * per, page * per), page_context: { page, has_more_page: rows.length > page * per } };
       }
@@ -80,7 +83,9 @@ test('first sync: ledgers month by month (paged month split), details, and the i
   assert.equal(r.more, false); assert.ok(!r.error, r.error);
   const rows = await sync.ledgerRows('syn');
   assert.equal(rows.length, 4 + 1 + 2 + 230, 'every posting, none twice (the 230-row month was split into smaller windows)');
-  assert.ok(zr.calls.filter(c => c.path === '/chartofaccounts/transactions' && c.params['date.start'] !== '2026-11-01' && c.params['date.start'] > '2026-11-01').length > 0, 'the November ledger was read in smaller windows');
+  assert.ok(!rows.some(r => r.id === 'ctAug'), 'a posting outside the synced months is not read (the range is really applied)');
+  assert.ok(zr.calls.filter(c => c.path === '/chartofaccounts/transactions').every(c => c.params.date_start && c.params.date_end && !('date.start' in c.params)), 'the report is asked with date_start / date_end');
+  assert.ok(zr.calls.filter(c => c.path === '/chartofaccounts/transactions' && c.params.date_start !== '2026-11-01' && c.params.date_start > '2026-11-01').length > 0, 'the November ledger was read in smaller windows');
   assert.ok(zr.calls.every(c => !/POST|PUT|DELETE/i.test(c.path)));
   const docs = await sync.docs('syn');
   assert.ok(docs.invoices.inv1, 'invoice on the ledger'); assert.ok(docs.payments.p1, 'payment behind the posting'); assert.ok(docs.invoices.inv2, 'invoice the payment settles'); assert.ok(docs.journals.jr2, 'journal');
@@ -134,6 +139,19 @@ test('the daily budget stops a sync and keeps its place', async () => {
   assert.ok(st.run && st.run.months_todo.length >= 1, 'the run is kept and continues tomorrow');
 });
 
+test('a report answer with postings outside the requested dates stops the sync instead of re-reading the whole ledger', async () => {
+  H.tempStore();
+  await store.write('config', { sync: { rate_per_min: 600000, ledger_rate_per_min: 600000, concurrency: 3, daily_budget: 100000, step_seconds: 60 } });
+  const zr = fakeZoho();
+  const get0 = zr.get;
+  zr.get = (org, path, params, opts) => get0(org, path, path === '/chartofaccounts/transactions' ? { ...params, date_start: undefined, date_end: undefined } : params, opts);   // Zoho ignoring the range
+  const sync = BS.create({ zr, cfgNow: H.cfgNow });
+  const r = await sync.step({ entity: ENTITY, from: '2026-10-01', to: '2026-10-31', mode: 'changes', by: 't', maxMs: 60000 });
+  assert.match(r.error || '', /outside .* date filter was not applied/);
+  assert.ok(zr.calls.length <= 3, `stopped at once (${zr.calls.length} calls)`);
+  assert.equal((await sync.ledgerRows('syn')).length, 0, 'nothing from outside the window was stored');
+});
+
 test('the ledger report is paced on its own, slower clock; months of one quarter are read in one window', async () => {
   H.tempStore();
   await store.write('config', { sync: { rate_per_min: 600000, ledger_rate_per_min: 300, concurrency: 3, daily_budget: 100000, step_seconds: 60 } });   // 300 a minute = 200 ms apart
@@ -148,7 +166,7 @@ test('the ledger report is paced on its own, slower clock; months of one quarter
   zr.calls.length = 0;
   await runAll(sync, { entity: ENTITY, from: '2026-10-01', to: '2026-12-31', mode: 'changes', by: 't', maxMs: 60000 });
   const report = zr.calls.filter(c => c.path === '/chartofaccounts/transactions');
-  const windows = report.filter(c => c.params.page === 1 && c.params['date.start'] === '2026-10-01' && c.params['date.end'] === '2026-12-31');
+  const windows = report.filter(c => c.params.page === 1 && c.params.date_start === '2026-10-01' && c.params.date_end === '2026-12-31');
   assert.equal(windows.length, 3, 'one Oct–Dec window per ledger');
   assert.ok(report.length < 3 * 3, `fewer calls than one per ledger per month (${report.length}, of which the extra ones split the busy November)`);
 });

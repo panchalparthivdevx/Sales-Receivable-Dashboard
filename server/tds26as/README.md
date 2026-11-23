@@ -35,7 +35,7 @@ The Zoho client has GET only (`server/gstr2b/lib/zohoRead.js`). The fields below
 
 | What | Call | Fields used |
 |---|---|---|
-| **Control amount** | `GET /chartofaccounts/transactions?account_id&date.start&date.end`, per mapped TDS Receivable ledger | `categorized_transaction_id`, `transaction_type` (invoice / customer_payment / journal / creditnote …), `transaction_id` (**empty for customer_payment**), `transaction_date`, `customer_id`, `payee`, `description`, `entry_number` (the invoice number on invoice and payment rows), `debit_amount`, `credit_amount` |
+| **Control amount** | `GET /chartofaccounts/transactions?account_id&date_start&date_end`, per mapped TDS Receivable ledger. This report **ignores `date.start`/`date.end`** (and `from_date`/`to_date`) and then returns the whole ledger history; only `date_start`/`date_end` apply a range (verified live). Every answer is checked, and postings outside the window stop the sync. | `categorized_transaction_id`, `transaction_type` (invoice / customer_payment / journal / creditnote …), `transaction_id` (**empty for customer_payment**), `transaction_date`, `customer_id`, `payee`, `description`, `entry_number` (the invoice number on invoice and payment rows), `debit_amount`, `credit_amount` |
 | Invoice | `GET /invoices/{id}` | `sub_total` (basic), `tax_total` (GST), `total` (net of TDS), `tds_amount`, `tds_percent`, `tds_summary[].tds_name`, and the client's TAN when kept in a custom field (DevX: `cf_organization_tan_number`) |
 | Payment | `GET /customerpayments/{id}` | `invoices[].tax_amount_withheld`, `amount_applied`, `total`. The payment behind a posting is found by customer, date and invoice number. The dashboard's central `customer_payments_fy` cache is used where it covers the month. |
 | Journal | `GET /journals/{id}` | `line_items[].customer_id`. The TDS line often has no customer, but the receivable line does. The notes and reference supply invoice numbers. |
@@ -191,16 +191,50 @@ Admins can load **demo data** (Settings & audit) to see every case first. It is 
 
 ## Tests
 
-`npm run test:tds26as` (33 tests):
+`npm run test:tds26as` (40 tests):
 
 - parser: text, Excel, CSV, PDF, protected PDF, protected ZIP
+- the Tax Year 2026-27 statement layout (Excel and PDF, synthetic data), section codes, reversal pairs, Gross Total
 - every acceptance case on the demo scenario
-- sync on a fake Zoho with the live response shapes, the report pacing and the block handling
+- sync on a fake Zoho with the live response shapes, the report pacing, the block handling and the stored lock
 - the HTTP routes: rights, entity limits, upload, review, export, audit
+
+## Tax Year 2026-27 statement (seen 23 Nov 2026)
+
+DevX's own statement for Tax Year 2026-27 (the portal's Excel download, "Data updated till 14-Nov-2026") was read locally, without
+importing it anywhere: 1,655 rows under 207 deductors, TDS deposited ₹6,64,68,507.21, equal to the statement's summary and its PART-I
+Gross Total; every deductor total equals its rows; no unreadable rows. What that layout needed:
+
+- **Header:** "Data updated till 14-Nov-2026" is one cell; "Name of Assessee" has the name on the row below.
+- **Headings:** "S.No." (not "Sr. No."), "Section Code", "PAN of Deductor (If Available)" after the TAN; transactions numbered 1.1, 1.2 …;
+  booking status as a word ("Final", "Overbooked", "Unmatched").
+- **Page furniture** ("Page 2 of 59", "Annual Tax Statement") repeats inside PART-I and is skipped.
+- **Section codes** are the Income-tax Act, 2025 codes (1009 = 393(1) Sl. 2(ii).D(b) rent …). Zoho still names TDS by the 1961 sections
+  (Sep 2026 invoices: 194I, 194C, 194J, 194A, 194H), so `config.ACT2025_CODES` maps each code to the 1961 section it continues
+  (1008/1009 → 194I, 1023/1024 → 194C, 1026/1027/1028 → 194J, 1020–1022 → 194A, 1006 → 194H, 1031 → 194Q …). The new-Act section
+  and description come from the legend printed at the end of the statement. Settings → section aliases still override.
+- **Reversal pairs:** a deductor's reprocessed statement prints a credit, the same credit in brackets (remark G "Reprocessing of
+  Statement", or B "Rectification … by deductor"), then the credit again. DevX's statement has 74 such pairs. `statements.netReversals`
+  cancels each bracketed row against one equal positive row before matching (totals unchanged); otherwise every such invoice would be
+  ambiguous between equal credits. A bracketed row with no equal positive row goes to Need to Check (reason `reversal_26as`).
+
+The PDF of the same statement has not been seen; the PDF reader accepts the same headings, numbering, PAN column and status words.
+
+## Validated live (read-only, DevX, September 2026, 22 Nov 2026)
+
+- 296 postings in 15 ledgers, all dated in September; 17 report calls; 324 calls in all; about 5 minutes.
+- Entries total ₹1,37,86,051.47, equal to the ledger postings.
+- 258/258 invoice postings have their basic value; 19/19 payment postings are linked to their payment and allocation.
+- 4 journals take the customer from their receivable line; 8 entries (₹21,72,142.03) have no customer and are shown as unallocated.
+- 212 of 296 entries carry the client TAN from Zoho.
 
 ## Not yet validated with live data
 
-- **No real company Form 26AS has been imported.** The layout was checked on a published individual's statement whose Part I was empty. The TRACES text and Excel layouts are built from the documented format.
-- **Tax Year 2026-27 (Income-tax Act, 2025):** Form 168 and section 393 table codes have not been seen. Unknown codes are kept as printed and can be mapped under Settings → Section aliases.
+- **Real statements:** DevX's Tax Year 2026-27 Excel has been read end to end (above). Not yet seen: the PDF of that statement, a TRACES text export, and any FY 2025-26 (old-Act, "194I(b)") statement of a company.
+- **Section codes 1039–1057 (non-resident payments) and TCS codes** keep their code; map them under Settings → Section aliases if they ever appear.
 - **Zoho web links:** invoice links use the same pattern as the dashboard's bill links. The links for payments, journals and credit notes are not verified. Credit notes are not linked to their invoice.
 - **Online (Vercel):** the sync runs in steps while the page is open; there is no online scheduler. Uploads are limited to 4 MB.
+  A step holds a stored lock, so a second click that lands on another server instance is refused instead of running alongside.
+  When Vercel itself stops a request (5-minute limit, size limit, crash) it answers `{ error: { code, message } }`; the page turns that
+  into a sentence (`client/src/pages/tds26as/api.js` errMsg) — showing the object as it was crashed the whole app (React error #31,
+  23 Nov 2026, a sync step on Vr. 22.0, which still had the date-filter bug and read whole ledgers until Vercel stopped it).

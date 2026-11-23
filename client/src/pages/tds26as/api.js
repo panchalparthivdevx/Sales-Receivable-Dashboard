@@ -9,7 +9,30 @@ const d = r => {
 };
 const clean = p => Object.fromEntries(Object.entries(p || {}).filter(([, v]) => v !== '' && v !== undefined && v !== null && !(Array.isArray(v) && !v.length)).map(([k, v]) => [k, Array.isArray(v) ? v.join(',') : v]));
 
-export const errMsg = e => e?.response?.data?.error || e?.message || 'Something went wrong';
+// Vercel answers for the server when it stops a request itself (time limit, size limit, crash): the body is then
+// { error: { code, message } } (or plain text) and the header x-vercel-error names the reason. Always return TEXT — rendering that
+// object crashed the whole page with React error #31 (23 Nov 2026, a Zoho sync step that ran into Vercel's 5-minute limit).
+const PLATFORM = {
+  FUNCTION_INVOCATION_TIMEOUT: 'The online server stopped this request at its 5-minute limit. Work that finished before that is kept — start it again to continue; if it stops again, run it from the office PC.',
+  FUNCTION_PAYLOAD_TOO_LARGE: 'The file is too large for an online upload (about 4 MB at most). Upload it from the office PC instead.',
+  FUNCTION_INVOCATION_FAILED: 'The online server failed while handling this request. Nothing was changed by the failed request — try again in a minute.',
+};
+export const errMsg = e => {
+  const res = e?.response;
+  const code = String(res?.headers?.['x-vercel-error'] || '').toUpperCase();
+  if (PLATFORM[code]) return PLATFORM[code];
+  const body = res?.data;
+  let m = body && typeof body === 'object' && !(typeof Blob !== 'undefined' && body instanceof Blob) ? body.error : null;
+  if (m && typeof m === 'object') {
+    const text = [m.message, m.code].filter(x => x !== undefined && x !== null && x !== '').map(String).join(' · ');
+    const known = Object.keys(PLATFORM).find(k => text.toUpperCase().includes(k));
+    m = known ? PLATFORM[known] : text ? `The server could not complete this request (${text})` : '';
+  }
+  if (!m && res && [502, 503, 504].includes(res.status)) m = res.status === 504 ? PLATFORM.FUNCTION_INVOCATION_TIMEOUT : 'The server is not reachable at the moment — try again in a minute.';
+  if (!m && res && res.status === 413) m = PLATFORM.FUNCTION_PAYLOAD_TOO_LARGE;
+  if (!m && e?.code === 'ECONNABORTED') m = 'The request took too long and was abandoned by the browser. Work that finished on the server is kept — try again.';
+  return String(m || e?.message || 'Something went wrong');
+};
 
 /** Download from an authenticated route (the login token travels in the header) */
 export async function download(url, params, fallbackName) {
@@ -21,7 +44,7 @@ export async function download(url, params, fallbackName) {
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(a.href), 10000);
   } catch (e) {
-    if (e?.response?.data instanceof Blob) { let msg; try { msg = JSON.parse(await e.response.data.text()).error; } catch (_) { /* not JSON */ } throw new Error(msg || 'The download failed'); }
+    if (e?.response?.data instanceof Blob) { let msg; try { msg = JSON.parse(await e.response.data.text()).error; } catch (_) { /* not JSON */ } throw new Error(typeof msg === 'string' && msg ? msg : 'The download failed'); }
     throw e;
   }
 }

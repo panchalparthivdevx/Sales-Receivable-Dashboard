@@ -16,7 +16,7 @@ const store = require('./store');
 const files = require('./files');
 const P26 = require('./parse26as');
 const PER = require('./periods');
-const { sectionFamily } = require('./config');
+const { sectionFamily, act2025 } = require('./config');
 const { sha256, hashOf, uid, sumBy, fmtR } = require('./util');
 
 const IDX = 'stmt_idx';
@@ -34,6 +34,12 @@ function controlChecks(parsed) {
     }
     if (!rows.length && (d.total_deducted || d.total_deposited)) out.push({ deductor: d.name, tan: d.tan, field: 'transactions', summary: d.total_deducted, rows: 0, src: d.src, note: 'no transaction rows were read for this deductor' });
   }
+  // the statement's own PART-I "Gross Total" (printed on the Tax Year 2026-27 statement) against all rows read
+  const g = parsed.gross;
+  if (g) for (const [f, label] of [['amount_paid', 'amount paid / credited'], ['deducted', 'tax deducted'], ['deposited', 'TDS deposited']]) {
+    const sum = sumBy(parsed.rows, r => r[f]);
+    if (g[f] !== null && g[f] !== undefined && g[f] !== sum) out.push({ deductor: 'PART-I Gross Total', tan: '', field: label, summary: g[f], rows: sum, src: g.src, note: 'the grand total printed on the statement differs from the rows read' });
+  }
   return out;
 }
 
@@ -50,7 +56,7 @@ function validate(parsed, entity, { activeVersion, sameFile } = {}) {
   const outside = h.fy ? parsed.rows.filter(r => r.txn_date && PER.fyOf(r.txn_date) !== h.fy) : [];
   if (outside.length) add('row_dates', false, 'Transaction dates inside the statement year', `${outside.length} row(s) are dated outside FY ${h.fy} (first: ${outside[0].txn_date}) — kept as printed`, 'warning');
   const ctl = controlChecks(parsed);
-  add('control', ctl.length === 0, 'Control totals (deductor summary = its transactions)', ctl.length ? `${ctl.length} difference(s): ${ctl.slice(0, 3).map(c => `${c.deductor} ${c.field}: summary ${fmtR(c.summary)} vs rows ${fmtR(c.rows)}`).join('; ')}` : parsed.deductors.length ? `All ${parsed.deductors.length} deductor totals agree with their rows` : 'No deductor summary rows in this layout — nothing to compare', ctl.length ? 'error' : 'ok');
+  add('control', ctl.length === 0, 'Control totals (deductor summary = its transactions)', ctl.length ? `${ctl.length} difference(s): ${ctl.slice(0, 3).map(c => `${c.deductor} ${c.field}: summary ${fmtR(c.summary)} vs rows ${fmtR(c.rows)}`).join('; ')}` : parsed.deductors.length ? `All ${parsed.deductors.length} deductor totals agree with their rows${parsed.gross ? `; the PART-I Gross Total (deposited ${fmtR(parsed.gross.deposited)}) equals the rows` : ''}` : 'No deductor summary rows in this layout — nothing to compare', ctl.length ? 'error' : 'ok');
   const errs = parsed.problems.filter(p => p.level === 'error'), warns = parsed.problems.filter(p => p.level === 'warning');
   const unread = parsed.problems.filter(p => p.code === 'unreadable_row'), missing = parsed.problems.filter(p => p.code === 'missing_fields' || p.code === 'tan_invalid');
   add('unreadable', unread.length === 0, 'Unreadable rows', unread.length ? `${unread.length} line(s) inside PART-I could not be read (listed below with their page / line)` : 'None', unread.length ? 'warning' : 'ok');
@@ -79,6 +85,44 @@ function toCredits(entityId, fy, rows, settings = {}) {
       amount_paid: r.amount_paid, deducted: r.deducted, deposited: r.deposited, src: r.src, raw: r.raw,
     };
   });
+}
+
+/**
+ * Reversal pairs inside a statement: a negative row (printed in brackets — on the Tax Year 2026-27 statement with remark "G",
+ * Reprocessing of Statement, typically "+X, (X), +X") cancels one positive row of the same deductor, section, transaction date and
+ * amounts. Both leave the matching — together they are ₹0 — so the surviving credit is matched once instead of three equal credits
+ * making every invoice ambiguous. The LAST positives are the ones cancelled, so the surviving credit keeps the key (#1 …) it has when
+ * a later statement no longer shows the pair. A negative row without such a positive stays in and is reported for checking.
+ */
+function netReversals(credits) {
+  const sig = c => [c.fy, c.tan, String(c.section_raw || c.section || '').toUpperCase(), c.txn_date, Math.abs(c.amount_paid || 0), Math.abs(c.deducted || 0), Math.abs(c.deposited || 0)].join('|');
+  const isNeg = c => (c.deposited || 0) < 0 || (c.deducted || 0) < 0;
+  const pos = new Map();
+  for (const c of credits) if (!isNeg(c) && ((c.deposited || 0) > 0 || (c.deducted || 0) > 0)) { const k = sig(c); if (!pos.has(k)) pos.set(k, []); pos.get(k).push(c); }
+  const cancelled = new Set(), pairs = [];
+  for (const c of credits) {
+    if (!isNeg(c)) continue;
+    const list = pos.get(sig(c)) || [];
+    for (let i = list.length - 1; i >= 0; i--) {
+      if (cancelled.has(list[i].key)) continue;
+      cancelled.add(list[i].key); cancelled.add(c.key);
+      pairs.push({ positive: list[i].key, negative: c.key, tan: c.tan, deductor: c.deductor, section: c.section_raw || c.section, txn_date: c.txn_date, deposited: -c.deposited, remarks: c.remarks || '' });
+      break;
+    }
+  }
+  return { credits: cancelled.size ? credits.filter(c => !cancelled.has(c.key)) : credits, pairs };
+}
+
+/** Section codes in the statement → the family they are compared under (Act 2025 codes 1009 → 194I …), with rows and TDS deposited */
+function sectionSummary(rows, settings = {}) {
+  const m = new Map();
+  for (const r of rows) {
+    const k = String(r.section || '').toUpperCase();
+    const e = m.get(k) || { code: r.section || '', family: sectionFamily(r.section, (settings || {}).section_aliases), label: (act2025(r.section) || {}).label || '', rows: 0, deposited: 0 };
+    e.rows++; e.deposited += r.deposited || 0;
+    m.set(k, e);
+  }
+  return [...m.values()].sort((x, y) => y.deposited - x.deposited);
 }
 
 function diffCredits(prev, next) {
@@ -112,7 +156,7 @@ async function preview({ buffer, fileName, password, entity, by, settings }) {
   return {
     preview_id: id, entity: entity.id, file_name: fileName, sha256: sha, format: parsed.format, header: parsed.header, parts_seen: parsed.parts_seen, inner_file: parsed.inner_file || null,
     totals: totals(parsed.rows), deductors: parsed.deductors.map(d => ({ sr: d.sr, name: d.name, tan: d.tan, total_paid: d.total_paid, total_deducted: d.total_deducted, total_deposited: d.total_deposited })),
-    rows: parsed.rows.slice(0, 400), rows_shown: Math.min(400, parsed.rows.length), problems: parsed.problems.slice(0, 300), problem_count: parsed.problems.length, control: controlChecks(parsed),
+    rows: parsed.rows.slice(0, 400), rows_shown: Math.min(400, parsed.rows.length), problems: parsed.problems.slice(0, 300), problem_count: parsed.problems.length, control: controlChecks(parsed), sections: sectionSummary(parsed.rows, settings), reversals: (() => { const n = netReversals(toCredits(entity.id, fy || 'x', parsed.rows, settings)); return { pairs: n.pairs.length, deposited: sumBy(n.pairs, p => p.deposited), unpaired: parsed.rows.filter(r => r.deposited < 0 || r.deducted < 0).length - n.pairs.length }; })(),
     validation: v, same_file: sameFile ? { id: sameFile.id, version: sameFile.version, fy: sameFile.fy } : null, revision,
     active: activeVersion ? { id: activeVersion.id, version: activeVersion.version, statement_date: activeVersion.statement_date } : null,
   };
@@ -183,4 +227,4 @@ async function removeEntity(entityId) {
   });
 }
 
-module.exports = { preview, commit, list, get, activeCredits, coverage, validate, toCredits, diffCredits, removeEntity, controlChecks };
+module.exports = { preview, commit, list, get, activeCredits, coverage, validate, toCredits, diffCredits, removeEntity, controlChecks, netReversals };
