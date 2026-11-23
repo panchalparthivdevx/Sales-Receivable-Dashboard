@@ -4,7 +4,7 @@ import {
   Landmark, Users, ShieldCheck, BarChart3,
   ChevronLeft, ChevronRight, ChevronDown, GitMerge, ClipboardList,
   Settings, LogOut, CreditCard, TrendingDown, Inbox, Activity, BookOpen, Target, BadgeCheck, RefreshCw, Layers, CheckSquare,
-  ScanText, GitCompareArrows, FileCheck2,
+  ScanText, GitCompareArrows, FileCheck2, Building2,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 
@@ -18,6 +18,8 @@ const NAV = [
   { id: 'finance-overview', label: 'Finance Overview',     icon: BarChart3,    live: true,  module: 'sales'       },
   { id: 'sales',        label: 'Sales & Receivables',  icon: TrendingUp,   live: true,  module: 'sales'       },
   { id: 'purchase',     label: 'Purchase & Payables',   icon: ShoppingCart, live: true,  module: 'purchase'        },
+  // section: shown only to users with that tick under the module (here: Purchase & Payables → Month-wise Rent Report)
+  { id: 'rent-reports', label: 'Rent Reports',          icon: Building2,    live: true,  module: 'purchase', section: 'report_rent', sub: true },
   // grantOnly: shown only when ticked in User Settings (not to older users by default)
   { id: 'bill-booking', label: 'Bill Collection & Booking', icon: ScanText, live: true, module: 'bill_booking', sub: true, grantOnly: true },
   { id: 'msme-group',   label: 'MSME Compliance',       icon: BadgeCheck,   live: true,  module: 'msme_compliance', sub: true,
@@ -46,7 +48,7 @@ const NAV = [
 ];
 
 export default function Sidebar({ page, onNavigate, open, onToggle }) {
-  const { user, logout, hasModule } = useAuth();
+  const { user, logout, hasModule, hasPerm } = useAuth();
   const [expanded, setExpanded] = useState({});   // group id → open (default: open while one of its pages is active)
 
   const visibleNav = NAV.map(item => {
@@ -54,6 +56,7 @@ export default function Sidebar({ page, onNavigate, open, onToggle }) {
     if (!item.live) return item;
     if (item.grantOnly && user?.role !== 'admin' && user?.permissions?.[item.module]?.enabled !== true) return null;
     if (item.module && !hasModule(item.module)) return null;
+    if (item.section && !hasPerm(item.module, item.section)) return null;
     return item;
   });
 

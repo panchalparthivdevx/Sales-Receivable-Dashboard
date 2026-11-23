@@ -4,6 +4,7 @@ import Sidebar from './components/Sidebar';
 import LoginPage from './pages/LoginPage';
 import Dashboard from './pages/Dashboard';
 import PurchaseDashboard from './pages/PurchaseDashboard';
+import RentReports from './pages/RentReports';
 import RPTDashboard from './pages/RPTDashboard';
 import VendorRegistrationForm from './pages/VendorRegistrationForm';
 import VendorRegistrations from './pages/VendorRegistrations';
@@ -47,7 +48,7 @@ class ErrorBoundary extends React.Component {
 }
 
 function AppInner() {
-  const { user, loading, hasModule } = useAuth();
+  const { user, loading, hasModule, hasPerm } = useAuth();
   // The link in a GSTR-2B reminder email (/?open=gstr2b) opens that module; everything else starts on Sales as before
   const [page, setPage] = useState(() => (new URLSearchParams(window.location.search).get('open') === 'gstr2b' ? 'gstr2b' : 'sales'));
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -89,6 +90,8 @@ function AppInner() {
           {page === 'finance-overview' && (hasModule('sales') || hasModule('purchase')) && <FinanceOverview />}
           {page === 'sales'        && hasModule('sales')        && <Dashboard />}
           {page === 'purchase'     && hasModule('purchase')     && <PurchaseDashboard />}
+          {/* Same tick as before the report moved out of Purchase & Payables: Month-wise Rent Report */}
+          {page === 'rent-reports' && hasPerm('purchase', 'report_rent') && <RentReports />}
           {/* Granted explicitly (the server checks the same) */}
           {page === 'bill-booking' && (user.role === 'admin' || user.permissions?.bill_booking?.enabled === true) && <BillBooking />}
           {(page === 'msme' || page === 'msme-neddle') && hasModule('msme_compliance') && <MSMECompanies active={page === 'msme-neddle' ? 'neddle' : 'devx'} />}
