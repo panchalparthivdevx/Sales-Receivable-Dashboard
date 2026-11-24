@@ -3,7 +3,7 @@
  * comes from Zoho Books or TRACES. The same scenario drives the automated tests (tests/acceptance.test.js), so the demo shows exactly the
  * cases the module was accepted on:
  *   A exact match · B ₹2.00 rounding · C ₹2.01 mismatch · D three invoices = one 26AS credit · E two equal TDS amounts, one credit (ambiguous)
- *   F March booking / April credit (timing) · G Zoho only · H 26AS only · I tax deducted > deposited · K unmapped client (suggestion)
+ *   F March booking / April credit (timing) · G Zoho only · H 26AS only · I tax deducted > deposited · K a customer whose invoice records no TAN (not matched; name suggestion)
  *   L unallocated journal · T transfer between the entity's own TDS ledgers · M the same client in both entities · N partial payment
  *   O a credit that only the revised statement contains · statements: FY 2025-26 v1 and its revision v2, FY 2026-27, entity Y's own
  */
@@ -69,6 +69,7 @@ function scenario() {
     inv('iO1', 'DX/25-26/0115', '2026-03-08', C.O, 55000, 0.18, 1100, ['194C']), inv('iH1', 'DX/25-26/0116', '2026-02-10', C.H, 45000, 0.18, 0, []),
   ];
   for (const i of invs) { docsX.invoices[i.id] = i; docsX.invno[i.no] = { id: i.id, cust: i.cust, date: i.date }; }
+  docsX.invoices.iK1.tan = '';   // K: no TAN recorded on its invoice, so the TAN cannot tell the client — left to a name suggestion
   // the partial payment: half of invoice DX/25-26/0114 (₹1,18,000 gross): ₹58,000 received + ₹1,000 TDS = ₹59,000
   docsX.payments.pN1 = { id: 'pN1', no: 'CP/25-26/0501', date: '2026-02-15', cust: C.N.cust, cust_name: C.N.name, amount: r(58000), withheld: r(1000), tax_account_id: 'demo194C', ref: '',
     invoices: [{ id: 'iN1', no: 'DX/25-26/0114', date: '2026-02-01', applied: r(58000), withheld: r(1000), total: r(118000) }], lmt: '2026-02-15T10:00:00+0530', at: '2026-06-01T00:00:00Z' };

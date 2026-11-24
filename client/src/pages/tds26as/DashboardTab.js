@@ -19,7 +19,7 @@ export default function DashboardTab({ meta, params, stamp, onDrill, go }) {
           <span><b>Period:</b> {d.period.label}</span>
           <span><b>Last Zoho sync:</b> {d.sync.last_ok_at ? dtm(d.sync.last_ok_at) : 'never'}{d.sync.running ? ' (running)' : ''}</span>
           {d.coverage.statements.map(s => <span key={s.fy}><b>Form 26AS FY {s.fy}:</b> {s.missing ? <span style={{ color: '#B45309' }}>not uploaded</span> : `dated ${dt(s.statement_date)} (version ${s.version})`}</span>)}
-          <span><b>Client groups mapped:</b> {d.mapping.groups}</span>
+          <span><b>Clients:</b> {d.mapping.by_tan || 0} matched by TAN · {d.mapping.groups} client group(s)</span>
         </div>
         {d.coverage.gaps.length > 0 && (
           <div style={{ ...S.notice, margin: '0.6rem 0 0' }}>

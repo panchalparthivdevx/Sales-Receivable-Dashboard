@@ -31,7 +31,9 @@ function create({ sync, cfgNow }) {
     for (const c of credits) { const fam = require('./config').sectionFamily(c.section_raw, cfg.settings.section_aliases); if (fam) c.section = fam; }
     // reversal pairs inside a statement (+X and (X), remark G) cancel each other before matching — see statements.netReversals
     const net = ST.netReversals(credits);
-    const v = { entity, settings: cfg.settings, books, items: books.items, credits: net.credits, reversals: net.pairs, clientsDoc, clients: CL.index(clientsDoc), review, cf, statements: stmts, sync: syncState,
+    // the TAN on the Zoho invoice decides the client (lib/clients.index): customers sharing a TAN are one client without a mapping
+    const clients = CL.index(clientsDoc, { items: books.items, credits: net.credits, invoices: docs.invoices || {} });
+    const v = { entity, settings: cfg.settings, books, items: books.items, credits: net.credits, reversals: net.pairs, clientsDoc, clients, review, cf, statements: stmts, sync: syncState,
       zohoMonths: new Set(Object.keys(syncState.listed || {})), docs };
     memo.set(k, { at: Date.now(), v });
     return v;

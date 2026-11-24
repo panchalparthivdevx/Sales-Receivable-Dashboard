@@ -1,14 +1,23 @@
 /**
  * Client mapping, per entity: which Zoho customer(s) and which 26AS deductor TAN(s) are the same client.
  *
- * A client group holds one or more Zoho customers and one or more TANs (a client can deduct from several TANs, and the books can hold the
- * same client twice). Each customer and each TAN belongs to at most one group of the entity. Only approved groups are used for matching;
- * suggestions are shown for review:
- *   - "TAN on Zoho invoice"  the TAN the organisation records on the customer's invoices (DevX: cf_organization_tan_number) equals the
- *                            deductor's TAN in the statement
- *   - "similar name"         the deductor name and the customer name agree once legal suffixes and punctuation are ignored
- * A TAN can also be marked "no Zoho customer" (e.g. a deductor that never became a customer in the books) so its credits are reported as
- * "Not in Zoho Books" instead of waiting for a mapping.
+ * THE TAN DECIDES THE CLIENT (23 Nov 2026). Form 26AS lists a client once, under its TAN; the books may hold the same client as several
+ * customers (one per branch, names slightly different) that all record that TAN on their invoices (DevX: cf_organization_tan_number).
+ * So every Zoho entry gets its client from the TAN, without a reviewer mapping each customer:
+ *   1  the TAN on the entry's own invoice, when a client group holds it or an uploaded statement has credits from it
+ *   2  else the customer's client group (approved by a reviewer)
+ *   3  else the one known TAN the customer records on its other invoices (entries without an invoice TAN: credit notes, some journals)
+ *   4  else that TAN although no statement has it yet — a client of its own, whose entries become "Not in 26AS" once a statement covers
+ *      the date (often a wrong TAN on the invoice; the corrections report says so)
+ *   otherwise the entry is "not mapped" (no TAN on the customer's invoices, or several).
+ * A TAN no group holds is an automatic client `tan:<TAN>`, named after the deductor in the statement.
+ *
+ * Client groups (approved by a reviewer) stay for what the TAN cannot tell: a client that deducts from several TANs, or customers whose
+ * invoices carry no TAN. A group holds Zoho customers and TANs; each customer and each TAN belongs to at most one group. Suggestions for
+ * statement TANs that no Zoho invoice records ("similar name": deductor and customer names agree once legal suffixes and punctuation are
+ * ignored) wait for a reviewer. Reviewer decisions come first: a TAN in a group belongs to that group, a rejected customer ↔ TAN pair is
+ * never used, and a TAN marked "no Zoho customer" (a deductor that never became a customer) gets no automatic client — its credits are
+ * reported as "Not in Zoho Books" instead of waiting for a mapping.
  */
 
 'use strict';
@@ -31,38 +40,129 @@ function similarity(a, b) {
   return (2 * common) / (sx.size + sy.size);
 }
 
-function index(doc) {
+const AUTO = 'tan:';
+const isAuto = id => String(id || '').startsWith(AUTO);
+
+/**
+ * The effective mapping used by matching. items: all Zoho entries of the entity; credits: all active 26AS credits; invoices: the invoices
+ * fetched in detail ({ id: { cust, cust_name, tan } }) — a customer's TANs are learned from them and from its entries' invoices.
+ * Returns byTan (TAN → client), byEntry (entry key → client), entryInfo / entry(z) (how the client was found), byCust (approved groups
+ * only), groups (approved + automatic; tan_customers = the customers the TAN rule placed in a group beyond its own list), noCustomer.
+ */
+function index(doc, { items = [], credits = [], invoices = {} } = {}) {
+  const rejected = doc.rejected || {};
+  const noCustomer = new Set(Object.keys(doc.no_customer || {}));
   const byCust = new Map(), byTan = new Map(), groups = new Map();
   for (const g of doc.groups || []) {
-    groups.set(g.id, g);
+    groups.set(g.id, { ...g, auto: false, tan_customers: [] });
     for (const c of g.customers) byCust.set(c.id, g.id);
     for (const t of g.tans) byTan.set(t.tan, g.id);
   }
-  return { byCust, byTan, groups, noCustomer: new Set(Object.keys(doc.no_customer || {})) };
+  const deductor = new Map();
+  for (const c of credits) { const m = deductor.get(c.tan) || deductor.set(c.tan, new Map()).get(c.tan); m.set(c.deductor, (m.get(c.deductor) || 0) + 1); }
+  // fixed before any automatic client is made, so the result does not depend on the order of the entries
+  const knownSet = new Set([...byTan.keys(), ...deductor.keys()]);
+  const known = t => knownSet.has(t);
+  const custName = new Map(), custTans = new Map();
+  const learn = (cust, name, tan) => {
+    if (!cust) return;
+    if (name && !custName.has(cust)) custName.set(cust, name);
+    const t = normTan(tan);
+    if (TAN_RE.test(t)) (custTans.get(cust) || custTans.set(cust, new Set()).get(cust)).add(t);
+  };
+  for (const i of Object.values(invoices || {})) learn(i.cust, i.cust_name, i.tan);
+  for (const z of items) { learn(z.customer_id, z.customer_name, ''); for (const t of z.tan_hints || []) learn(z.customer_id, '', t); }
+
+  const usable = (cust, t) => TAN_RE.test(t) && !rejected[`${cust}|${t}`] && (byTan.has(t) || !noCustomer.has(t));
+  const groupOfTan = (t, cust) => {
+    if (!byTan.has(t)) {
+      const names = deductor.get(t);
+      const name = names ? [...names.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0][0] : custName.get(cust) || t;
+      groups.set(AUTO + t, { id: AUTO + t, name, auto: true, in_statement: !!names, customers: [], tans: [{ tan: t, name, basis: 'auto' }], tan_customers: [] });
+      byTan.set(t, AUTO + t);
+    }
+    return byTan.get(t);
+  };
+  const place = (gid, cust) => {
+    const g = groups.get(gid);
+    if (cust && !g.customers.some(c => c.id === cust) && !g.tan_customers.some(c => c.id === cust)) g.tan_customers.push({ id: cust, name: custName.get(cust) || '' });
+  };
+
+  /** client of one entry: { group, basis, tans (the TANs it rests on), alt (known TANs of the customer, for a TAN no statement has) } */
+  const memo = new Map();
+  function entry(z) {
+    if (memo.has(z.key)) return memo.get(z.key);
+    const cust = z.customer_id;
+    let out = { group: null, basis: cust ? 'no_tan' : 'no_customer', tans: [] };
+    if (cust) {
+      const raw = [...new Set((z.tan_hints || []).map(normTan))].filter(t => TAN_RE.test(t));
+      const own = raw.filter(t => usable(cust, t));
+      const learned = [...(custTans.get(cust) || [])].filter(t => usable(cust, t));
+      const ownKnown = own.filter(known), learnedKnown = learned.filter(known);
+      const ownGroups = new Set(ownKnown.map(t => byTan.get(t) || AUTO + t));
+      if (ownGroups.size === 1) out = { group: groupOfTan(ownKnown[0], cust), basis: 'invoice_tan', tans: ownKnown };
+      else if (byCust.has(cust)) out = { group: byCust.get(cust), basis: 'customer_group', tans: own };
+      else if (!own.length && learnedKnown.length === 1) out = { group: groupOfTan(learnedKnown[0], cust), basis: 'customer_tan', tans: learnedKnown };
+      else if (own.length === 1 && !ownKnown.length) out = { group: groupOfTan(own[0], cust), basis: 'invoice_tan_unseen', tans: own, alt: learnedKnown };
+      else if (!own.length && learned.length === 1) out = { group: groupOfTan(learned[0], cust), basis: 'customer_tan_unseen', tans: learned };
+      else if (raw.length && !own.length && !learned.length) out = { group: null, basis: 'tan_excluded', tans: raw };
+      else out = { group: null, basis: own.length || learned.length ? 'several_tans' : 'no_tan', tans: own.length > 1 ? own : learned };
+      if (out.group) place(out.group, cust);
+    }
+    memo.set(z.key, out);
+    return out;
+  }
+  const byEntry = new Map(), entryInfo = new Map();
+  for (const z of items) { const e = entry(z); entryInfo.set(z.key, e); if (e.group) byEntry.set(z.key, e.group); }
+  // every TAN a customer records is a client, so the deductor's credits are reported against it even when nothing is booked
+  for (const [cust, tans] of custTans) {
+    for (const t of tans) {
+      if (!usable(cust, t)) continue;
+      if (!byCust.has(cust)) place(groupOfTan(t, cust), cust);
+      else if (known(t) && byTan.get(t) !== byCust.get(cust)) place(groupOfTan(t, cust), cust);
+    }
+  }
+  return { byCust, byTan, byEntry, entryInfo, entry, groups, noCustomer, custTans, isAuto };
 }
 
-/** Suggestions for TANs of the statements that no group holds yet (and customers with Zoho entries) */
-function suggestions(doc, items, credits) {
-  const ix = index(doc);
+/**
+ * What the TAN rule leaves open: statement TANs that no Zoho invoice records (suggested to customers with a similar name, for review),
+ * and customers with TDS entries that got no client (no TAN on their invoices, or several). ix: the effective index (lib/clients.index).
+ */
+function suggestions(doc, items, credits, ix = index(doc, { items, credits })) {
   const customers = new Map();
-  for (const z of items) if (z.customer_id) { const c = customers.get(z.customer_id) || customers.set(z.customer_id, { id: z.customer_id, name: z.customer_name, tans: new Set(), n: 0, amount: 0 }).get(z.customer_id); c.n++; c.amount += z.amount; z.tan_hints.forEach(t => c.tans.add(normTan(t))); }
+  for (const z of items) {
+    if (!z.customer_id) continue;
+    const c = customers.get(z.customer_id) || customers.set(z.customer_id, { id: z.customer_id, name: z.customer_name, tans: new Set(), n: 0, amount: 0, open_n: 0, open_amount: 0, basis: '' }).get(z.customer_id);
+    c.n++; c.amount += z.amount;
+    const e = ix.entry(z);
+    if (!e.group) { c.open_n++; c.open_amount += z.amount; c.basis = e.basis; e.tans.forEach(t => c.tans.add(t)); }
+  }
   const deductors = new Map();
   for (const c of credits) { const d = deductors.get(c.tan) || deductors.set(c.tan, { tan: c.tan, name: c.deductor, n: 0, deducted: 0 }).get(c.tan); d.n++; d.deducted += c.deducted; }
+  // the client a customer's entries already have, and the TANs (no group holds) that client rests on — joined when a suggestion is approved
+  const clientOf = cust => ix.byCust.get(cust) || [...(ix.custTans.get(cust) || [])].map(t => ix.byTan.get(t)).find(Boolean) || null;
+  const autoTans = cust => [...(ix.custTans.get(cust) || [])].filter(t => ix.isAuto(ix.byTan.get(t)) && !(doc.rejected || {})[`${cust}|${t}`]);
   const out = [];
   for (const d of deductors.values()) {
     if (ix.byTan.has(d.tan) || ix.noCustomer.has(d.tan)) continue;
     const found = [];
     for (const c of customers.values()) {
       if ((doc.rejected || {})[`${c.id}|${d.tan}`]) continue;
-      if (c.tans.has(d.tan)) found.push({ c, score: 1, basis: 'tan_field', detail: `Zoho records TAN ${d.tan} on this customer's invoices` });
-      else { const sc = similarity(d.name, c.name); if (sc >= 0.75) found.push({ c, score: Math.round(sc * 100) / 100, basis: 'name', detail: `Names agree ${Math.round(sc * 100)} % once legal suffixes are ignored ("${d.name}" / "${c.name}")` }); }
+      const sc = similarity(d.name, c.name);
+      if (sc >= 0.75) found.push({ c, score: Math.round(sc * 100) / 100, basis: 'name', detail: `No Zoho invoice records TAN ${d.tan}; the names agree ${Math.round(sc * 100)} % once legal suffixes are ignored ("${d.name}" / "${c.name}")` });
     }
-    found.sort((a, b) => b.score - a.score || (b.basis === 'tan_field') - (a.basis === 'tan_field'));
-    for (const f of found.slice(0, 3)) out.push({ id: `s${hashOf(`${f.c.id}|${d.tan}`)}`, tan: d.tan, deductor: d.name, credits: d.n, deducted: d.deducted, customer_id: f.c.id, customer_name: f.c.name,
-      zoho_entries: f.c.n, zoho_amount: f.c.amount, score: f.score, basis: f.basis, detail: f.detail, existing_group: ix.byCust.get(f.c.id) || null, competing: found.length > 1 });
+    found.sort((a, b) => b.score - a.score || String(a.c.name).localeCompare(String(b.c.name)));
+    for (const f of found.slice(0, 3)) {
+      const g = clientOf(f.c.id);
+      out.push({ id: `s${hashOf(`${f.c.id}|${d.tan}`)}`, tan: d.tan, deductor: d.name, credits: d.n, deducted: d.deducted, customer_id: f.c.id, customer_name: f.c.name,
+        zoho_entries: f.c.n, zoho_amount: f.c.amount, score: f.score, basis: f.basis, detail: f.detail, existing_group: g, existing_name: g ? (ix.groups.get(g) || {}).name || '' : '',
+        customer_tans: ix.byCust.has(f.c.id) ? [] : autoTans(f.c.id), competing: found.length > 1 });
+    }
   }
   const unmappedTans = [...deductors.values()].filter(d => !ix.byTan.has(d.tan) && !ix.noCustomer.has(d.tan));
-  const unmappedCustomers = [...customers.values()].filter(c => !ix.byCust.has(c.id)).map(c => ({ id: c.id, name: c.name, entries: c.n, amount: c.amount, tans: [...c.tans] }));
+  const unmappedCustomers = [...customers.values()].filter(c => c.open_n > 0)
+    .map(c => ({ id: c.id, name: c.name, entries: c.open_n, amount: c.open_amount, tans: [...c.tans], why: c.basis === 'several_tans' ? `its invoices record several TANs (${[...c.tans].join(', ')})` : c.basis === 'tan_excluded' ? `the TAN on its invoices (${[...c.tans].join(', ')}) is ruled out below` : 'no TAN is recorded on its invoices' }));
   return { suggestions: out, unmapped_tans: unmappedTans, unmapped_customers: unmappedCustomers };
 }
 
@@ -91,17 +191,23 @@ async function change(entity, by, fn) {
   });
 }
 
-/** Approve suggestions: the TAN joins the customer's group, or a new group named after the customer */
+/** Approve suggestions: the TAN joins the customer's group, or a new group named after the customer — which also takes the TANs the
+ *  customer's entries were matched on automatically (customer_tans), so the client is not split between two TANs */
 async function approve(entity, by, list) {
   return change(entity, by, d => {
     let n = 0;
+    const held = t => d.groups.some(g => g.tans.some(x => x.tan === t));
     for (const s of list) {
       const tan = normTan(s.tan);
-      if (d.groups.some(g => g.tans.some(t => t.tan === tan))) continue;
+      if (!TAN_RE.test(tan) || held(tan)) continue;
+      const at = new Date().toISOString();
       const g = d.groups.find(x => x.customers.some(c => c.id === s.customer_id));
-      if (g) g.tans.push({ tan, name: s.deductor || '', by, at: new Date().toISOString(), basis: s.basis || 'manual' });
-      else d.groups.push({ id: `g${hashOf(`${s.customer_id}|${Date.now()}|${n}`)}`, name: s.customer_name || s.deductor || tan, customers: [{ id: s.customer_id, name: s.customer_name || '' }],
-        tans: [{ tan, name: s.deductor || '', by, at: new Date().toISOString(), basis: s.basis || 'manual' }], by, at: new Date().toISOString() });
+      if (g) g.tans.push({ tan, name: s.deductor || '', by, at, basis: s.basis || 'manual' });
+      else {
+        const extra = [...new Set((s.customer_tans || []).map(normTan))].filter(t => TAN_RE.test(t) && t !== tan && !held(t) && !d.no_customer[t]).map(t => ({ tan: t, name: '', by, at, basis: 'tan_field' }));
+        d.groups.push({ id: `g${hashOf(`${s.customer_id}|${Date.now()}|${n}`)}`, name: s.customer_name || s.deductor || tan, customers: [{ id: s.customer_id, name: s.customer_name || '' }],
+          tans: [{ tan, name: s.deductor || '', by, at, basis: s.basis || 'manual' }, ...extra], by, at });
+      }
       n++;
     }
     return { what: `approved ${n} mapping(s)`, approved: n };
@@ -125,6 +231,14 @@ async function removeGroup(entity, by, id) { return change(entity, by, d => { co
 async function noCustomer(entity, by, tan, on, note = '') {
   return change(entity, by, d => { const t = normTan(tan); if (!TAN_RE.test(t)) throw Object.assign(new Error('Not a valid TAN'), { status: 400 }); if (on) d.no_customer[t] = { by, at: new Date().toISOString(), note: String(note).slice(0, 300) }; else delete d.no_customer[t]; return { what: `${on ? 'marked' : 'unmarked'} ${t} as having no Zoho customer` }; });
 }
-async function reject(entity, by, customerId, tan) { return change(entity, by, d => { d.rejected[`${customerId}|${normTan(tan)}`] = { by, at: new Date().toISOString() }; return { what: `rejected suggestion ${customerId} ↔ ${tan}` }; }); }
+/** A customer ↔ TAN pair that is NOT the same client (a suggestion, or a TAN on the customer's invoices the TAN rule must not use);
+ *  on = false undoes it */
+async function reject(entity, by, customerId, tan, on = true, name = '') {
+  return change(entity, by, d => {
+    const k = `${customerId}|${normTan(tan)}`;
+    if (on) d.rejected[k] = { by, at: new Date().toISOString(), name: String(name || '').slice(0, 160) }; else delete d.rejected[k];
+    return { what: `${on ? 'rejected' : 'restored'} ${name || customerId} ↔ ${normTan(tan)}` };
+  });
+}
 
-module.exports = { load, index, suggestions, approve, saveGroup, removeGroup, noCustomer, reject, similarity, tokens };
+module.exports = { load, index, suggestions, approve, saveGroup, removeGroup, noCustomer, reject, similarity, tokens, isAuto };

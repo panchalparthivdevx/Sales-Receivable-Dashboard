@@ -103,7 +103,7 @@ export default function SettingsTab({ meta, reloadMeta }) {
               )}
               {!accounts && edit.ledgers.length > 0 && <div>{edit.ledgers.map(l => <Tag key={l.account_id}>{l.name} · {l.section || '?'}</Tag>)}</div>}
             </div>
-            <Field label="Zoho custom field holding the client's TAN on invoices (optional)" hint="DevX uses cf_organization_tan_number — it backs the mapping suggestions"><input style={{ ...S.input, width: 280 }} value={edit.tan_field || ''} onChange={e => setEdit({ ...edit, tan_field: e.target.value })} /></Field>
+            <Field label="Zoho custom field holding the client's TAN on invoices (optional)" hint="DevX uses cf_organization_tan_number — clients are matched on this TAN"><input style={{ ...S.input, width: 280 }} value={edit.tan_field || ''} onChange={e => setEdit({ ...edit, tan_field: e.target.value })} /></Field>
             <div><button style={S.primary} disabled={busy === 'save'} onClick={saveEntity}>Save entity</button></div>
           </div>
         </div>

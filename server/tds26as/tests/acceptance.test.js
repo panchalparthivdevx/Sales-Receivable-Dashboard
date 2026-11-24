@@ -31,7 +31,7 @@ async function fresh(statements = null) {
   recon = RC.create({ sync, cfgNow: H.cfgNow });
   return r;
 }
-const unitsOf = (res, d, tan) => res.units.filter(u => u.credits.some(k => d.credits.find(c => c.key === k).tan === tan) || u.zoho.some(k => { const z = d.items.find(i => i.key === k); return z && d.clients.byCust.get(z.customer_id) === d.clients.byTan.get(tan); }));
+const unitsOf = (res, d, tan) => res.units.filter(u => u.credits.some(k => d.credits.find(c => c.key === k).tan === tan) || u.zoho.some(k => { const z = d.items.find(i => i.key === k); return z && d.clients.byEntry.get(z.key) === d.clients.byTan.get(tan); }));
 const one = (list, msg) => { assert.equal(list.length, 1, msg); return list[0]; };
 
 test.before(async () => { await fresh(); });
@@ -221,13 +221,13 @@ test('unallocated journal shown separately; transfer between own TDS ledgers not
   assert.ok(cmp.checks.some(t => /Partial payment/.test(t)));
 });
 
-test('client mapping: a TAN-backed suggestion, once approved, matches the unmapped client', async () => {
+test('client mapping: a customer whose invoice records no TAN stays unmapped; a name suggestion, once approved, matches it', async () => {
   let { d, res } = await recon.run(X, Q4);
   const k = res.units.filter(u => u.reason && ['customer_unmapped', 'deductor_unmapped'].includes(u.reason.code));
   assert.equal(k.length, 2);
   const s = CL.suggestions(d.clientsDoc, d.items, d.credits).suggestions.filter(x => x.tan === sc.C.K.tan);
-  assert.ok(s.some(x => x.basis === 'tan_field' && x.customer_id === sc.C.K.cust));
-  await CL.approve('demo-x', 'tester', [s.find(x => x.basis === 'tan_field')]);
+  assert.ok(s.some(x => x.basis === 'name' && x.customer_id === sc.C.K.cust));
+  await CL.approve('demo-x', 'tester', [s.find(x => x.basis === 'name' && x.customer_id === sc.C.K.cust)]);
   recon.bump();
   ({ d, res } = await recon.run(X, Q4));
   assert.equal(one(unitsOf(res, d, sc.C.K.tan)).status, 'matched');

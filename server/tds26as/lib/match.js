@@ -5,7 +5,8 @@
  *
  * Sequence (each source amount is used once; the ₹2 tolerance is applied once per match or group, never per row):
  *   0  reviewer links           pairs / groups a reviewer confirmed (both sides inside the period)
- *   1  identify the client      Zoho customer ↔ deductor TAN through the entity's approved mapping (lib/clients)
+ *   1  identify the client      the deductor TAN: a Zoho entry belongs to the client of the TAN on its invoice, so several Zoho customers
+ *                               with one TAN are one client; reviewer groups cover the rest (lib/clients.index)
  *   2  transaction-wise         same client, TDS equal within ₹2 to the 26AS tax deducted or deposited. Where several entries qualify,
  *                               section, taxable base (26AS amount paid vs the Books base), exact amount and dates decide; when they
  *                               cannot, the entries go to review ("Need to Check — ambiguous")
@@ -95,7 +96,8 @@ function reconcile(ctx) {
   const zBy = new Map(ctx.items.map(i => [i.key, i])), cBy = new Map(ctx.credits.map(c => [c.key, c]));
   const used = new Set();
   const units = [];
-  const groupOfZ = z => (z.customer_id ? ctx.clients.byCust.get(z.customer_id) || null : null);
+  // the client of an entry comes from the TAN on its invoice (lib/clients.index); a plain group index (no entry()) maps by customer
+  const groupOfZ = z => (!z.customer_id ? null : ctx.clients.entry ? ctx.clients.entry(z).group : ctx.clients.byCust.get(z.customer_id) || null);
   const groupOfC = c => ctx.clients.byTan.get(c.tan) || null;
   const gName = g => (g ? (ctx.clients.groups.get(g) || {}).name || g : '');
 
@@ -158,7 +160,15 @@ function reconcile(ctx) {
     if (used.has(z.key)) continue;
     if (!z.customer_id) { addUnit({ method: 'single', step: 1, zoho: [z.key], credits: [], status: 'need_check', reason: { code: 'unallocated', text: `Unallocated: the ${z.type_label.toLowerCase()} ${z.number || ''} has no customer${z.refs_unresolved && z.refs_unresolved.length ? ` and its references (${z.refs_unresolved.join(', ')}) are not Zoho invoices` : ''}`, figures: { amount: z.amount } } }); continue; }
     const g = groupOfZ(z);
-    if (!g) { addUnit({ method: 'single', step: 1, zoho: [z.key], credits: [], status: 'need_check', reason: { code: 'customer_unmapped', text: `${z.customer_name || 'This customer'} is not mapped to a deductor TAN yet${z.tan_hints.length ? ` (Zoho records TAN ${z.tan_hints.join(', ')} on the invoice)` : ''} — map it in Client mapping`, figures: { amount: z.amount } } }); continue; }
+    if (!g) {
+      const info = ctx.clients.entry ? ctx.clients.entry(z) : { basis: '', tans: [] };
+      const why = info.basis === 'several_tans' ? `its invoices record several TANs (${info.tans.join(', ')}), so the TAN does not tell which deductor it is`
+        : info.basis === 'no_tan' ? 'no TAN is recorded on its invoices in Zoho'
+        : info.basis === 'tan_excluded' ? `the TAN on its invoice (${info.tans.join(', ')}) is ruled out for it in Client mapping ("not the same client" or "no Zoho customer")`
+        : `not mapped to a deductor TAN yet${z.tan_hints.length ? ` (Zoho records TAN ${z.tan_hints.join(', ')} on the invoice)` : ''}`;
+      addUnit({ method: 'single', step: 1, zoho: [z.key], credits: [], status: 'need_check', reason: { code: 'customer_unmapped', text: `${z.customer_name || 'This customer'}: ${why} — put it in a client in Client mapping`, figures: { amount: z.amount } } });
+      continue;
+    }
     slot(g).z.push(z);
   }
   for (const c of C) {
@@ -280,7 +290,10 @@ function reconcile(ctx) {
       if (used.has(z.key)) continue;
       if (z.amount < 0) { addUnit({ method: 'single', step: 4, group: g, zoho: [z.key], credits: [], status: 'need_check', reason: { code: 'reversal', text: `TDS reversed in Zoho (${z.type_label.toLowerCase()} ${z.number || ''}, ${fmtR(z.amount)}) without a matching 26AS change — check whether the client also revised its TDS statement` } }); continue; }
       const cv = cov26(z.date);
-      if (cv.state === 'complete') addUnit({ method: 'single', step: 4, group: g, zoho: [z.key], credits: [], status: 'not_in_26as' });
+      const gg = ctx.clients.groups.get(g);
+      const unseen = gg && gg.auto && !gg.in_statement ? gg.tans[0].tan : null;
+      if (cv.state === 'complete') addUnit({ method: 'single', step: 4, group: g, zoho: [z.key], credits: [], status: 'not_in_26as',
+        reason: unseen ? { code: 'tan_not_in_26as', text: `No uploaded Form 26AS has any credit from TAN ${unseen}, the TAN recorded on the Zoho invoice — check the TAN on the invoice; if it is right, the client has not reported this TDS`, figures: { zoho: z.amount } } : undefined });
       else addUnit({ method: 'single', step: 4, group: g, zoho: [z.key], credits: [], status: 'need_check', reason: { code: 'coverage_26as', text: `Coverage gap: ${cv.text}` } });
     }
     for (const c of b.c) {

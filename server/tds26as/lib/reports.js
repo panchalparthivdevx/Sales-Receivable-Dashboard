@@ -205,7 +205,7 @@ function corrections(d, res, org) {
     if (u.effective === 'not_in_zoho' || (u.effective === 'need_check' && u.reason && u.reason.code === 'deductor_unmapped')) {
       for (const c of cs) {
         const g = u.group ? d.clients.groups.get(u.group) : null;
-        const cands = g ? g.customers.flatMap(cu => invByCust.get(cu.id) || []).filter(i => !tdsInv.has(i.id) && i.date && Math.abs(daysBetween(i.date, c.txn_date)) <= 90 && c.amount_paid && [i.sub_total, i.sub_total + (i.tax_total || 0)].some(b => b && Math.abs(b - c.amount_paid) <= Math.max(200, b * 0.005))) : [];
+        const cands = g ? [...g.customers, ...(g.tan_customers || [])].flatMap(cu => invByCust.get(cu.id) || []).filter(i => !tdsInv.has(i.id) && i.date && Math.abs(daysBetween(i.date, c.txn_date)) <= 90 && c.amount_paid && [i.sub_total, i.sub_total + (i.tax_total || 0)].some(b => b && Math.abs(b - c.amount_paid) <= Math.max(200, b * 0.005))) : [];
         add('credit_missing', '26AS credit missing from Zoho', u, null, c, `${fmtR(c.deposited)} deposited by ${c.deductor} (${c.tan}) on ${c.txn_date}, section ${c.section_raw || '—'}${cands.length ? ` — invoice ${cands.map(i => i.no).join(', ')} has this base and no TDS booked` : u.group ? '' : ' — deductor not mapped to a customer yet'}`, c.deposited);
         if (cands.length) out[out.length - 1].candidate_invoices = cands.map(i => ({ no: i.no, date: i.date, basic: i.sub_total, url: zohoUrl(org, 'invoices', i.id) }));
       }
@@ -216,6 +216,13 @@ function corrections(d, res, org) {
       const credTans = new Set(cs.map(c => c.tan));
       if (cs.length && z.tan_hints.length && !z.tan_hints.some(t => credTans.has(t))) add('customer_mapping', 'TAN on the Zoho invoice differs from the deductor', u, z, cs[0], `Zoho invoice TAN ${z.tan_hints.join(', ')}; credit from ${[...credTans].join(', ')}`, z.amount);
       if (!u.group && z.customer_id && z.tan_hints.some(t => d.clients.byTan.has(t))) add('customer_mapping', 'Customer may be booked under the wrong Zoho customer', u, z, null, `Zoho records TAN ${z.tan_hints.join(', ')} on the invoice, which belongs to client "${(d.clients.groups.get(d.clients.byTan.get(z.tan_hints.find(t => d.clients.byTan.has(t)))) || {}).name}"`, z.amount);
+      const how = d.clients.entryInfo ? d.clients.entryInfo.get(z.key) : null;
+      const own = how && z.customer_id ? d.clients.byCust.get(z.customer_id) : null;
+      if (how && how.basis === 'invoice_tan' && own && own !== u.group) {
+        const gn = id => (d.clients.groups.get(id) || {}).name || id;
+        add('customer_mapping', 'Invoice TAN belongs to another client than the customer', u, z, cs[0] || null, `${z.customer_name || 'The customer'} is in client "${gn(own)}", but the invoice records TAN ${how.tans.join(', ')} (client "${gn(u.group)}"), so the entry is matched under "${gn(u.group)}" — correct the TAN on the invoice or the client mapping`, z.amount);
+      }
+      if (how && how.basis === 'invoice_tan_unseen' && how.alt && how.alt.length) add('customer_mapping', 'TAN on the Zoho invoice is in no Form 26AS', u, z, null, `The invoice records TAN ${how.tans.join(', ')}, which no uploaded statement has; other invoices of ${z.customer_name || 'this customer'} record ${how.alt.join(', ')} — check the TAN on the invoice`, z.amount);
       if (z.flags.includes('tds_booked_twice')) add('tds_amount', 'TDS booked twice (invoice and payment)', u, z, null, `TDS on invoice ${z.invoices.map(i => i.no).join(', ')} is booked on the invoice and again on a payment`, z.amount);
       if (z.flags.includes('ledger_fy_mismatch')) add('ledger_allocation', 'Posted to another financial year\'s TDS ledger', u, z, null, `${z.ledgers.join(', ')} used for an entry dated ${z.date} (FY ${z.fy})`, z.amount);
       if (z.flags.includes('section_differs_invoice')) add('ledger_allocation', 'Ledger section differs from the invoice\'s TDS section', u, z, null, `Ledger section ${z.section}; invoice TDS ${z.invoices.flatMap(i => i.tds_names || []).join(', ')}`, z.amount);

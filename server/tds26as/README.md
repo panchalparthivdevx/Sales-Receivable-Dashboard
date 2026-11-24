@@ -103,12 +103,35 @@ Cut-off: Zoho entries by **TDS posting date**, 26AS credits by **transaction dat
 | Step | Rule |
 |---|---|
 | 0 | Reviewer links: pairs or groups a reviewer confirmed, with both sides inside the period. Carry-forward settlements consume their credits first. |
-| 1 | **Identify the client** through the entity's approved mapping (Client mapping): one client = Zoho customer(s) + TAN(s). Unmapped → Need to Check. A TAN can be marked "no Zoho customer". |
+| 1 | **Identify the client by the deductor TAN** (`lib/clients.index`, see "Clients are matched on the TAN" below): an entry belongs to the client of the TAN recorded on its Zoho invoice, so several Zoho customers with one TAN are one client. Reviewer client groups cover what the TAN cannot tell. Unmapped → Need to Check. A TAN can be marked "no Zoho customer". |
 | 2 | **Transaction-wise:** TDS equal within ₹2 to the 26AS tax deducted or deposited. Among equal candidates, an exact amount, the section family (194I(a)/(b) → 194I), the base (amount paid vs Books base) or a clearly closer date decides. Otherwise → **Need to Check — ambiguous**. |
 | 3 | **Client total:** a unique subset (one credit = several entries, or the reverse), then the remaining totals per client. Method "Client total"; invoice attribution stays open. |
 | 4 | **Investigate:** first, timing (a credit or booking of the same client in another period → **Need to Check — timing**, with both periods shown and the other-period amount kept out of this period's totals). Then leftovers paired on evidence → **Not Matched**. The rest are one-sided: **Not in 26AS / Not in Zoho Books** only when the other source covers the date, otherwise **Need to Check — coverage gap**. A quarter counts as covered when its statement is dated on or after the deductors' filing date (31 Jul / 31 Oct / 31 Jan / 31 May). |
 
 Each source amount is used once. The ₹2 tolerance applies once per match or group.
+
+**Clients are matched on the TAN (23 Nov 2026).** Form 26AS lists a client once, under its TAN. DevX's books hold many clients as
+several customers, one per branch with slightly different names (e.g. "… - 14 Floor", "… - Mumbai - 1", "… - Hyderabad"), all recording
+the same TAN in `cf_organization_tan_number`. Before, only customers a reviewer had mapped were matched, so the other branches were
+"not mapped" and listed as "Customer may be booked under the wrong Zoho customer". Now each entry's client is found in this order:
+
+1. the TAN on the entry's own invoice, when a client group holds it or an uploaded statement has credits from it;
+2. otherwise the customer's client group;
+3. otherwise the one known TAN the customer records on its other invoices (credit notes and journals without an invoice);
+4. otherwise that TAN even though no statement has it yet. This makes a client of its own whose entries become **Not in 26AS** once a statement covers the date (reason `tan_not_in_26as`; often a wrong TAN on the invoice).
+
+Anything else is "not mapped": no TAN on the customer's invoices, or several. Every TAN no group holds is an automatic client `tan:<TAN>`, named after the deductor in the statement. No approval is needed for these. Reviewer decisions come first:
+
+- a TAN in a client group belongs to that group;
+- a customer ↔ TAN pair marked **not this client** is never used (Undo on Client mapping);
+- a TAN marked **no Zoho customer** gets no automatic client.
+
+Client groups are still used for a client that deducts from several TANs, and for customers whose invoices carry no TAN. Approving a name suggestion for a TAN that no invoice records also adds the TAN the customer is already matched on, so the client is not split.
+
+The corrections report adds two checks:
+
+- "Invoice TAN belongs to another client than the customer";
+- "TAN on the Zoho invoice is in no Form 26AS" (when the customer's other invoices record a known TAN).
 
 Statuses:
 
@@ -149,7 +172,7 @@ All reports filter by entity, period, client, TAN, section and status, and expor
 - **Zoho corrections:**
   - 26AS credits missing from Zoho, with candidate invoices
   - TDS amount errors and TDS booked twice
-  - customer mapping (TAN on the invoice ≠ deductor)
+  - customer mapping (TAN on the invoice ≠ deductor, invoice TAN of another client than the customer's group, invoice TAN in no statement)
   - ledger allocation (another FY's ledger, section differences)
   - unallocated journals
   - links to the Zoho records
@@ -184,16 +207,17 @@ Both folders are git-ignored. The audit trail is hash-chained (`audit_YYYY_MM`),
    - On the same tab, choose the PDF, text or ZIP file.
    - Click **Preview** and enter the password if asked.
    - Read the checks, then click **Import this statement**.
-4. **Map clients.** On Client mapping, click **Approve all … backed by the TAN on Zoho invoices**, then review the name suggestions and the unmapped deductors.
+4. **Check the clients.** Clients whose TAN is on their Zoho invoices are matched automatically ("Matched automatically by TAN" on Client mapping). Review the name suggestions, the deductors no invoice records, and the customers whose invoices carry no TAN. If a customer is wrongly matched on a TAN, use **not this client**.
 5. **Export the follow-up report.** On Client follow-up, set the filters and click **Export to Excel**.
 
 Admins can load **demo data** (Settings & audit) to see every case first. It is synthetic, labelled on every screen, and removable.
 
 ## Tests
 
-`npm run test:tds26as` (40 tests):
+`npm run test:tds26as` (44 tests):
 
 - parser: text, Excel, CSV, PDF, protected PDF, protected ZIP
+- clients matched on the TAN (`tests/tanmatch.test.js`, synthetic): one TAN under three Zoho customers with only one mapped, one TAN under two customers with nothing mapped, a mistyped invoice TAN, another client's TAN on an invoice, a ruled-out pair, a name suggestion joining two TANs, order independence
 - the Tax Year 2026-27 statement layout (Excel and PDF, synthetic data), section codes, reversal pairs, Gross Total
 - every acceptance case on the demo scenario
 - sync on a fake Zoho with the live response shapes, the report pacing, the block handling and the stored lock

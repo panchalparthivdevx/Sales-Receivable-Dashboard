@@ -259,7 +259,7 @@ router.get('/recon/dashboard', gate(), wrap(async (req, res) => {
   const { e, period, d, res: r } = await runFor(req);
   const dash = RP.dashboard(d, r, period);
   res.json({ entity: e.id, period, ...dash, coverage: await coverageOf(e, period, d), sync: { last_ok_at: d.sync.last_ok_at || null, running: d.sync.running, last_error: d.sync.last_error || null },
-    mapping: { groups: d.clientsDoc.groups.length }, statements: d.statements });
+    mapping: { groups: d.clientsDoc.groups.length, by_tan: new Set([...d.clients.byEntry.values()].filter(CL.isAuto)).size }, statements: d.statements });
 }));
 
 router.get('/recon/units', gate(), wrap(async (req, res) => {
@@ -312,12 +312,22 @@ router.get('/recon/transfers', gate(), wrap(async (req, res) => { const { period
 router.get('/clients', gate(), wrap(async (req, res) => {
   const e = entityOf(req);
   const d = await need().recon.load(e);
-  const s = CL.suggestions(d.clientsDoc, d.items, d.credits);
-  const stats = new Map();
-  for (const g of d.clientsDoc.groups) stats.set(g.id, { zoho: 0, credits: 0 });
-  for (const z of d.items) { const g = d.clients.byCust.get(z.customer_id); if (g) stats.get(g).zoho += z.amount; }
-  for (const c of d.credits) { const g = d.clients.byTan.get(c.tan); if (g) stats.get(g).credits += c.deducted; }
-  res.json({ groups: d.clientsDoc.groups.map(g => ({ ...g, totals: stats.get(g.id) })), no_customer: d.clientsDoc.no_customer, ...s, history: (d.clientsDoc.history || []).slice(0, 50) });
+  const s = CL.suggestions(d.clientsDoc, d.items, d.credits, d.clients);
+  // totals per client as the matching sees them: an entry counts where the TAN rule placed it
+  const stats = new Map([...d.clients.groups.keys()].map(id => [id, { zoho: 0, credits: 0, entries: 0, n_credits: 0, per_customer: {} }]));
+  for (const z of d.items) {
+    const g = d.clients.byEntry.get(z.key);
+    if (!g || !stats.has(g)) continue;
+    const st = stats.get(g);
+    st.zoho += z.amount; st.entries++;
+    st.per_customer[z.customer_id] = (st.per_customer[z.customer_id] || 0) + z.amount;
+  }
+  for (const c of d.credits) { const g = d.clients.byTan.get(c.tan); if (g && stats.has(g)) { stats.get(g).credits += c.deducted; stats.get(g).n_credits++; } }
+  const view = g => ({ ...g, totals: stats.get(g.id) });
+  const auto = [...d.clients.groups.values()].filter(g => g.auto && (stats.get(g.id).entries || stats.get(g.id).n_credits)).map(view)
+    .sort((a, b) => (b.totals.zoho + b.totals.credits) - (a.totals.zoho + a.totals.credits) || a.name.localeCompare(b.name));
+  const rejected = Object.entries(d.clientsDoc.rejected || {}).map(([k, v]) => { const [customer_id, tan] = k.split('|'); return { customer_id, tan, ...v }; });
+  res.json({ groups: d.clientsDoc.groups.map(g => view(d.clients.groups.get(g.id) || g)), auto, rejected, no_customer: d.clientsDoc.no_customer, ...s, history: (d.clientsDoc.history || []).slice(0, 50) });
 }));
 const clientsChange = fn => wrap(async (req, res) => {
   const e = entityOf(req);
@@ -331,7 +341,7 @@ router.post('/clients/approve', gate('review'), clientsChange((e, req) => CL.app
 router.post('/clients/group', gate('review'), clientsChange((e, req) => CL.saveGroup(e.id, byName(req), req.body?.group || {})));
 router.post('/clients/remove', gate('review'), clientsChange((e, req) => CL.removeGroup(e.id, byName(req), String(req.body?.id || ''))));
 router.post('/clients/no-customer', gate('review'), clientsChange((e, req) => CL.noCustomer(e.id, byName(req), req.body?.tan, req.body?.on !== false, req.body?.note)));
-router.post('/clients/reject', gate('review'), clientsChange((e, req) => CL.reject(e.id, byName(req), String(req.body?.customer_id || ''), req.body?.tan)));
+router.post('/clients/reject', gate('review'), clientsChange((e, req) => CL.reject(e.id, byName(req), String(req.body?.customer_id || ''), req.body?.tan, req.body?.on !== false, req.body?.name)));
 router.get('/clients/customers', gate(), wrap(async (req, res) => {
   const e = entityOf(req);
   const d = await need().recon.load(e);
