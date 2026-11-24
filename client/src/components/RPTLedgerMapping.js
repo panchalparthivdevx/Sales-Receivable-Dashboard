@@ -24,6 +24,7 @@ const DEFAULT_NATURES = [
   { key: 'repayment_made', label: 'Repayment Made', normal: 'debit' },
   { key: 'interest_income', label: 'Interest Income', normal: 'credit' },
   { key: 'interest_expense', label: 'Interest Expense', normal: 'debit' },
+  { key: 'interest_provision', label: 'Interest Income Provision', normal: 'debit' },
   { key: 'deposit_given', label: 'Deposit Given', normal: 'debit' },
   { key: 'deposit_received', label: 'Deposit Received', normal: 'credit' },
   { key: 'investment', label: 'Investment', normal: 'debit' },
@@ -51,6 +52,7 @@ function accountGroup(type) {
 // Default Nature when a ledger is picked (user can change it)
 function suggestNature(o) {
   const n = String(o?.name || '').toLowerCase(), g = accountGroup(o?.type);
+  if (/interest/.test(n) && /provision|receivable|accrued/.test(n) && g === 'asset') return 'interest_provision';
   if (/interest/.test(n)) return g === 'income' ? 'interest_income' : g === 'expense' ? 'interest_expense' : 'other_rpt';
   if (/deposit/.test(n)) return g === 'liability' ? 'deposit_received' : 'deposit_given';
   if (/advance/.test(n)) return g === 'liability' ? 'advance_received' : 'advance_given';

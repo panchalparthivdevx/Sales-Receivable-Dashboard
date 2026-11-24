@@ -8128,6 +8128,8 @@ const RPT_NATURES = {
   repayment_made:     { label: 'Repayment Made',     bucket: 'loans',    normal: 'debit',  flow: 'repayment' },
   interest_income:    { label: 'Interest Income',    bucket: 'interest', normal: 'credit' },
   interest_expense:   { label: 'Interest Expense',   bucket: 'interest', normal: 'debit' },
+  // role balance → the ledger's balance is the Interest tab's Opening / Closing Bal.
+  interest_provision: { label: 'Interest Income Provision', bucket: 'interest', normal: 'debit', role: 'balance' },
   deposit_given:      { label: 'Deposit Given',      bucket: 'loans',    normal: 'debit' },
   deposit_received:   { label: 'Deposit Received',   bucket: 'loans',    normal: 'credit' },
   investment:         { label: 'Investment',         bucket: 'loans',    normal: 'debit' },
@@ -8184,12 +8186,43 @@ function rptNormalizeMapping(x) {
   return out;
 }
 
+// Interest ledgers named by the finance team (24 Nov 2026): per party, the provision ledger gives
+// the Interest tab's Opening / Closing Bal. and the income ledger the interest booked. Each is
+// added once per environment; afterwards the Ledger Mapping alone decides (a default the user
+// removes is not added back).
+const RPT_INTEREST_DEFAULTS = [
+  ['Saasjoy Solutions Private Limited', 'interest_provision', '1714732000040748113', 'Saasjoy Loan Interest Income Provision', 'other_current_asset'],
+  ['Saasjoy Solutions Private Limited', 'interest_income',    '1714732000034262100', 'Interest Income_Unsecured Loan_Saasjoy Solutions Private Limited', 'other_income'],
+  ['Scaleax Advisory Private Limited',  'interest_provision', '1714732000042179351', 'Scaleax Advisory Interest Income Provision', 'other_current_asset'],
+  ['Scaleax Advisory Private Limited',  'interest_income',    '1714732000042179337', 'Interest Income_Scaleax Advisory Pvt. Ltd.', 'other_income'],
+  ['Janak Urja Private Limited',        'interest_provision', '1714732000027861079', 'Janak Urja Interest Income Provision', 'other_current_asset'],
+  ['Janak Urja Private Limited',        'interest_income',    '1714732000025666391', 'Interest Income_Unsecured Loan_Janak Urja Pvt Ltd', 'other_income'],
+  ['Eezily Networks Private Limited',   'interest_provision', '1714732000053805177', 'Eezily Loan Interest Provision', 'other_current_asset'],
+  ['Eezily Networks Private Limited',   'interest_income',    '1714732000053805185', 'Interest Income_Unsecured Loan_Eezily Networks Private Limited', 'other_income'],
+  ['Ausil Enterprice Pvt. Ltd.',        'interest_provision', '1714732000027861073', 'Ausil Interst Income Provision', 'other_current_asset'],
+  ['Ausil Enterprice Pvt. Ltd.',        'interest_income',    '1714732000025666387', 'Interest Income_Unsecured Loan_Ausil Pvt Ltd', 'other_income'],
+].map(([party, nature, zohoId, zohoName, accountType]) => ({ party, nature, zohoId, zohoName, accountType }));
+
+// Adds the defaults not yet applied in this store; true when the store changed
+function rptApplyDefaults(m) {
+  const applied = new Set(m.defaultsApplied || []);
+  const todo = RPT_INTEREST_DEFAULTS.filter(d => !applied.has(d.zohoId));
+  if (!todo.length) return false;
+  const taken = new Set([...m.mappings.filter(x => x.source === 'loan').map(x => x.zohoId), ...(m.ignored || []).map(x => x?.zohoId)]);
+  const now = new Date().toISOString();
+  for (const d of todo) {
+    if (taken.has(d.zohoId)) continue;
+    m.mappings.push({ id: rptNewId(), source: 'loan', ...d, status: 'mapped', createdAt: now, updatedAt: now });
+  }
+  m.defaultsApplied = [...applied, ...todo.map(d => d.zohoId)];
+  return true;
+}
+
 async function readRptMapping() {
-  const m = await db.readJSON('rpt_ledger_mapping', RPT_MAPPING_FILE, null);
-  if (m && Array.isArray(m.mappings)) return { ignored: [], ...m, mappings: m.mappings.map(rptNormalizeMapping) };
-  const seeded = await rptSeedMappings();
-  await writeRptMapping(seeded);
-  return seeded;
+  let m = await db.readJSON('rpt_ledger_mapping', RPT_MAPPING_FILE, null);
+  if (!m || !Array.isArray(m.mappings)) { m = await rptSeedMappings(); await writeRptMapping(m); }
+  if (rptApplyDefaults(m)) await writeRptMapping(m);
+  return { ignored: [], ...m, mappings: m.mappings.map(rptNormalizeMapping) };
 }
 async function writeRptMapping(d) {
   await db.writeJSON('rpt_ledger_mapping', RPT_MAPPING_FILE, d);
@@ -8580,17 +8613,45 @@ async function rptComputePurchase(fyKey, force) {
   return result;
 }
 
-// Every transaction posted to one COA ledger (journals, bank txns, expenses, payments, …)
+// Zoho's account-transactions report has its own, much lower per-minute limit (an org-wide
+// one-hour block at roughly 50–80 calls a minute), so RPT ledger reads go at most ~24 a minute.
+let _rptLedgerNextSlot = 0;
+async function rptLedgerGet(params) {
+  const now = Date.now();
+  const slot = Math.max(now, _rptLedgerNextSlot);
+  _rptLedgerNextSlot = slot + 2500;
+  if (slot > now) await new Promise(r => setTimeout(r, slot - now));
+  return rptZohoGet('/chartofaccounts/transactions', params);
+}
+
+// Every transaction posted to one COA ledger (journals, bank txns, expenses, payments, …).
+// Saved rows older than 4 h are answered at once and re-read in the background (the next load
+// shows any change); Refresh (force) waits for Zoho.
+const _rptLedgerBg = new Map();
 async function rptLedgerTxns(accountId, force) {
   const store = await rptStore('rpt_ledger_txns', RPT_LEDGER_FILE);
   const hit = store[accountId];
-  if (hit && !force && syncEngine.isFresh(hit.fetched_at, RPT_LEDGER_TTL_H)) return { txns: hit.txns };
+  if (hit && !force) {
+    if (!syncEngine.isFresh(hit.fetched_at, RPT_LEDGER_TTL_H) && !_rptLedgerBg.has(accountId)) {
+      const sig = r => JSON.stringify(r?.txns || []);
+      const before = sig(hit);
+      _rptLedgerBg.set(accountId, background(rptLedgerFetch(accountId, hit)
+        .then(r => { if (!r.error && sig(r) !== before) rptInvalidate(); })
+        .finally(() => _rptLedgerBg.delete(accountId))));
+    }
+    return { txns: hit.txns };
+  }
+  return rptLedgerFetch(accountId, hit);
+}
+
+async function rptLedgerFetch(accountId, hit) {
+  const store = await rptStore('rpt_ledger_txns', RPT_LEDGER_FILE);
   try {
     const rows = [], seen = new Set();
     const toYear = new Date().getFullYear() + 2;
     let page = 1;
     while (page <= 50) {
-      const d = await rptZohoGet('/chartofaccounts/transactions', {
+      const d = await rptLedgerGet({
         account_id: accountId, 'date.start': '2015-04-01', 'date.end': `${toYear}-03-31`, per_page: 200, page,
       });
       for (const t of d.transactions || []) {
@@ -8618,6 +8679,47 @@ async function rptLedgerTxns(accountId, force) {
 // Asset/expense ledgers grow on debit (loan given); liability/equity/income grow on credit
 function rptDebitNormal(accountType) {
   return !accountType || /asset|bank|cash|receivable|expense|cost_of_goods|stock|input_tax/.test(accountType);
+}
+
+// Interest tab for one party from its mapped ledgers. Provision ledgers (role balance) → balance
+// before the FY (openingBal) and every movement in the FY, so any period's Opening / Closing Bal.
+// can be read off; interest income / expense ledgers → the interest booked, one row per voucher.
+// Postings of one voucher on two ledgers of the same kind are netted.
+function rptInterestFromLedgers(maps, ledgers, ledgerName, start, end) {
+  const debitSide = m => {
+    const n = RPT_NATURES[m.nature];
+    return n?.normal ? n.normal === 'debit' : rptDebitNormal(m.accountType);
+  };
+  const byVoucher = list => {
+    const g = new Map();
+    for (const m of list) {
+      for (const t of ledgers[m.zohoId]?.txns || []) {
+        const key = t.id || `${m.zohoId}|${t.date}|${t.entry}`;
+        const e = g.get(key) || { date: t.date, amount: 0, voucher: t.entry || t.ref || '', type: t.typeLabel || t.type || '', ledgers: new Set() };
+        e.amount += debitSide(m) ? t.dr - t.cr : t.cr - t.dr;
+        e.ledgers.add(ledgerName(m));
+        g.set(key, e);
+      }
+    }
+    return [...g.values()]
+      .map(e => ({ date: e.date, amount: rptR2(e.amount), voucher: e.voucher, type: e.type, ledger: [...e.ledgers].join(', ') }))
+      .filter(e => e.amount && e.date)
+      .sort((a, b) => a.date.localeCompare(b.date));
+  };
+  const names = list => [...new Set(list.map(ledgerName))];
+  const inFY = e => e.date >= start && e.date <= end;
+  const prov = maps.filter(m => RPT_NATURES[m.nature]?.role === 'balance');
+  const inc  = maps.filter(m => RPT_NATURES[m.nature]?.role !== 'balance');
+  const pe = byVoucher(prov);
+  return {
+    source: 'ledger', kind: 'interest',
+    provision: prov.length ? {
+      ledgers: names(prov),
+      openingBal: rptR2(pe.filter(e => e.date < start).reduce((s, e) => s + e.amount, 0)),
+      entries: pe.filter(inFY),
+    } : null,
+    booked: { ledgers: names(inc), entries: byVoucher(inc).filter(inFY) },
+  };
 }
 const RPT_DOC_TXN_TYPES = new Set(['invoice', 'bill', 'creditnote', 'credit_note', 'vendor_credit', 'vendor_credits', 'credit_notes']);
 
@@ -8667,6 +8769,10 @@ async function rptComputeLoans(fyKey, force) {
 
   for (const [party, byBucket] of Object.entries(groups)) {
     for (const [bucket, maps] of Object.entries(byBucket)) {
+      if (bucket === 'interest') {
+        out.interest[party] = rptInterestFromLedgers(maps, ledgers, ledgerName, start, end);
+        continue;
+      }
       // One entry per Zoho transaction ID: a journal touching two mapped ledgers of the same
       // party is netted, so internal reclassifications / set-offs are not counted twice.
       const txns = new Map();

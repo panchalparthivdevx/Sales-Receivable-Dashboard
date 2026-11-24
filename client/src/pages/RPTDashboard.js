@@ -309,6 +309,61 @@ function LoansTable({ partyName, data, period, fyStart }) {
   );
 }
 
+// ─── Interest table (provision ledger balance + interest income ledger) ──────────
+function InterestTable({ partyName, data, period, fyStart, onDrill }) {
+  const sum = list => list.reduce((s, e) => s + (e.amount || 0), 0);
+  const inSel = e => inPeriod(e.date, period.start, period.end);
+  const prov = data.provision;
+  // Opening = balance before the FY + this FY's movements before the period; Closing adds the period
+  const opening = prov ? prov.openingBal + sum(prov.entries.filter(e => e.date >= fyStart && e.date < period.start)) : null;
+  const closing = prov ? opening + sum(prov.entries.filter(inSel)) : null;
+  const booked = (data.booked?.entries || []).filter(inSel);
+  const bookedTotal = sum(booked);
+  const names = list => (list?.length ? list.join(', ') : '—');
+  const label = { ...S.td, color: '#18191B' };
+  const acct  = { ...S.td, color: '#5D6C7B' };
+  const amt   = { ...S.td, textAlign: 'right', fontWeight: 700 };
+
+  return (
+    <div style={S.tableWrap}>
+      <div style={{ ...S.tableToggle, cursor: 'default' }}>
+        <span style={{ color: '#9BA8B0', fontSize: '0.82rem' }}>{partyName}</span>
+        <span style={{ fontSize: '0.78rem', color: '#5D6C7B' }}>{booked.length} journal{booked.length !== 1 ? 's' : ''}</span>
+      </div>
+      <table style={S.table}>
+        <thead>
+          <tr>
+            <th style={{ ...S.th, textAlign: 'left', width: '28%' }}>Particulars</th>
+            <th style={{ ...S.th, textAlign: 'left' }}>Zoho Account</th>
+            <th style={{ ...S.th, textAlign: 'right', width: '18%' }}>Amount (₹)</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr style={S.balanceRow}>
+            <td style={label}>Opening Bal. <span style={{ color: '#9BA8B0' }}>(as at {period.start})</span></td>
+            <td style={acct}>{names(prov?.ledgers)}</td>
+            <td style={amt}>{prov ? `₹${fmt(opening)}` : '—'}</td>
+          </tr>
+          <tr style={S.rowEven}>
+            <td style={label}>Interest Income booked <span style={{ color: '#9BA8B0' }}>({period.label})</span></td>
+            <td style={acct}>{names(data.booked?.ledgers)}</td>
+            <td style={amt}>
+              <span style={{ color: '#15803D', cursor: 'pointer', textDecoration: 'underline dotted' }} title="View journals" onClick={() => onDrill(booked, bookedTotal)}>
+                ₹{fmt(bookedTotal)}
+              </span>
+            </td>
+          </tr>
+          <tr style={S.balanceRow}>
+            <td style={label}>Closing Bal. <span style={{ color: '#9BA8B0' }}>(as at {period.end})</span></td>
+            <td style={acct}>{names(prov?.ledgers)}</td>
+            <td style={{ ...amt, color: '#15803D' }}>{prov ? `₹${fmt(closing)}` : '—'}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 // ─── Section wrapper ───────────────────────────────────────────────────────────
 function Section({ title, children }) {
   return (
@@ -390,6 +445,14 @@ export default function RPTDashboard() {
   }, [selectedFY.key, loadFY]);
 
   const isLoading = Object.values(loading).some(Boolean);
+  const periodLabel = period.id === 'Full' ? selectedFY.label : `${selectedFY.label} · ${period.label}`;
+
+  // Interest amount → the journals behind it
+  const openInterestDrill = (partyName, entries, total) => setDrill({
+    title: `Interest Income — ${partyName} — ${periodLabel}`,
+    rows: entries.map(e => ({ date: e.date, zoho_name: e.ledger, party: partyName, voucher: e.voucher, type: e.type, amount: e.amount })),
+    total, totalLabel: 'Total Interest Income booked',
+  });
 
   // Card figure → underlying transactions (same selected-period rows the card sums)
   const openDrill = (partyName, type) => {
@@ -414,7 +477,6 @@ export default function RPTDashboard() {
       label = 'Loans';
       totalLabel = 'Total Loans Given (as on card)';
     }
-    const periodLabel = period.id === 'Full' ? selectedFY.label : `${selectedFY.label} · ${period.label}`;
     setDrill({ title: `${label} — ${partyName} — ${periodLabel}`, rows, total, totalLabel });
   };
 
@@ -556,17 +618,27 @@ export default function RPTDashboard() {
       {activeTab === 'interest' && (
         <Section title="Interest Income on Loans to Related Parties">
           <div style={S.manualNote}>
-            Interest income comes from the Zoho ledgers mapped as Interest in Ledger Mapping. Parties without a mapped interest ledger show manually maintained entries.
+            Opening and Closing Bal. come from each party's Interest Income Provision ledger, and the interest booked from its Interest Income ledger (both set in Ledger Mapping). Click the interest amount to see the journals. Parties without mapped interest ledgers show manually maintained entries.
           </div>
-          {parties.map(party => (
-            <LoansTable
-              key={party.name}
-              partyName={party.name}
-              data={loanData?.interest?.[party.name]}
-              period={period}
-              fyStart={periods[0].start}
-            />
-          ))}
+          {parties.map(party => {
+            const d = loanData?.interest?.[party.name];
+            return d?.kind === 'interest'
+              ? <InterestTable
+                  key={party.name}
+                  partyName={party.name}
+                  data={d}
+                  period={period}
+                  fyStart={periods[0].start}
+                  onDrill={(entries, total) => openInterestDrill(party.name, entries, total)}
+                />
+              : <LoansTable
+                  key={party.name}
+                  partyName={party.name}
+                  data={d}
+                  period={period}
+                  fyStart={periods[0].start}
+                />;
+          })}
         </Section>
       )}
 
