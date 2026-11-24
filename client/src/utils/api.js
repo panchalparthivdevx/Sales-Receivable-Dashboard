@@ -135,8 +135,8 @@ export const api = {
 
   // ── Related Party Transactions ───────────────────────────────────────────────
   rptParties:  () => axios.get(`${BASE}/rpt/parties`).then(r => r.data),
-  rptSales:    (fy) => axios.get(`${BASE}/rpt/sales?fy=${fy}`).then(r => r.data),
-  rptPurchase: (fy) => axios.get(`${BASE}/rpt/purchase?fy=${fy}`).then(r => r.data),
+  rptSales:    (fy, refresh) => axios.get(`${BASE}/rpt/sales?fy=${fy}${refresh ? '&refresh=1' : ''}`, { timeout: 300000 }).then(r => r.data),
+  rptPurchase: (fy, refresh) => axios.get(`${BASE}/rpt/purchase?fy=${fy}${refresh ? '&refresh=1' : ''}`, { timeout: 300000 }).then(r => r.data),
   rptLoans:    (fy, refresh) => axios.get(`${BASE}/rpt/loans?fy=${fy}${refresh ? '&refresh=1' : ''}`).then(rptJson),
   rptLoansSave:(payload) => axios.post(`${BASE}/rpt/loans`, payload).then(r => r.data),
   rptMapping:          ()                => axios.get(`${BASE}/rpt/mapping`).then(rptJson),

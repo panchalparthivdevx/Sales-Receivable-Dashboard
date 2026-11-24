@@ -8319,8 +8319,158 @@ async function rptFetchFYListLive(pathName, listKey, start, end) {
   return all;
 }
 
-// Sales = invoices − credit notes of every mapped customer
-async function rptComputeSales(fyKey) {
+// ── Journals in Sales / Purchase ──────────────────────────────────────────────
+// Manual journals that book revenue or cost against a related party (provisions, their
+// reversals, …) count next to the documents. /journals honours customer_id / vendor_id (a journal
+// with any line tagged to that contact). A journal adds its net movement on the account types
+// documents post to: income for Sales (credit +); expense, cost of goods sold, fixed asset and
+// stock for Purchase (debit +). So moving an amount between two such accounts (a bill re-classed
+// from Computer to Subscription Expense) nets to zero, and a TDS / receivable journal adds nothing.
+// Lines tagged to the party count; an untagged line counts only when every tagged line of the
+// journal belongs to the party (a prior-year provision reversal may tag only the provision line).
+// Ledgers mapped for Loans / Interest stay in those tabs. Journal rows never touch the AR balance.
+const RPT_JOURNALS_FILE = path.join(__dirname, 'rpt_journals.json');
+const RPT_JOURNAL_SIDES = {
+  sales:    { filter: 'customer_id', plus: 'credit', types: new Set(['income']) },
+  purchase: { filter: 'vendor_id',   plus: 'debit',  types: new Set(['expense', 'cost_of_goods_sold', 'fixed_asset', 'stock']) },
+};
+const RPT_JOURNAL_V = 1; // bump when the stored journal record changes — older records are re-read
+const _rptJournalBg = new Map();
+
+function rptJournalRec(j) {
+  return {
+    _v: RPT_JOURNAL_V, lmt: j.last_modified_time || '', date: j.journal_date || '', no: j.entry_number || '',
+    status: j.status || '', notes: String(j.notes || '').slice(0, 300),
+    lines: (j.line_items || []).map(l => ({
+      acc: l.account_id || '', name: l.account_name || '', type: l.selected_account?.account_type || l.account_type || '',
+      cid: l.customer_id || '', cname: l.customer_name || '', dc: l.debit_or_credit,
+      amt: rptR2(l.bcy_amount ?? l.amount),
+      tax: rptR2((l.line_item_taxes || []).reduce((s, t) => s + (Number(t.tax_amount) || 0), 0)),
+    })),
+  };
+}
+
+// Every journal tagged to one contact (all years — a contact has only a handful)
+async function rptJournalListFetch(source, contactId) {
+  const rows = [];
+  for (let page = 1; page <= 20; page++) {
+    const d = await rptZohoGet('/journals', {
+      [RPT_JOURNAL_SIDES[source].filter]: contactId, per_page: 200, page, sort_column: 'journal_date', sort_order: 'D',
+    });
+    for (const j of d.journals || []) rows.push({ id: j.journal_id, date: j.journal_date || '', status: j.status || '', lmt: j.last_modified_time || '' });
+    if (!d.page_context?.has_more_page) break;
+  }
+  return { fetched_at: new Date().toISOString(), rows };
+}
+
+// Journal lists per contact: fetched when missing or on Refresh; a list older than 4 h is used
+// as it is and re-read in the background (the next load shows any change).
+async function rptJournalLists(source, ids, force) {
+  const store = await rptStore('rpt_journals', RPT_JOURNALS_FILE);
+  store.lists = store.lists || {};
+  store.details = store.details || {};
+  const warnings = [];
+  const read = async list => {
+    let changed = false;
+    for (const id of list) {
+      const key = `${source}:${id}`;
+      try {
+        const fresh = await rptJournalListFetch(source, id);
+        const sig = l => (l?.rows || []).map(r => `${r.id}|${r.lmt}|${r.status}`).join(',');
+        if (sig(store.lists[key]) !== sig(fresh)) changed = true;
+        store.lists[key] = fresh;
+      } catch (e) {
+        warnings.push(`Journals could not be read from Zoho (${e.message})${store.lists[key] ? ' — showing the last fetched list' : ''}`);
+        if (e.response?.status === 429 || /LIMIT/.test(e.message)) break;
+      }
+    }
+    await rptStoreSave('rpt_journals', RPT_JOURNALS_FILE);
+    return changed;
+  };
+  const now = ids.filter(id => force || !store.lists[`${source}:${id}`]);
+  const stale = ids.filter(id => !now.includes(id) && !syncEngine.isFresh(store.lists[`${source}:${id}`].fetched_at, RPT_LEDGER_TTL_H));
+  if (now.length) await read(now);
+  if (stale.length && !_rptJournalBg.has(source)) {
+    _rptJournalBg.set(source, background(read(stale)
+      .then(changed => { if (changed) rptInvalidate(); })
+      .catch(e => console.warn(`[rpt] ${source} journal lists refresh failed:`, e.message))
+      .finally(() => _rptJournalBg.delete(source))));
+  }
+  return [...new Set(warnings)];
+}
+
+// Journal rows per party for one FY: { rows: { party: [...] }, warnings }
+async function rptJournalRows(source, mappings, byParty, start, end, force) {
+  const side = RPT_JOURNAL_SIDES[source];
+  const ids = [...new Set(Object.values(byParty).flat().map(m => m.zohoId))];
+  const out = { rows: {}, warnings: [] };
+  if (!ids.length) return out;
+  out.warnings = await rptJournalLists(source, ids, force);
+  const store = await rptStore('rpt_journals', RPT_JOURNALS_FILE);
+
+  const byContact = {}, need = new Map();
+  for (const id of ids) {
+    for (const r of store.lists[`${source}:${id}`]?.rows || []) {
+      if (r.date < start || r.date > end || r.status !== 'published') continue;
+      (byContact[id] = byContact[id] || []).push(r.id);
+      const d = store.details[r.id];
+      if (!d || d.lmt !== r.lmt || d._v !== RPT_JOURNAL_V) need.set(r.id, r);
+    }
+  }
+  let changed = false, missed = 0;
+  for (const r of need.values()) {
+    try {
+      store.details[r.id] = rptJournalRec((await rptZohoGet(`/journals/${r.id}`)).journal || {});
+      changed = true;
+    } catch (e) {
+      missed++;
+      console.warn(`[rpt] journal ${r.id} detail failed:`, e.message);
+      if (e.response?.status === 429 || /LIMIT/.test(e.message)) { missed = need.size; break; }
+    }
+  }
+  if (changed) await rptStoreSave('rpt_journals', RPT_JOURNALS_FILE);
+  if (missed) out.warnings.push(`${missed} journal(s) could not be read from Zoho — press Refresh in a few minutes`);
+
+  // A party's own contacts (Sales and Purchase mappings) and every ledger mapped for Loans / Interest
+  const partyContacts = {};
+  for (const m of mappings) if (m.source === 'sales' || m.source === 'purchase') (partyContacts[m.party] = partyContacts[m.party] || new Set()).add(m.zohoId);
+  const loanLedgers = new Set(mappings.filter(m => m.source === 'loan').map(m => m.zohoId));
+
+  for (const [party, maps] of Object.entries(byParty)) {
+    const mine = partyContacts[party] || new Set();
+    const rows = [];
+    for (const jid of new Set(maps.flatMap(m => byContact[m.zohoId] || []))) {
+      const j = store.details[jid];
+      if (!j?.lines) continue;
+      const soleParty = j.lines.every(l => !l.cid || mine.has(l.cid));
+      const counted = j.lines.filter(l => side.types.has(l.type) && !loanLedgers.has(l.acc) && (l.cid ? mine.has(l.cid) : soleParty));
+      const sgn = l => (l.dc === side.plus ? 1 : -1);
+      const basic = rptR2(counted.reduce((s, l) => s + sgn(l) * l.amt, 0));
+      if (!counted.length || Math.abs(basic) < 0.005) continue;
+      const gst = rptR2(counted.reduce((s, l) => s + sgn(l) * l.tax, 0));
+      const names = [...new Set(j.lines.filter(l => l.cid && mine.has(l.cid)).map(l => l.cname).filter(Boolean))];
+      rows.push({
+        journal_id: jid, no: j.no, date: j.date, status: j.status, basic, gst, total: rptR2(basic + gst), notes: j.notes,
+        zoho_name: [names.join(', ') || party, [...new Set(counted.map(l => l.name))].join(', ')].join(' · '),
+      });
+    }
+    out.rows[party] = rows;
+  }
+  return out;
+}
+
+// Journal → the Sales / Purchase row shape (balance 0: a journal is not an open document)
+function rptJournalDocRow(j, source) {
+  const [idKey, noKey] = source === 'sales' ? ['invoice_id', 'invoice_number'] : ['bill_id', 'bill_number'];
+  return {
+    [idKey]: `jr-${j.journal_id}`, [noKey]: j.no, journal_id: j.journal_id,
+    date: j.date, status: j.status, doc_type: 'Journal', zoho_name: j.zoho_name, notes: j.notes,
+    basic: j.basic, gst: j.gst, total: j.total, balance: 0, is_journal: true,
+  };
+}
+
+// Sales = invoices − credit notes + revenue journals of every mapped customer
+async function rptComputeSales(fyKey, force) {
   const { start, end } = RPT_FY_RANGES[fyKey];
   const { mappings } = await readRptMapping();
   const byParty = rptIdsByParty(mappings, 'sales');
@@ -8365,8 +8515,10 @@ async function rptComputeSales(fyKey) {
   const allCn  = Object.values(perCust).flatMap(c => c.creditNotes);
   const invDet = await rptDocDetails('invoice', allInv, 'invoice_id');
   const cnDet  = await rptDocDetails('creditnote', allCn, 'creditnote_id');
+  const jr     = await rptJournalRows('sales', mappings, byParty, start, end, force);
 
   const result = {};
+  if (jr.warnings.length) result._journalWarnings = jr.warnings;
   for (const party of RPT_PARTIES) {
     const custIds = [...new Set((byParty[party.name] || []).map(m => m.zohoId))];
     const rows = new Map(); // dedup by Zoho document ID
@@ -8380,8 +8532,9 @@ async function rptComputeSales(fyKey) {
       for (const cn of c.creditNotes) rows.set(cn.creditnote_id, rptDocRow(cn, cnDet(cn.creditnote_id), {
         idKey: 'invoice_id', noKey: 'invoice_number', idField: 'creditnote_id', noField: 'creditnote_number', nameField: 'customer_name', type: 'Credit Note', credit: true }));
     }
+    const periodTotal = [...rows.values()].reduce((s, r) => s + r.total, 0); // documents only (AR)
+    for (const j of jr.rows[party.name] || []) rows.set(`jr-${j.journal_id}`, rptJournalDocRow(j, 'sales'));
     const invoices    = [...rows.values()].sort((a, b) => a.date.localeCompare(b.date));
-    const periodTotal = invoices.reduce((s, r) => s + r.total, 0);
     const closingBal  = rptR2(closing);
     // Opening = Closing + FY cash received − FY net billing (keeps the ledger table internally consistent)
     const openingBal  = rptR2(closingBal + payFY - periodTotal);
@@ -8390,8 +8543,8 @@ async function rptComputeSales(fyKey) {
   return result;
 }
 
-// Purchase = bills − vendor credits of every mapped vendor
-async function rptComputePurchase(fyKey) {
+// Purchase = bills − vendor credits + cost journals of every mapped vendor
+async function rptComputePurchase(fyKey, force) {
   const { start, end } = RPT_FY_RANGES[fyKey];
   const { mappings } = await readRptMapping();
   const byParty = rptIdsByParty(mappings, 'purchase');
@@ -8409,8 +8562,10 @@ async function rptComputePurchase(fyKey) {
   }
   const billDet = await rptDocDetails('bill', bills, 'bill_id');
   const vcDet   = await rptDocDetails('vendor_credit', vcs, 'vendor_credit_id');
+  const jr      = await rptJournalRows('purchase', mappings, byParty, start, end, force);
 
   const result = {};
+  if (jr.warnings.length) result._journalWarnings = jr.warnings;
   for (const party of RPT_PARTIES) {
     const vIds = new Set((byParty[party.name] || []).map(m => m.zohoId));
     const rows = new Map();
@@ -8418,6 +8573,7 @@ async function rptComputePurchase(fyKey) {
       idKey: 'bill_id', noKey: 'bill_number', idField: 'bill_id', noField: 'bill_number', nameField: 'vendor_name', type: 'Bill' }));
     for (const v of vcs) if (vIds.has(v.vendor_id)) rows.set(v.vendor_credit_id, rptDocRow(v, vcDet(v.vendor_credit_id), {
       idKey: 'bill_id', noKey: 'bill_number', idField: 'vendor_credit_id', noField: 'vendor_credit_number', nameField: 'vendor_name', type: 'Vendor Credit', credit: true }));
+    for (const j of jr.rows[party.name] || []) rows.set(`jr-${j.journal_id}`, rptJournalDocRow(j, 'purchase'));
     const list = [...rows.values()].sort((a, b) => a.date.localeCompare(b.date));
     result[party.name] = { openingBal: 0, bills: list, closingBal: rptR2(list.reduce((s, b) => s + b.balance, 0)) };
   }
@@ -8548,24 +8704,31 @@ async function rptComputeLoans(fyKey, force) {
   return out;
 }
 
-const rptGetSales    = fy => rptMemo(`rpt-sales-${fy}`, () => rptComputeSales(fy));
-const rptGetPurchase = fy => rptMemo(`rpt-purchase-${fy}`, () => rptComputePurchase(fy));
+// force (Refresh) re-reads the journal lists from Zoho instead of using the saved ones
+const rptGetSales    = (fy, force) => {
+  if (force) cache.del(`rpt-sales-${fy}`);
+  return rptMemo(`rpt-sales-${fy}`, () => rptComputeSales(fy, force));
+};
+const rptGetPurchase = (fy, force) => {
+  if (force) cache.del(`rpt-purchase-${fy}`);
+  return rptMemo(`rpt-purchase-${fy}`, () => rptComputePurchase(fy, force));
+};
 const rptGetLoans    = (fy, force) => {
   if (force) cache.del(`rpt-loans-${fy}`);
   return rptMemo(`rpt-loans-${fy}`, () => rptComputeLoans(fy, force));
 };
 
-// Sales (invoices − credit notes) per related party — ?fy=fy2627 (defaults to fy2627)
+// Sales (invoices − credit notes + revenue journals) per related party — ?fy=fy2627 (defaults to fy2627)
 app.get('/api/rpt/sales', async (req, res) => {
   const fyKey = RPT_FY_RANGES[req.query.fy] ? req.query.fy : 'fy2627';
-  try { res.json(await rptGetSales(fyKey)); }
+  try { res.json(await rptGetSales(fyKey, req.query.refresh === '1')); }
   catch (e) { console.error(e.response?.data || e.message); res.status(500).json({ error: e.message }); }
 });
 
-// Purchase (bills − vendor credits) per related party — ?fy=fy2627 (defaults to fy2627)
+// Purchase (bills − vendor credits + cost journals) per related party — ?fy=fy2627 (defaults to fy2627)
 app.get('/api/rpt/purchase', async (req, res) => {
   const fyKey = RPT_FY_RANGES[req.query.fy] ? req.query.fy : 'fy2627';
-  try { res.json(await rptGetPurchase(fyKey)); }
+  try { res.json(await rptGetPurchase(fyKey, req.query.refresh === '1')); }
   catch (e) { console.error(e.response?.data || e.message); res.status(500).json({ error: e.message }); }
 });
 

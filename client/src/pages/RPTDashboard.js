@@ -120,20 +120,22 @@ function TransactionTable({ type, partyName, data, period, fyStart, loading }) {
   const pStart = period.start;
   const pEnd   = period.end;
   const isFYStart = pStart === fyStart;
+  // Journals (provisions etc.) count in Sales / Purchase but are not receivables / payables
+  const arTotal = r => (r.is_journal ? 0 : r.total);
 
   const openingBal = (() => {
     if (type === 'sales') {
       if (isFYStart) return data.openingBal || 0;
       // For mid-FY periods: server openingBal + invoices from FY start up to pStart
       const priorInFY = rows.filter(r => r.date >= fyStart && r.date < pStart);
-      return (data.openingBal || 0) + priorInFY.reduce((s, r) => s + r.total, 0);
+      return (data.openingBal || 0) + priorInFY.reduce((s, r) => s + arTotal(r), 0);
     }
     const priorBills = rows.filter(r => r.date >= fyStart && r.date < pStart);
     return priorBills.reduce((s, r) => s + r.balance, 0);
   })();
 
   const periodRows  = rows.filter(r => inPeriod(r.date, pStart, pEnd));
-  const periodTotal = periodRows.reduce((s, r) => s + r.total, 0);
+  const periodTotal = periodRows.reduce((s, r) => s + arTotal(r), 0);
 
   const closingBal = (() => {
     if (type === 'sales') {
@@ -184,7 +186,10 @@ function TransactionTable({ type, partyName, data, period, fyStart, loading }) {
             {periodRows.map((row, i) => (
               <tr key={row.invoice_id || row.bill_id} style={i % 2 === 0 ? S.rowEven : S.rowOdd}>
                 <td style={S.td}>{row.date}</td>
-                <td style={{ ...S.td, color: '#1C4942' }}>{row.invoice_number || row.bill_number}</td>
+                <td style={{ ...S.td, color: '#1C4942' }} title={row.is_journal ? (row.notes || row.zoho_name) : undefined}>
+                  {row.invoice_number || row.bill_number}
+                  {row.doc_type && !['Invoice', 'Bill'].includes(row.doc_type) && <span style={S.docTag}>{row.doc_type}</span>}
+                </td>
                 <td style={{ ...S.td, textAlign: 'right' }}>{row.basic ? fmt(row.basic) : '—'}</td>
                 <td style={{ ...S.td, textAlign: 'right' }}>{row.gst ? fmt(row.gst) : '—'}</td>
                 <td style={{ ...S.td, textAlign: 'right', fontWeight: 600 }}>₹{fmt(row.total)}</td>
@@ -360,11 +365,11 @@ export default function RPTDashboard() {
       .then(d => { setParties(d.parties || d); setLoading(l => ({ ...l, parties: false })); })
       .catch(() => setLoading(l => ({ ...l, parties: false })));
 
-    api.rptSales(selectedFY.key)
+    api.rptSales(selectedFY.key, bust)
       .then(d => { setSalesData(d); setLoading(l => ({ ...l, sales: false })); })
       .catch(() => { setError(er => ({ ...er, sales: true })); setLoading(l => ({ ...l, sales: false })); });
 
-    api.rptPurchase(selectedFY.key)
+    api.rptPurchase(selectedFY.key, bust)
       .then(d => { setPurData(d); setLoading(l => ({ ...l, purchase: false })); })
       .catch(() => { setError(er => ({ ...er, purchase: true })); setLoading(l => ({ ...l, purchase: false })); });
 
@@ -494,6 +499,7 @@ export default function RPTDashboard() {
       {activeTab === 'sales' && (
         <Section title="Sales Transactions with Related Parties">
           {error.sales && <div style={S.errorMsg}>Failed to load sales data. Please refresh.</div>}
+          {(salesData?._journalWarnings || []).map((w, i) => <div key={i} style={S.errorMsg}>{w}</div>)}
           {parties.map(party => (
             <TransactionTable
               key={party.name}
@@ -512,6 +518,7 @@ export default function RPTDashboard() {
       {activeTab === 'purchase' && (
         <Section title="Purchase Transactions with Related Parties">
           {error.purchase && <div style={S.errorMsg}>Failed to load purchase data. Please refresh.</div>}
+          {(purData?._journalWarnings || []).map((w, i) => <div key={i} style={S.errorMsg}>{w}</div>)}
           {parties.map(party => (
             <TransactionTable
               key={party.name}
@@ -606,6 +613,7 @@ const S = {
   tableWrap:  { background: '#FFFFFF', border: '1px solid #DFE7E3', borderRadius: 8, marginBottom: 8, overflow: 'hidden' },
   tableToggle:{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%', background: 'none', border: 'none', padding: '0.75rem 1rem', cursor: 'pointer', textAlign: 'left' },
   nilBadge:   { fontSize: '0.65rem', background: '#F9F9F9', color: '#5D6C7B', padding: '2px 6px', borderRadius: 3, border: '1px solid #DFE7E3' },
+  docTag:     { marginLeft: 6, fontSize: '0.65rem', background: '#EAF4EF', color: '#5D6C7B', padding: '1px 5px', borderRadius: 3 },
 
   table:      { width: '100%', borderCollapse: 'collapse', fontSize: '0.82rem' },
   th:         { padding: '0.5rem 1rem', color: '#5D6C7B', fontWeight: 600, fontSize: '0.73rem', textTransform: 'uppercase', letterSpacing: '0.04em', background: '#F9F9F9', borderBottom: '1px solid #DFE7E3', whiteSpace: 'nowrap' },
