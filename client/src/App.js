@@ -5,6 +5,7 @@ import LoginPage from './pages/LoginPage';
 import Dashboard from './pages/Dashboard';
 import PurchaseDashboard from './pages/PurchaseDashboard';
 import RentReports from './pages/RentReports';
+import RecurringExpReports from './pages/RecurringExpReports';
 import RPTDashboard from './pages/RPTDashboard';
 import VendorRegistrationForm from './pages/VendorRegistrationForm';
 import VendorRegistrations from './pages/VendorRegistrations';
@@ -92,6 +93,8 @@ function AppInner() {
           {page === 'purchase'     && hasModule('purchase')     && <PurchaseDashboard />}
           {/* Same tick as before the report moved out of Purchase & Payables: Month-wise Rent Report */}
           {page === 'rent-reports' && hasPerm('purchase', 'report_rent') && <RentReports />}
+          {/* Recurring Expense Report moved out of Purchase & Payables; tick "Recurring Exps. Reports page" (on unless unticked) */}
+          {page === 'recurring-exp-reports' && hasPerm('purchase', 'report_recurring') && <RecurringExpReports />}
           {/* Granted explicitly (the server checks the same) */}
           {page === 'bill-booking' && (user.role === 'admin' || user.permissions?.bill_booking?.enabled === true) && <BillBooking />}
           {(page === 'msme' || page === 'msme-neddle') && hasModule('msme_compliance') && <MSMECompanies active={page === 'msme-neddle' ? 'neddle' : 'devx'} />}

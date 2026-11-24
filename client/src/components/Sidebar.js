@@ -4,7 +4,7 @@ import {
   Landmark, Users, ShieldCheck, BarChart3,
   ChevronLeft, ChevronRight, ChevronDown, GitMerge, ClipboardList,
   Settings, LogOut, CreditCard, TrendingDown, Inbox, Activity, BookOpen, Target, BadgeCheck, RefreshCw, Layers, CheckSquare,
-  ScanText, GitCompareArrows, FileCheck2, Building2,
+  ScanText, GitCompareArrows, FileCheck2, Building2, Repeat,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 
@@ -20,6 +20,7 @@ const NAV = [
   { id: 'purchase',     label: 'Purchase & Payables',   icon: ShoppingCart, live: true,  module: 'purchase'        },
   // section: shown only to users with that tick under the module (here: Purchase & Payables → Month-wise Rent Report)
   { id: 'rent-reports', label: 'Rent Reports',          icon: Building2,    live: true,  module: 'purchase', section: 'report_rent', sub: true },
+  { id: 'recurring-exp-reports', label: 'Recurring Exps. Reports', icon: Repeat, live: true, module: 'purchase', section: 'report_recurring', sub: true },
   // grantOnly: shown only when ticked in User Settings (not to older users by default)
   { id: 'bill-booking', label: 'Bill Collection & Booking', icon: ScanText, live: true, module: 'bill_booking', sub: true, grantOnly: true },
   { id: 'msme-group',   label: 'MSME Compliance',       icon: BadgeCheck,   live: true,  module: 'msme_compliance', sub: true,

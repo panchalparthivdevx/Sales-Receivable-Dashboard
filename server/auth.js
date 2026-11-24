@@ -46,6 +46,7 @@ const MODULES = {
       chart_exp_branch:   'Expense by Branch',
       chart_top_vendors:  'Top Vendors',
       report_rent:        'Rent Reports page (Month-wise Rent Report)',
+      report_recurring:   'Recurring Exps. Reports page (Recurring Expense Report)',
       report_vendor_cat:  'Vendor Category Report',
       report_po:          'Project-wise PO Report',
       report_vendor_payments: 'Vendor Payment Report',
