@@ -48,21 +48,25 @@ function statusColor(status) {
 }
 
 // ─── Limit utilization card ────────────────────────────────────────────────────
-function LimitCard({ party, salesData, purchaseData, loansData, onDrill }) {
+// Sales / Purchase / Loans follow the selected period; Used / Available / % utilised always
+// measure the whole FY, because the omnibus limit is approved for the year.
+function LimitCard({ party, salesData, purchaseData, loansData, period, onDrill }) {
   const limitAmt = party.limitCr != null ? party.limitCr * 1e7 : null;
+  const inSel = r => inPeriod(r.date, period.start, period.end);
+  const sumBasic = list => list.reduce((s, r) => s + (r.basic || 0), 0);
+  const sumGiven = list => list.reduce((s, e) => s + (e.given || 0), 0);
 
-  const salesTotal = salesData
-    ? (salesData.invoices || []).reduce((s, i) => s + (i.basic || 0), 0)
-    : 0;
-  const purchaseTotal = purchaseData
-    ? (purchaseData.bills || []).reduce((s, b) => s + (b.basic || 0), 0)
-    : 0;
-  const loanGiven = loansData
-    ? (loansData.entries || []).reduce((s, e) => s + (e.given || 0), 0)
-    : 0;
+  const invoices = salesData?.invoices || [];
+  const bills    = purchaseData?.bills || [];
+  const loans    = loansData?.entries || [];
 
-  const used = salesTotal + purchaseTotal + loanGiven;
+  const salesTotal    = sumBasic(invoices.filter(inSel));
+  const purchaseTotal = sumBasic(bills.filter(inSel));
+  const loanGiven     = sumGiven(loans.filter(inSel));
+
+  const used = sumBasic(invoices) + sumBasic(bills) + sumGiven(loans);
   const pct  = limitAmt ? Math.min((used / limitAmt) * 100, 100) : 0;
+  const isFullYear = period.id === 'Full';
   const barColor = pct > 90 ? '#DC2626' : pct > 70 ? '#B45309' : '#1C4942';
 
   return (
@@ -89,7 +93,7 @@ function LimitCard({ party, salesData, purchaseData, loansData, onDrill }) {
         <div><span style={{ color: '#5D6C7B' }}>Loans: </span><span style={{ color: '#818cf8', cursor: 'pointer' }} title="View transactions" onClick={() => onDrill('loans')}>₹{fmt(loanGiven)}</span></div>
       </div>
       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', color: '#5D6C7B', marginBottom: 4 }}>
-        <span>Used: ₹{fmt(used)}</span>
+        <span title="Omnibus limit usage for the whole financial year">Used{isFullYear ? '' : ' (full FY)'}: ₹{fmt(used)}</span>
         <span>Available: {limitAmt ? `₹${fmt(Math.max(0, limitAmt - used))}` : 'N/A'}</span>
       </div>
       {limitAmt ? (
@@ -382,11 +386,12 @@ export default function RPTDashboard() {
 
   const isLoading = Object.values(loading).some(Boolean);
 
-  // Card figure → underlying transactions (same FY rows the card sums)
+  // Card figure → underlying transactions (same selected-period rows the card sums)
   const openDrill = (partyName, type) => {
     let rows = [], total = 0, label = '', totalLabel = '';
+    const inSel = r => inPeriod(r.date, period.start, period.end);
     if (type === 'sales' || type === 'purchase') {
-      const list = type === 'sales' ? (salesData?.[partyName]?.invoices || []) : (purData?.[partyName]?.bills || []);
+      const list = (type === 'sales' ? (salesData?.[partyName]?.invoices || []) : (purData?.[partyName]?.bills || [])).filter(inSel);
       rows = list.map(r => ({
         date: r.date, zoho_name: r.zoho_name || '—', party: partyName,
         voucher: r.invoice_number || r.bill_number, type: r.doc_type || (type === 'sales' ? 'Invoice' : 'Bill'), amount: r.basic || 0,
@@ -395,7 +400,7 @@ export default function RPTDashboard() {
       label = type === 'sales' ? 'Sales' : 'Purchase';
       totalLabel = `Total ${label} (basic amount, as on card)`;
     } else {
-      const entries = loanData?.loans?.[partyName]?.entries || [];
+      const entries = (loanData?.loans?.[partyName]?.entries || []).filter(inSel);
       rows = entries.map(e => ({
         date: e.date, zoho_name: e.ledger || 'Manual entry', party: partyName, voucher: e.voucher,
         type: [e.nature, e.type, e.given ? (e.nature ? '' : 'Given') : 'Repaid / Reversed'].filter(Boolean).join(' · '), amount: e.given ? e.given : -(e.repaid || 0),
@@ -404,7 +409,8 @@ export default function RPTDashboard() {
       label = 'Loans';
       totalLabel = 'Total Loans Given (as on card)';
     }
-    setDrill({ title: `${label} — ${partyName} — ${selectedFY.label}`, rows, total, totalLabel });
+    const periodLabel = period.id === 'Full' ? selectedFY.label : `${selectedFY.label} · ${period.label}`;
+    setDrill({ title: `${label} — ${partyName} — ${periodLabel}`, rows, total, totalLabel });
   };
 
   // Saved mapping → server already dropped its computed RPT figures; reload them from synced data
@@ -465,6 +471,7 @@ export default function RPTDashboard() {
             salesData={salesData?.[party.name]}
             purchaseData={purData?.[party.name]}
             loansData={loanData?.loans?.[party.name]}
+            period={period}
             onDrill={type => openDrill(party.name, type)}
           />
         ))}
