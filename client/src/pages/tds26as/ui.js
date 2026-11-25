@@ -39,10 +39,10 @@ export const srcText = s => (s ? [s.sheet ? `sheet ${s.sheet}` : '', s.page ? `p
 export const FLAG_TEXT = {
   tds_booked_twice: 'TDS booked twice', ledger_fy_mismatch: 'Other FY ledger', section_differs_invoice: 'Section ≠ invoice', unallocated: 'No customer', payment_not_found: 'Payment not found', no_base: 'No base value',
   reference_not_found: 'Reference not a Zoho invoice', reversal: 'Reversal', deducted_exceeds_deposited: 'Deducted > deposited', section_mismatch: 'Section differs', one_credit_many_entries: 'One credit ↔ several entries',
-  one_entry_many_credits: 'One entry ↔ several credits', remaining_totals: 'Remaining client total',
+  one_entry_many_credits: 'One entry ↔ several credits', remaining_totals: 'Remaining client total', equal_amounts_date_order: 'Same amount — paired by date',
 };
 export function Flags({ flags }) {
-  const tone = f => (/twice|mismatch|differs|deducted_exceeds|unallocated/.test(f) ? 'red' : /one_|remaining/.test(f) ? 'violet' : /reversal|no_base|not_found/.test(f) ? 'amber' : 'grey');
+  const tone = f => (/twice|mismatch|differs|deducted_exceeds|unallocated/.test(f) ? 'red' : /one_|remaining|equal_amounts/.test(f) ? 'violet' : /reversal|no_base|not_found/.test(f) ? 'amber' : 'grey');
   return <>{(flags || []).filter(f => !/^linked by/.test(f)).map(f => <Tag key={f} tone={tone(f)}>{FLAG_TEXT[f] || f}</Tag>)}</>;
 }
 

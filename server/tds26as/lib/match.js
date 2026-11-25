@@ -8,8 +8,9 @@
  *   1  identify the client      the deductor TAN: a Zoho entry belongs to the client of the TAN on its invoice, so several Zoho customers
  *                               with one TAN are one client; reviewer groups cover the rest (lib/clients.index)
  *   2  transaction-wise         same client, TDS equal within ₹2 to the 26AS tax deducted or deposited. Where several entries qualify,
- *                               section, taxable base (26AS amount paid vs the Books base), exact amount and dates decide; when they
- *                               cannot, the entries go to review ("Need to Check — ambiguous")
+ *                               section, taxable base (26AS amount paid vs the Books base), exact amount and dates decide. As many
+ *                               entries as credits all of one amount (a monthly fee) are paired in date order (flag
+ *                               equal_amounts_date_order); otherwise, when they cannot, the entries go to review ("Need to Check — ambiguous")
  *   3  client totals            what is still open per client: one 26AS entry = several Books entries (or the reverse) by a unique
  *                               subset, then the remaining totals; method "Client total", invoice attribution left open
  *   4  investigate              credits / bookings of the same client OUTSIDE the period (a later or earlier statement, a later Books
@@ -61,6 +62,19 @@ function byDate(L, distFn, s) {
   if (sorted[0][1] === 0 && sorted[1][1] > s.date_close_days) return [sorted[0][0]];
   if (sorted[1][1] - sorted[0][1] >= s.date_gap_days) return [sorted[0][0]];
   return L;
+}
+
+/** As many Zoho entries as 26AS credits, all of the same amount: the k-th entry by Zoho date with the k-th credit by transaction date.
+ *  null when the sections could tell entries and credits apart but the date order pairs differing sections — then the reviewer decides.
+ *  (When every entry differs from every credit in section, e.g. a 194C ledger against 194J credits, the pairs are made and flagged
+ *  section_mismatch, as a single pair would be.) */
+function dateOrderPairs(zs, cs) {
+  const cmp = (a, b) => String(a || '').localeCompare(String(b || ''));
+  const Zs = zs.slice().sort((a, b) => cmp(a.date, b.date) || cmp(a.number, b.number) || cmp(a.key, b.key));
+  const Cs = cs.slice().sort((a, b) => cmp(a.txn_date, b.txn_date) || cmp(a.key, b.key));
+  const pairs = Zs.map((z, i) => [z, Cs[i]]);
+  const sectionsTell = Zs.some(z => Cs.some(c => secRel(z, c) === 'same'));
+  return sectionsTell && pairs.some(([z, c]) => secRel(z, c) === 'differs') ? null : pairs;
 }
 
 /** Subsets of `pool` (amount accessor `val`) whose total is within tol of one of `targets`; stops after 2 solutions */
@@ -211,7 +225,11 @@ function reconcile(ctx) {
       if (lz.length && lc.length) {
         const amts = [...lz.map(z => z.amount), ...lc.map(c => c.deducted)];
         const sameAmounts = Math.max(...amts) - Math.min(...amts) <= tol;
-        if (!(sameAmounts && lz.length === lc.length)) ambiguous.push({ g, z: lz.map(z => z.key), c: lc.map(c => c.key) });
+        // the same amount several times, as many entries as credits (a monthly fee): the pairing changes no difference, only which
+        // invoice faces which credit — paired in date order instead of being left to the client totals or sent to other quarters
+        const pairs = sameAmounts && lz.length === lc.length ? dateOrderPairs(lz, lc) : null;
+        if (pairs) for (const [z, c] of pairs) addUnit({ method: 'transaction', step: 2, group: g, zoho: [z.key], credits: [c.key], status: statusOf(z.amount - c.deposited, tol), flags: ['equal_amounts_date_order'] });
+        else ambiguous.push({ g, z: lz.map(z => z.key), c: lc.map(c => c.key) });
       }
     }
 
