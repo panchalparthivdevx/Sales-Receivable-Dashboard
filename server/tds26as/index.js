@@ -311,6 +311,34 @@ router.post('/review/client-decision', gate('review'), wrap(async (req, res) => 
   need().recon.bump();
   res.json(out);
 }));
+// Timing differences whose other side lies in a later quarter: listed, and carried forward several at once
+router.get('/review/timing', gate(), wrap(async (req, res) => {
+  const { period, d, res: r } = await runFor(req);
+  res.json({ period, ...RP.timingCandidates(d, r, period) });
+}));
+router.post('/review/carry-forward-bulk', gate('review'), wrap(async (req, res) => {
+  const e = entityOf(req);
+  const period = periodOf(req.body || {});
+  const ids = (Array.isArray(req.body?.units) ? req.body.units : []).map(String).slice(0, 3000);
+  if (!ids.length) return bad(res, 400, 'Choose at least one item');
+  const { d, res: r } = await need().recon.run(e, period);
+  const tc = RP.timingCandidates(d, r, period);
+  const picks = [];
+  for (const id of ids) {
+    const row = tc.rows.find(x => x.unit === id), unit = r.units.find(u => u.id === id);
+    if (!row || !unit) return bad(res, 409, 'An item changed since the page was loaded (matched, reviewed or new data) — reload the list and try again');
+    picks.push({ unit, target: row.target, row });
+  }
+  let out;
+  try { out = await RV.carryForwardMany(e.id, byName(req), picks, req.body || {}, period); } catch (x) { return bad(res, x.status || 400, x.message); }
+  const list = picks.map(p => `${p.row.client} ${fmtR(p.row.amount)} → ${p.row.target_label}`).join('; ');
+  await AUD.log({ by: byName(req), action: 'review.carry_forward_bulk', entity: e.id, ref: `${picks.length} item(s)`,
+    detail: `${period.label || `${period.from} to ${period.to}`}: ${picks.length} timing difference(s) carried forward — ${list.length > 1500 ? `${list.slice(0, 1500)}…` : list} — reason: ${String(req.body.reason || '').slice(0, 200)}` });
+  need().recon.bump();
+  const mine = new Set(out.items.map(x => x.id));
+  const settled = await need().recon.settlePass(e).catch(x => { console.error('[tds26as] settle:', x.message); return []; });
+  res.json({ saved: out.saved, settled: settled.filter(x => mine.has(x.id)).length });
+}));
 router.get('/reports/followup', gate(), wrap(async (req, res) => {
   const { period, d, res: r } = await runFor(req);
   const fu = RP.followUp(d, r, period, people(req.t26.users));

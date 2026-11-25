@@ -102,7 +102,7 @@ Cut-off: Zoho entries by **TDS posting date**, 26AS credits by **transaction dat
 
 | Step | Rule |
 |---|---|
-| 0 | Reviewer links: pairs or groups a reviewer confirmed, with both sides inside the period. Carry-forward settlements consume their credits first. |
+| 0 | Reviewer links: pairs or groups a reviewer confirmed, with both sides inside the period. Carry-forward settlements consume their credits first. When a carried-forward item and what settled it **both** lie in the period being viewed (e.g. a 26AS credit of 30 Sep carried to Q3 and settled by the Zoho booking of 7 Oct, viewed for Apr–Oct or the whole year), they are one unit, method **Carried forward, settled in period**, with the pair's own status — not a settlement row plus a Carry Forward row (25 Nov 2026). |
 | 1 | **Identify the client by the deductor TAN** (`lib/clients.index`, see "Clients are matched on the TAN" below): an entry belongs to the client of the TAN recorded on its Zoho invoice, so several Zoho customers with one TAN are one client. Reviewer client groups cover what the TAN cannot tell. Unmapped → Need to Check. A TAN can be marked "no Zoho customer". |
 | 2 | **Transaction-wise:** TDS equal within ₹2 to the 26AS tax deducted or deposited. Among equal candidates, an exact amount, the section family (194I(a)/(b) → 194I), the base (amount paid vs Books base) or a clearly closer date decides. When a client has **the same amount as many times in Zoho as in the 26AS** within the period (a monthly fee), they are paired in date order — first entry with first credit — and flagged "Same amount — paired by date" (the pairing changes no difference; added 24 Nov 2026 after a client whose two ₹2,977 invoices and two ₹2,977 credits in one quarter had been shown as timing differences against other quarters). If the sections could tell them apart and the date order would pair differing sections, they go to review instead. Otherwise → **Need to Check — ambiguous**. |
 | 3 | **Client total:** a unique subset (one credit = several entries, or the reverse), then the remaining totals per client. Method "Client total"; invoice attribution stays open. |
@@ -183,6 +183,7 @@ All reports filter by entity, period, client, TAN, section and status, and expor
   - unallocated journals
   - links to the Zoho records
 - **Carry forward:** quarter-wise or year-wise opening, additions, credits identified later, closures and closing balance, with drill-down from each item to its origin and settlement.
+  - **Timing differences you can carry forward (25 Nov 2026):** the period's one-sided "Need to Check — timing" items (no reviewer status) whose other side is in a **later quarter** — typically a 26AS credit at a quarter end that Zoho books on the payment a few days later. Target = the quarter of the nearest later match. Items with exactly one later match are ticked ("one clear match"); items with several possible matches, or whose later credit also fits a booking of that quarter, are listed unticked for a check. Items whose other side is in the same quarter (a custom range ending mid-quarter) are only counted. One reason for all; each ticked item gets the same record as a single Carry Forward review (history marked), the settlement pass runs at once, and the audit log gets `review.carry_forward_bulk`. The server refuses items that are no longer timing differences.
 
 ## Storage
 
@@ -220,7 +221,7 @@ Admins can load **demo data** (Settings & audit) to see every case first. It is 
 
 ## Tests
 
-`npm run test:tds26as` (48 tests):
+`npm run test:tds26as` (51 tests):
 
 - parser: text, Excel, CSV, PDF, protected PDF, protected ZIP
 - clients matched on the TAN (`tests/tanmatch.test.js`, synthetic): one TAN under three Zoho customers with only one mapped, one TAN under two customers with nothing mapped, a mistyped invoice TAN, another client's TAN on an invoice, a ruled-out pair, a name suggestion joining two TANs, order independence
@@ -228,6 +229,7 @@ Admins can load **demo data** (Settings & audit) to see every case first. It is 
 - every acceptance case on the demo scenario
 - sync on a fake Zoho with the live response shapes, the report pacing, the block handling and the stored lock
 - the same amount several times in one quarter, paired in date order (`tests/equalamounts.test.js`, synthetic)
+- period-end timing differences (`tests/timing.test.js`, synthetic): the list (clear / for a check / same quarter), carried forward together, settled in the later quarter, one matched row when both dates are in view (bridge and totals tie), the Zoho side, and the routes (rights, stale page, audit)
 - the HTTP routes: rights, entity limits, upload, review, export, audit; Client totals (rows = the Transactions list per client, whole-client status with remarks, stale page refused, carry-forward items kept, clear, export, audit)
 
 ## Tax Year 2026-27 statement (seen 23 Nov 2026)

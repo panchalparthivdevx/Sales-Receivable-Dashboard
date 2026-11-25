@@ -229,6 +229,39 @@ function clientTotals(d, res, period) {
   return { rows: out, totals: { zoho: sum(out, r => r.zoho), deducted: sum(out, r => r.deducted), deposited: sum(out, r => r.deposited), diff: sum(out, r => r.diff), items: sum(out, r => r.items) } };
 }
 
+/**
+ * Timing differences that can be carried forward (25 Nov 2026): one-sided "Need to Check — timing" items with no reviewer status whose
+ * matching credit / booking lies in a LATER quarter than the item (e.g. a 26AS credit of 30 Sep booked in Zoho on 7 Oct). The target is
+ * the quarter of the nearest such match. "clear" = exactly one later match (and, for a Zoho entry, the later credit does not also fit a
+ * booking of that quarter); the rest are listed for a check. Items whose match lies in the same quarter (a custom range ending mid-
+ * quarter) are only counted: they match when the whole quarter is viewed, and a carry forward must target a later quarter.
+ */
+function timingCandidates(d, res, period) {
+  const mp = maps(d);
+  const rows = [];
+  let sameQuarter = 0;
+  for (const u of res.units) {
+    if (u.effective !== 'need_check' || u.final_status || !u.reason || u.reason.code !== 'timing' || (u.zoho.length && u.credits.length)) continue;
+    const origin = PER.quarterOf(u.date || period.from);
+    const later = u.evidence.filter(e => e.kind === 'later_credit' || e.kind === 'later_booking');
+    const after = later.filter(e => PER.cmpQ(e.quarter, origin) > 0);
+    if (!after.length) { if (later.length) sameQuarter += 1; continue; }
+    const m = after[0];
+    const z = u.zoho.length ? mp.zBy.get(u.zoho[0]) : null, c = u.credits.length ? mp.cBy.get(u.credits[0]) : null;
+    const clear = after.length === 1 && !m.maybe_matched_there;
+    rows.push({
+      unit: u.id, client: u.client, group: u.group, side: z ? 'zoho' : '26as', amount: u.open_zoho || u.open_26as, date: u.date,
+      item: z ? `Zoho ${z.type_label.toLowerCase()} ${z.number || ''}`.trim() : `26AS credit · section ${c.section_raw || c.section || '—'} · ${c.deductor}`,
+      origin, origin_label: PER.qLabel(origin), target: m.quarter, target_label: PER.qLabel(m.quarter),
+      match: m.kind === 'later_booking' ? { date: m.date, ref: `Zoho ${m.number || 'entry'}`, amount: m.amount } : { date: m.txn_date, ref: '26AS credit', amount: m.deposited },
+      matches: after.length, clear,
+      note: clear ? '' : after.length > 1 ? `${after.length} possible matches in later periods — check which one belongs to this item` : 'that quarter also has a Zoho booking of this amount for the client — the credit may belong to it',
+    });
+  }
+  rows.sort((a, b) => a.client.localeCompare(b.client) || String(a.date).localeCompare(String(b.date)));
+  return { rows, same_quarter: sameQuarter };
+}
+
 /** Potential corrections in Zoho Books — never made by this module (read-only), listed with links to the Zoho records */
 function corrections(d, res, org) {
   const mp = maps(d);
@@ -290,4 +323,4 @@ function carryForward(d, from, to, by = 'quarter') {
   return { by, rows, items: items.map(x => ({ ...x, origin_label: PER.qLabel(x.origin_quarter), target_label: PER.qLabel(x.target_quarter), settled_label: x.settlement ? PER.qLabel(x.settlement.quarter) : '', closed_label: x.closure ? PER.qLabel(x.closure.quarter) : '' })) };
 }
 
-module.exports = { dashboard, bridge, followUp, clientTotals, rowOf, corrections, carryForward, unitView, comparison, filterUnits, sortUnits, maps, zBrief, cBrief, DEFINITIONS, zohoUrl };
+module.exports = { dashboard, bridge, followUp, clientTotals, timingCandidates, rowOf, corrections, carryForward, unitView, comparison, filterUnits, sortUnits, maps, zBrief, cBrief, DEFINITIONS, zohoUrl };

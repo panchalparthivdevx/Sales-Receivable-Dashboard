@@ -136,6 +136,53 @@ async function decideClients(entity, by, clients, body, period) {
   return tally;
 }
 
+/**
+ * Several timing differences carried forward at once (25 Nov 2026, Carry forward tab). picks: [{ unit (as computed now), target }].
+ * Each item gets the same record as a single "Carry Forward" review (decision on every entry / credit, a carry-forward item with origin,
+ * balance, target and reason); an open carry-forward item of the same unit is replaced. Written in one update of each store.
+ */
+async function carryForwardMany(entity, by, picks, body, period) {
+  const reason = String(body.reason || '').trim().slice(0, 1000);
+  if (!reason) throw bad('Give the reason for carrying the amounts forward');
+  if (!picks.length) throw bad('Choose at least one item');
+  const remarks = String(body.remarks ?? '').trim().slice(0, 2000) || reason;
+  const refs = cleanRefs(body.refs);
+  const at = new Date().toISOString();
+  const made = picks.map(({ unit, target }) => {
+    const origin = PER.quarterOf(unit.date || period.from);
+    const tq = targetQuarter(String(target || ''));
+    if (!tq || PER.cmpQ(tq, origin) <= 0) throw bad(`${unit.client}: the target period must be after ${PER.qLabel(origin)}`);
+    const side = unit.open_zoho > 0 ? 'zoho' : unit.open_26as > 0 ? '26as' : null;
+    if (!side) throw bad(`${unit.client}: this item has no open balance to carry forward`);
+    return { unit, cf: { id: uid('cf'), side, origin_quarter: origin, period: { from: period.from, to: period.to }, unit_id: unit.id, keys: { zoho: unit.zoho, credits: unit.credits }, group: unit.group, client: unit.client,
+      balance: side === 'zoho' ? unit.open_zoho : unit.open_26as, target_quarter: tq, reason, by, at, status: 'open', settlement: null, closure: null, history: [], bulk: true } };
+  });
+  await store.update(rKey(entity), EMPTY, doc => {
+    const d = { ...EMPTY, ...doc };
+    for (const { unit, cf } of made) {
+      const keys = [...unit.zoho, ...unit.credits];
+      for (const k of keys) {
+        const prev = d.items[k] || { history: [] };
+        const next = { ...prev, final_status: 'carry_forward', remarks, refs, attachments: prev.attachments || [], non_deposit: prev.non_deposit || null, system_status: unit.status, unit_id: unit.id, unit_keys: keys, by, at, cf_id: cf.id };
+        next.history = [...(prev.history || []), { at, by, system_status: unit.status, final_status: 'carry_forward', remarks, refs, non_deposit: !!next.non_deposit, cf: `${cf.balance} → ${cf.target_quarter}`, bulk_cf: true }].slice(-100);
+        d.items[k] = next;
+      }
+    }
+    return { out: null, doc: d };
+  });
+  await store.update(cfKey(entity), { items: [] }, doc => {
+    for (const { unit } of made) {
+      const keys = [...unit.zoho, ...unit.credits];
+      for (const it of doc.items) {
+        if (it.status !== 'open' || !(it.unit_id === unit.id || it.keys.zoho.concat(it.keys.credits).some(k => keys.includes(k)))) continue;
+        it.status = 'cancelled'; it.history.push({ at, by, what: 'replaced by a new carry-forward' });
+      }
+    }
+    doc.items.push(...made.map(x => x.cf));
+  });
+  return { saved: made.length, items: made.map(x => x.cf) };
+}
+
 async function link(entity, by, zoho, credits, note) {
   if (!zoho.length || !credits.length) throw bad('Choose at least one Zoho entry and one 26AS credit');
   return store.update(rKey(entity), EMPTY, doc => {
@@ -210,4 +257,4 @@ async function reopenMissing(entity, existingKeys) {
   });
 }
 
-module.exports = { load, loadCf, decide, decideClients, link, unlink, setClient, closeCf, settle, reopenMissing, targetQuarter };
+module.exports = { load, loadCf, decide, decideClients, carryForwardMany, link, unlink, setClient, closeCf, settle, reopenMissing, targetQuarter };

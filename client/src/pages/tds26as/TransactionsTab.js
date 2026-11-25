@@ -5,7 +5,7 @@ import UnitDrawer from './UnitDrawer';
 
 const REASONS = { timing: 'Timing difference', ambiguous: 'Ambiguous', deducted_exceeds_deposited: 'Deducted > deposited', short_deduction: 'Possible short deduction', short_booking: 'Possible short booking', base_gross: 'Base incl. GST',
   different_base: 'Different base', partial_base: 'Part of the invoice', amount_differs: 'TDS differs', insufficient: 'Insufficient evidence', unallocated: 'Unallocated', customer_unmapped: 'Customer not mapped', deductor_unmapped: 'Deductor not mapped',
-  coverage_26as: 'Coverage gap (26AS)', coverage_zoho: 'Coverage gap (Zoho)', reversal: 'Reversal', rounding: 'Rounding', not_in_26as: 'Not in 26AS', not_in_zoho: 'Not in Zoho Books', no_customer: 'No Zoho customer', cf_settlement: 'Carry-forward settlement' };
+  coverage_26as: 'Coverage gap (26AS)', coverage_zoho: 'Coverage gap (Zoho)', reversal: 'Reversal', rounding: 'Rounding', not_in_26as: 'Not in 26AS', not_in_zoho: 'Not in Zoho Books', no_customer: 'No Zoho customer', cf_settlement: 'Carry-forward settlement', cf_inside: 'Carried forward, settled in period' };
 
 export default function TransactionsTab({ meta, params, stamp, drill, clearDrill, onChanged }) {
   const [f, setF] = useState({ group: '', tan: '', section: '', status: '', method: '', reason: '', search: '' });

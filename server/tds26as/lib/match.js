@@ -18,7 +18,8 @@
  *                               period's totals; leftovers of one client paired on evidence → "Not Matched"; the rest are one-sided —
  *                               but only "Not in 26AS" / "Not in Zoho Books" when the other source covers that date, otherwise
  *                               "Need to Check — coverage gap"
- * Carry-forward settlements (lib/review) consume their credits before step 0 and show as "Carry-forward settlement".
+ * Carry-forward settlements (lib/review) consume their credits before step 0 and show as "Carry-forward settlement". When the carried
+ * item and its settlement both lie in the period, they form one unit instead (method cf_inside, the system status of the pair).
  */
 
 'use strict';
@@ -27,7 +28,7 @@ const PER = require('./periods');
 const { fmtR, pct, daysBetween, hashOf } = require('./util');
 
 const STATUS = { matched: 'Matched', rounding: 'Matched Rounding Diff.', not_matched: 'Not Matched', not_in_26as: 'Not in 26AS', not_in_zoho: 'Not in Zoho Books', need_check: 'Need to Check', carry_forward: 'Carry Forward' };
-const METHOD = { transaction: 'Transaction', client_total: 'Client total', manual: 'Reviewer link', difference: 'Transaction (difference)', cf_settlement: 'Carry-forward settlement', single: '—' };
+const METHOD = { transaction: 'Transaction', client_total: 'Client total', manual: 'Reviewer link', difference: 'Transaction (difference)', cf_settlement: 'Carry-forward settlement', cf_inside: 'Carried forward, settled in period', single: '—' };
 const STATUS_ORDER = ['not_matched', 'not_in_26as', 'not_in_zoho', 'need_check', 'carry_forward', 'rounding', 'matched'];
 
 const sum = (arr, f) => arr.reduce((a, x) => a + (f(x) || 0), 0);
@@ -145,6 +146,21 @@ function reconcile(ctx) {
     if (!unit.reason && unit.status !== 'matched') unit.reason = explain(unit, zs, cs, s);
     units.push(unit);
     return unit;
+  }
+
+  // a carried-forward item whose origin AND settlement both lie in the period being viewed (e.g. a 26AS credit of 30 Sep carried to Q3
+  // and settled by the Zoho booking of 7 Oct, viewed for Apr–Oct): one unit, as the two would have matched without the carry forward
+  const byCf = new Map();
+  for (const [key, st] of ctx.cfConsumed || []) (byCf.get(st.cf_id) || byCf.set(st.cf_id, { st, keys: [] }).get(st.cf_id)).keys.push(key);
+  for (const { st, keys } of byCf.values()) {
+    const all = [...(st.origin_keys || []), ...keys];
+    const inside = k => { const z = zBy.get(k), c = cBy.get(k); return !used.has(k) && (z ? inP(z.date) : c ? inP(c.txn_date) : false); };
+    if (!(st.origin_keys || []).length || !all.every(inside)) continue;
+    const zk = all.filter(k => zBy.has(k)), ck = all.filter(k => cBy.has(k));
+    const zz = zk.map(k => zBy.get(k)), cc = ck.map(k => cBy.get(k));
+    const later = keys.map(k => zBy.get(k) || cBy.get(k)).map(x => (x.txn_date ? `the 26AS credit of ${x.txn_date}` : `Zoho ${x.type_label.toLowerCase()} ${x.number || ''} of ${x.date}`)).join(', ');
+    addUnit({ method: 'cf_inside', step: 0, group: zz.length ? groupOfZ(zz[0]) : groupOfC(cc[0]), zoho: zk, credits: ck, status: statusOf(sum(zz, z => z.amount) - sum(cc, c => c.deposited), tol),
+      reason: { code: 'cf_inside', text: `Carried forward from ${PER.qLabel(st.origin_quarter)} and settled by ${later} — both lie in this period, so they are shown together` } });
   }
 
   // carry-forward settlements: credits / entries that close a balance carried from an earlier period
