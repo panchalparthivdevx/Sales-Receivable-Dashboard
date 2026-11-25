@@ -13,6 +13,15 @@ const CONN = {
 const ROLES = { preparer: 'Prepares / resolves exceptions', reviewer: 'Reviews drafts', approver: 'Approves in Zoho' };
 const blank = { name: '', email: '', provider: 'microsoft', categories: [], companies: [], review_role: 'preparer', review_scope: '', dashboard_user: '', active: true };
 
+// Online a check stops before the server's time limit: say what is still to come
+function checkNote(x) {
+  const parts = [];
+  if ((x.results || []).some(r => r.more)) parts.push('more emails are waiting — click "Check all now" again to continue');
+  if (x.reading) parts.push(`${x.reading} bill(s) are still being read and will appear in the report shortly`);
+  if (x.resumed) parts.push(`${x.resumed} bill(s) left unread by an earlier check were picked up again`);
+  return parts.length ? ` — ${parts.join('; ')}` : '';
+}
+
 export default function TeamTab({ meta, reloadMeta }) {
   const [edit, setEdit] = useState(null);
   const [error, setError] = useState('');
@@ -59,7 +68,7 @@ export default function TeamTab({ meta, reloadMeta }) {
         <div style={S.cardHead}>
           <span style={S.cardTitle}>Team &amp; mailboxes</span>
           <div style={{ display: 'flex', gap: 6 }}>
-            {meta.rights.review && <button style={S.btn} disabled={!!busy} onClick={() => run('poll', () => bb.poll(), x => `Checked ${x.results.length} mailbox(es): ${x.results.reduce((s, y) => s + y.ingested, 0)} new bill(s)`)}><Mail size={13} /> {busy === 'poll' ? 'Checking…' : 'Check all now'}</button>}
+            {meta.rights.review && <button style={S.btn} disabled={!!busy} onClick={() => run('poll', () => bb.poll(), x => `Checked ${x.results.length} mailbox(es): ${x.results.reduce((s, y) => s + y.ingested, 0)} new bill(s)${checkNote(x)}`)}><Mail size={13} /> {busy === 'poll' ? 'Checking…' : 'Check all now'}</button>}
             {canConfig && <button style={S.primary} onClick={() => setEdit({ ...blank, companies: meta.companies.length === 1 ? [meta.companies[0].id] : [] })}><Plus size={13} /> Add member</button>}
           </div>
         </div>
@@ -90,7 +99,7 @@ export default function TeamTab({ meta, reloadMeta }) {
                       {m.provider !== 'none' && (canConfig || mine(m)) && (m.connection?.status === 'connected'
                         ? <button style={S.ghost} disabled={!!busy} onClick={() => { if (window.confirm(`Disconnect ${m.email}? Bills already collected stay.`)) run(`d${m.id}`, () => bb.disconnect(m.id), 'Disconnected'); }}><Unlink size={12} /> Disconnect</button>
                         : <button style={S.btn} disabled={!!busy || !prov[m.provider]?.configured} title={prov[m.provider]?.configured ? '' : 'Provider not set up on the server'} onClick={() => connect(m)}><Link2 size={12} /> {m.connection?.status === 'error' ? 'Reconnect' : 'Connect'}</button>)}
-                      {m.connection?.status === 'connected' && meta.rights.review && <button style={{ ...S.ghost, marginLeft: 4 }} disabled={!!busy} onClick={() => run(`p${m.id}`, () => bb.poll(m.id), x => `${x.results[0]?.ingested || 0} new bill(s)${x.results[0]?.error ? ` — ${x.results[0].error}` : ''}`)}><Mail size={12} /></button>}
+                      {m.connection?.status === 'connected' && meta.rights.review && <button style={{ ...S.ghost, marginLeft: 4 }} disabled={!!busy} onClick={() => run(`p${m.id}`, () => bb.poll(m.id), x => `${x.results[0]?.ingested || 0} new bill(s)${x.results[0]?.error ? ` — ${x.results[0].error}` : ''}${checkNote(x)}`)}><Mail size={12} /></button>}
                       {canConfig && <button style={{ ...S.ghost, marginLeft: 4 }} onClick={() => setEdit({ ...m })}><Pencil size={12} /></button>}
                     </td>
                   </tr>
@@ -163,7 +172,7 @@ export default function TeamTab({ meta, reloadMeta }) {
           {!log?.log?.length && <div style={S.muted}>No mailbox checks yet.</div>}
           {(log?.log || []).slice(0, 40).map((l, i) => (
             <div key={i} style={{ fontSize: '0.76rem', padding: '3px 0', borderBottom: '1px solid #F2F2F2', color: l.error ? '#B91C1C' : '#18191B' }}>
-              {dtm(l.at)} · <b>{l.member}</b> · {l.messages} email(s), {l.attachments} attachment(s) → {l.ingested} new, {l.existing} already collected, {l.skipped} skipped{l.error ? ` · ${l.error}` : ''}
+              {dtm(l.at)} · <b>{l.member}</b> · {l.messages} email(s), {l.attachments} attachment(s) → {l.ingested} new, {l.existing} already collected, {l.skipped} skipped{l.more ? ' · more waiting for the next check' : ''}{l.error ? ` · ${l.error}` : ''}
             </div>
           ))}
         </div>

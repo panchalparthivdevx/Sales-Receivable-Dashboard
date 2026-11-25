@@ -21,7 +21,41 @@ const MAX_MESSAGES = 200;           // per mailbox per poll
 const MIN_IMAGE_BYTES = 30 * 1024;  // smaller images are logos / signatures
 const MAX_FILE_BYTES = 25 * 1024 * 1024;
 
-const env = k => process.env[k] || '';
+// Settings pasted into Vercel / .env often carry a stray space, line break or quotes — the provider then refuses them
+const env = k => String(process.env[k] || '').trim().replace(/^(['"])(.*)\1$/, '$2').trim();
+
+/** The provider's own reason for refusing a request (Microsoft / Google error text, without trace ids) */
+function providerReason(e) {
+  const d = e?.response?.data;
+  if (d && typeof d.error === 'string') {
+    const desc = String(d.error_description || '').replace(/\s*Trace ID:[\s\S]*$/i, '').replace(/\s+/g, ' ').trim();
+    return desc || d.error;
+  }
+  if (d?.error?.message) return `${d.error.code ? `${d.error.code}: ` : ''}${d.error.message}`;
+  return e?.message || String(e);
+}
+
+/** What to change when Microsoft / Google refuses the app itself, keyed by the error in its answer */
+function fixHint(e, provider) {
+  const d = e?.response?.data || {};
+  const text = `${d.error || ''} ${d.error_description || ''}`;
+  const where = 'the server settings (Vercel → Settings → Environment Variables, then Redeploy; or .env on the office PC, then restart)';
+  if (/AADSTS700025|AADSTS7000218/.test(text)) return ' In the Azure app registration (Authentication), the redirect address must be under the "Web" platform, not "Mobile and desktop" or "Single-page application".';
+  if (/AADSTS7000222/.test(text)) return ` The client secret has expired: create a new one in the Azure app registration and put its Value in BB_MS_CLIENT_SECRET in ${where}.`;
+  if (/AADSTS50011|redirect_uri_mismatch/.test(text)) return ' The redirect address shown in Settings & Integrations must be added exactly, under the "Web" platform, in the app registration.';
+  if (d.error === 'invalid_client' || /AADSTS7000215/.test(text)) {
+    return provider === 'gmail'
+      ? ` Check BB_GOOGLE_CLIENT_ID and BB_GOOGLE_CLIENT_SECRET in ${where}.`
+      : ` Check BB_MS_CLIENT_SECRET in ${where}: it must be the secret's "Value" column (not the "Secret ID"), copied in full without quotes or spaces, and belong to the same app registration as BB_MS_CLIENT_ID.`;
+  }
+  return '';
+}
+
+/** A readable error for a refused sign-in or token request (status 400: shown to the person, not a server fault) */
+function refused(what, e, provider) {
+  return Object.assign(new Error(`${what}: ${providerReason(e)}.${fixHint(e, provider)}`.replace(/\.\./g, '.')), { status: 400, provider_error: true });
+}
+
 const providers = {
   microsoft: { label: 'Microsoft 365 (each member signs in)', configured: () => !!(env('BB_MS_CLIENT_ID') && env('BB_MS_CLIENT_SECRET')) },
   microsoft_app: { label: 'Microsoft 365 (company app access)', configured: () => !!(env('BB_MS_CLIENT_ID') && env('BB_MS_CLIENT_SECRET') && env('BB_MS_TENANT_ID')) },
@@ -52,19 +86,25 @@ function create({ store, pipeline, files, http = require('axios'), lookups, log 
   }
 
   async function exchange(provider, code, redirectUri) {
-    if (provider === 'microsoft') {
-      const r = await http.post(`https://login.microsoftonline.com/${msTenant()}/oauth2/v2.0/token`, form({
-        client_id: env('BB_MS_CLIENT_ID'), client_secret: env('BB_MS_CLIENT_SECRET'), grant_type: 'authorization_code',
-        code, redirect_uri: redirectUri, scope: 'offline_access User.Read Mail.Read',
-      }), FORM);
-      const me = await http.get(`${GRAPH}/me`, { headers: { Authorization: `Bearer ${r.data.access_token}` }, params: { $select: 'mail,userPrincipalName' }, timeout: 30000 });
-      return tokenBox(provider, r.data, (me.data.mail || me.data.userPrincipalName || '').toLowerCase());
-    }
-    const r = await http.post('https://oauth2.googleapis.com/token', form({
-      client_id: env('BB_GOOGLE_CLIENT_ID'), client_secret: env('BB_GOOGLE_CLIENT_SECRET'), grant_type: 'authorization_code', code, redirect_uri: redirectUri,
-    }), FORM);
-    const me = await http.get(`${GMAIL}/profile`, { headers: { Authorization: `Bearer ${r.data.access_token}` }, timeout: 30000 });
-    return tokenBox(provider, r.data, String(me.data.emailAddress || '').toLowerCase());
+    const name = provider === 'microsoft' ? 'Microsoft' : 'Google';
+    let r, me;
+    try {
+      r = provider === 'microsoft'
+        ? await http.post(`https://login.microsoftonline.com/${msTenant()}/oauth2/v2.0/token`, form({
+          client_id: env('BB_MS_CLIENT_ID'), client_secret: env('BB_MS_CLIENT_SECRET'), grant_type: 'authorization_code',
+          code, redirect_uri: redirectUri, scope: 'offline_access User.Read Mail.Read',
+        }), FORM)
+        : await http.post('https://oauth2.googleapis.com/token', form({
+          client_id: env('BB_GOOGLE_CLIENT_ID'), client_secret: env('BB_GOOGLE_CLIENT_SECRET'), grant_type: 'authorization_code', code, redirect_uri: redirectUri,
+        }), FORM);
+    } catch (e) { throw refused(`${name} refused to complete the sign-in`, e, provider); }
+    try {
+      me = provider === 'microsoft'
+        ? await http.get(`${GRAPH}/me`, { headers: { Authorization: `Bearer ${r.data.access_token}` }, params: { $select: 'mail,userPrincipalName' }, timeout: 30000 })
+        : await http.get(`${GMAIL}/profile`, { headers: { Authorization: `Bearer ${r.data.access_token}` }, timeout: 30000 });
+    } catch (e) { throw refused(`Signed in, but ${name} did not return the mailbox address`, e, provider); }
+    const account = provider === 'microsoft' ? (me.data.mail || me.data.userPrincipalName || '') : (me.data.emailAddress || '');
+    return tokenBox(provider, r.data, String(account).toLowerCase());
   }
 
   const tokenBox = (provider, t, account, prev = {}) => ({
@@ -120,9 +160,12 @@ function create({ store, pipeline, files, http = require('axios'), lookups, log 
   let _app = null;
   async function appToken() {
     if (_app && _app.expires_at > Date.now()) return _app.token;
-    const r = await http.post(`https://login.microsoftonline.com/${env('BB_MS_TENANT_ID')}/oauth2/v2.0/token`, form({
-      client_id: env('BB_MS_CLIENT_ID'), client_secret: env('BB_MS_CLIENT_SECRET'), grant_type: 'client_credentials', scope: 'https://graph.microsoft.com/.default',
-    }), FORM);
+    let r;
+    try {
+      r = await http.post(`https://login.microsoftonline.com/${env('BB_MS_TENANT_ID')}/oauth2/v2.0/token`, form({
+        client_id: env('BB_MS_CLIENT_ID'), client_secret: env('BB_MS_CLIENT_SECRET'), grant_type: 'client_credentials', scope: 'https://graph.microsoft.com/.default',
+      }), FORM);
+    } catch (e) { throw refused('Microsoft refused the company app sign-in', e, 'microsoft_app'); }
     _app = { token: r.data.access_token, expires_at: Date.now() + ((r.data.expires_in || 3600) - 120) * 1000 };
     return _app.token;
   }
@@ -158,7 +201,7 @@ function create({ store, pipeline, files, http = require('axios'), lookups, log 
         }), FORM);
     } catch (e) {
       const code = e.response?.data?.error;
-      throw Object.assign(new Error(code === 'invalid_grant' ? 'The mailbox sign-in has expired or was revoked — reconnect it' : `Token refresh failed (${code || e.message})`), { reconnect: code === 'invalid_grant' });
+      throw Object.assign(new Error(code === 'invalid_grant' ? 'The mailbox sign-in has expired or was revoked — reconnect it' : `Token refresh failed: ${providerReason(e)}.${fixHint(e, member.provider)}`.replace(/\.\./g, '.')), { reconnect: code === 'invalid_grant' });
     }
     const next = tokenBox(member.provider, r.data, box.account, box);
     await store.tx(async t => { const s = { ...(t.doc('bb_secrets') || {}) }; s[member.id] = SEC.seal(next); t.setDoc('bb_secrets', s); });
@@ -234,11 +277,19 @@ function create({ store, pipeline, files, http = require('axios'), lookups, log 
     return polling;
   }
 
-  async function _pollAll({ memberId = null, by = 'system' } = {}) {
+  /** deadline (ms since epoch, optional): no new email is started after it — the rest waits for the next check.
+   *  Vercel passes one so a check ends inside its time limit; the office PC has no limit. */
+  async function _pollAll({ memberId = null, by = 'system', deadline = 0 } = {}) {
     const cfg = C.merge((await store.snapshot()).doc('bb_config'));
     const members = cfg.team.filter(m => m.active && m.connection?.status === 'connected' && providers[m.provider]?.configured() && (!memberId || m.id === memberId));
     const results = [];
-    for (const m of members) results.push(await pollMember(m, cfg, by));
+    for (const m of members) {
+      if (deadline && Date.now() > deadline) {
+        results.push({ member_id: m.id, member: m.name, at: new Date().toISOString(), messages: 0, attachments: 0, ingested: 0, skipped: 0, existing: 0, error: '', more: true, not_started: true });
+        continue;
+      }
+      results.push(await pollMember(m, cfg, by, deadline));
+    }
     return results;
   }
 
@@ -250,9 +301,9 @@ function create({ store, pipeline, files, http = require('axios'), lookups, log 
     return set;
   }
 
-  async function pollMember(member, cfg, by) {
+  async function pollMember(member, cfg, by, deadline = 0) {
     const started = new Date().toISOString();
-    const res = { member_id: member.id, member: member.name, at: started, messages: 0, attachments: 0, ingested: 0, skipped: 0, existing: 0, error: '' };
+    const res = { member_id: member.id, member: member.name, at: started, messages: 0, attachments: 0, ingested: 0, skipped: 0, existing: 0, error: '', more: false };
     const mailDoc = (await store.snapshot()).doc('bb_mail') || {};
     const since = mailDoc.cursors?.[member.id]?.since || new Date(Date.now() - cfg.settings.mail_lookback_days * 86400000).toISOString();
     let latest = since;
@@ -261,12 +312,15 @@ function create({ store, pipeline, files, http = require('axios'), lookups, log 
       const token = await accessToken(member);
       const msgs = member.provider === 'gmail' ? await gmailMessages(member, token, since) : await graphMessages(member, token, since);
       const vendorsMail = cfg.settings.mail_scope === 'likely_bills' ? await vendorEmails(member) : new Set();
+      if (msgs.length >= MAX_MESSAGES) res.more = true;
       for (const msg of msgs) {
+        // the cursor only moves past emails that were fully handled, so the next check starts here
+        if (deadline && Date.now() > deadline) { res.more = true; break; }
         res.messages++;
         if (msg.received_at > latest) latest = msg.received_at;
         if (msg.from_address && msg.from_address === member.email) continue;   // sent by the member
         let atts = [];
-        try { atts = await msg.attachments(); } catch (e) { res.error = `Attachments of "${msg.subject}" could not be read: ${e.message}`; continue; }
+        try { atts = await msg.attachments(); } catch (e) { res.error = `Attachments of "${msg.subject}" could not be read: ${providerReason(e)}`; continue; }
         for (const a of atts) {
           const mime = files.mimeOf(a.name, a.type);
           if (!files.ACCEPTED.has(mime)) continue;
@@ -292,8 +346,8 @@ function create({ store, pipeline, files, http = require('axios'), lookups, log 
         }
       }
     } catch (e) {
-      res.error = e.message;
-      log.error(`[bill-booking] mailbox ${member.email}: ${e.message}`);
+      res.error = providerReason(e);
+      log.error(`[bill-booking] mailbox ${member.email}: ${res.error}`);
       if (e.reconnect) {
         await store.tx(async t => {
           const c = C.merge(t.doc('bb_config'));
@@ -346,4 +400,4 @@ function create({ store, pipeline, files, http = require('axios'), lookups, log 
   return { providers, authUrl, completeAuth, connectApp, disconnect, pollAll, pollMember, processSkipped };
 }
 
-module.exports = { create, providers };
+module.exports = { create, providers, providerReason };

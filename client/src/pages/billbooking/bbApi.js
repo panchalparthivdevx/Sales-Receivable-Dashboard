@@ -1,5 +1,6 @@
 import axios from 'axios';
 import { withToken } from '../../utils/api';
+import { serverErrorText } from '../../utils/serverError';
 
 // Bill Collection & Booking — server routes in server/bill-booking/index.js
 const B = '/api/bill-booking';
@@ -7,7 +8,7 @@ const d = r => {
   if (!r.data || typeof r.data !== 'object') throw new Error('The dashboard server is running an older version — restart it to use Bill Collection & Booking.');
   return r.data;
 };
-export const errMsg = e => e?.response?.data?.error || e?.message || 'Something went wrong';
+export const errMsg = e => serverErrorText(e);
 
 export const bb = {
   meta:          ()              => axios.get(`${B}/meta`).then(d),

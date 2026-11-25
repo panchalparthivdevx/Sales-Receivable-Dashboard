@@ -744,7 +744,33 @@ function create({ store, zc, lookups, files, extractFn = EX.extract, log = conso
     return idle();
   }
 
-  return { ingest, processBill, evaluate, edit, action, createDraft, draftTest, refreshZoho, resume, enqueue, idle, config };
+  /**
+   * Vercel: bills that a stopped request left unread (Vercel ends every request at its time limit).
+   * Only bills untouched for longer than that limit are taken — any request that was reading them has
+   * ended by then — and each is leased (read_lease) so a check running at the same time leaves it alone.
+   * → the number of bills queued again
+   */
+  async function resumeStale(staleMs) {
+    const cut = Date.now() - staleMs;
+    const ids = await store.tx(async t => {
+      const out = [];
+      for (const b of t.bills()) {
+        if (b.status !== 'received' || b.processing_error || queued.has(b.id)) continue;
+        if (Date.parse(b.read_lease || b.updated_at || b.created_at) >= cut) continue;
+        b.read_lease = now();
+        t.putBill(b);
+        out.push(b.id);
+      }
+      return out;
+    });
+    ids.forEach(enqueue);
+    return ids.length;
+  }
+
+  /** Bills of this server instance still waiting to be read (queued or being read) */
+  const pending = () => queue.length + (running ? 1 : 0);
+
+  return { ingest, processBill, evaluate, edit, action, createDraft, draftTest, refreshZoho, resume, resumeStale, pending, enqueue, idle, config };
 }
 
 module.exports = { create };

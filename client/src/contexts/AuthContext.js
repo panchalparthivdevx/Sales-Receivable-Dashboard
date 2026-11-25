@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
+import { normalizeServerError } from '../utils/serverError';
 
 const BASE = `/api`;
 
@@ -17,10 +18,12 @@ export function AuthProvider({ children }) {
       if (t) cfg.headers = { ...cfg.headers, Authorization: `Bearer ${t}` };
       return cfg;
     });
-    // Auto-logout on 401 (expired/invalid token) so users see the login page
+    // Auto-logout on 401 (expired/invalid token) so users see the login page.
+    // Vercel's own error answers ({error: {code, message}}) become text here, so no page tries to show an object.
     const resId = axios.interceptors.response.use(
       r => r,
       err => {
+        normalizeServerError(err);
         if (err?.response?.status === 401) {
           localStorage.removeItem('da_token');
           setToken(null);

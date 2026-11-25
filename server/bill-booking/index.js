@@ -130,8 +130,10 @@ router.get('/oauth/callback', wrap(async (req, res) => {
     const r = await need().mail.completeAuth(req.query.state, req.query.code, redirectUri(req));
     page('Mailbox connected', `${r.member}'s mailbox (${r.account}) is connected. Bills will be collected on the next mailbox check.${r.mismatch ? ' Note: the account signed in differs from the email set up for this member.' : ''}`, true);
   } catch (e) {
-    page('Mailbox not connected', e.status ? e.message : 'The sign-in could not be completed. Start again from Team & Mailboxes.', false);
-    if (!e.status) console.error('[bill-booking] oauth callback:', e.response?.data?.error || e.message);
+    // axios errors carry a status too (Microsoft's 401 etc.) — only the module's own errors are shown as they are
+    const ours = e.status && !e.isAxiosError;
+    page('Mailbox not connected', ours ? e.message : 'The sign-in could not be completed. Start again from Team & Mailboxes.', false);
+    if (!ours || e.provider_error) console.error('[bill-booking] oauth callback:', ours ? e.message : ML.providerReason(e));
   }
 }));
 
@@ -241,7 +243,7 @@ router.post('/config/team/:id/connect', gate(), wrap(async (req, res) => {
   if (!p.configured()) return bad(res, 409, `${p.label} is not set up on the server yet — see Settings & Integrations`);
   if (m.provider === 'microsoft_app') {
     try { await need().mail.connectApp(m, req.bb.user); } catch (e) {
-      return bad(res, 502, `The company app could not read ${m.email}: ${e.response?.data?.error?.message || e.message}`);
+      return bad(res, 502, `The company app could not read ${m.email}: ${ML.providerReason(e)}`);
     }
     return res.json({ connected: true });
   }
@@ -255,11 +257,30 @@ router.post('/config/team/:id/disconnect', gate(), wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 
+// ── Vercel time limit ─────────────────────────────────────────────────────────
+// Vercel ends every request at maxDuration (300 s, vercel.json) and then answers with its own error.
+// A request therefore collects mail for up to COLLECT_MS, waits for the reading only until ANSWER_MS and
+// then answers; reading carries on in the background until Vercel stops it. What is left — emails not yet
+// reached, bills not yet read — is picked up by the next check or upload. The office PC has no limit.
+const VERCEL_LIMIT_MS = 300000, COLLECT_MS = 150000, ANSWER_MS = 240000;
+const leftovers = () => (IS_VERCEL ? need().pipeline.resumeStale(VERCEL_LIMIT_MS + 15000) : 0);
+async function settleReading(started) {
+  if (!IS_VERCEL) return 0;
+  const done = background(need().pipeline.idle());
+  const left = started + ANSWER_MS - Date.now();
+  let timer = null;
+  if (left > 0) await Promise.race([done, new Promise(r => { timer = setTimeout(r, left); })]);
+  clearTimeout(timer);
+  return need().pipeline.pending();
+}
+
 // ── Mail ──────────────────────────────────────────────────────────────────────
 router.post('/mail/poll', gate('review'), wrap(async (req, res) => {
-  const results = await need().mail.pollAll({ memberId: req.body?.member_id || null, by: byName(req) });
-  if (IS_VERCEL) await background(need().pipeline.idle());
-  res.json({ results });
+  const started = Date.now();
+  const resumed = await leftovers();
+  const results = await need().mail.pollAll({ memberId: req.body?.member_id || null, by: byName(req), deadline: IS_VERCEL ? started + COLLECT_MS : 0 });
+  const reading = await settleReading(started);
+  res.json({ results, reading, resumed });
 }));
 
 router.get('/mail/log', gate(), wrap(async (req, res) => {
@@ -268,8 +289,9 @@ router.get('/mail/log', gate(), wrap(async (req, res) => {
 }));
 
 router.post('/mail/skipped/process', gate('review'), wrap(async (req, res) => {
+  const started = Date.now();
   const r = await need().mail.processSkipped(String(req.body?.key || ''), req.bb.user);
-  if (IS_VERCEL) await background(need().pipeline.idle());
+  await settleReading(started);
   res.json(r);
 }));
 
@@ -285,6 +307,8 @@ router.post('/upload', gate('review'), (req, res, next) => upload.array('files',
   const memberId = String(req.body?.member_id || '');
   if (memberId && !cfg.team.some(m => m.id === memberId)) return bad(res, 400, 'Unknown team member');
   if (!req.files?.length) return bad(res, 400, 'Choose at least one bill file');
+  const started = Date.now();
+  await leftovers();
   const out = [];
   for (const f of req.files) {
     try {
@@ -296,8 +320,8 @@ router.post('/upload', gate('review'), (req, res, next) => upload.array('files',
       out.push({ name: files.fixName(f.originalname), id: r.id });
     } catch (e) { out.push({ name: files.fixName(f.originalname), error: e.message }); }
   }
-  if (IS_VERCEL) await background(need().pipeline.idle());
-  res.json({ files: out });
+  const reading = await settleReading(started);
+  res.json({ files: out, reading });
 }));
 
 // ── Report ────────────────────────────────────────────────────────────────────
@@ -473,11 +497,13 @@ router.get('/audit', gate('config'), wrap(async (req, res) => {
 }));
 
 // Errors: the message for expected problems; a generic one (and the log) for the rest
+// (An outside service's 401 is never passed on as 401 — the dashboard would read it as an expired login and sign out.)
 router.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
-  if (err.status && err.status < 500) return bad(res, err.status, err.message);
-  if (err.status === 502) return bad(res, 502, err.message);
-  console.error('[bill-booking]', req.method, req.path, err.response?.data?.message || err.message);
-  bad(res, 500, err.message?.startsWith('ZOHO_DAILY_LIMIT') ? err.message : `Something went wrong: ${err.message}`);
+  if (!err.isAxiosError && err.status && err.status < 500) return bad(res, err.status, err.message);
+  if (!err.isAxiosError && err.status === 502) return bad(res, 502, err.message);
+  const msg = err.response?.data?.message || ML.providerReason(err);
+  console.error('[bill-booking]', req.method, req.path, msg);
+  bad(res, 500, err.message?.startsWith('ZOHO_DAILY_LIMIT') ? err.message : `Something went wrong: ${msg}`);
 });
 
 // ── Background work on the office PC (mailbox checks, Zoho review status) ─────

@@ -74,7 +74,8 @@ export function Msg({ error, ok, onClose }) {
   if (!error && !ok) return null;
   return (
     <div style={error ? S.error : S.ok}>
-      {error || ok}
+      {/* text only: an object here would crash the whole app */}
+      {String(error || ok)}
       {onClose && <button onClick={onClose} style={{ float: 'right', background: 'none', border: 'none', cursor: 'pointer', color: 'inherit' }}>✕</button>}
     </div>
   );

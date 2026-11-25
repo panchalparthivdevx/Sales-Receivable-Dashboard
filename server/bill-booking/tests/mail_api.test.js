@@ -11,6 +11,9 @@ process.env.BB_MS_CLIENT_ID = 'client-id-test';
 process.env.BB_MS_CLIENT_SECRET = 'client-secret-test';
 
 const user = { id: '1', username: 'admin', name: 'Admin A' };
+// email times inside the 7-day first-check window, whenever the tests run (fixed dates went stale on 12 Nov 2026)
+const day0 = new Date(Date.now() - 2 * 86400000).toISOString().slice(0, 10);
+const T1 = `${day0}T10:00:00Z`, T2 = `${day0}T11:00:00Z`;
 
 /** Microsoft Graph stand-in: two emails — a vendor's bill (PDF + signature logo) and an unrelated PDF */
 function fakeGraph() {
@@ -32,8 +35,8 @@ function fakeGraph() {
       if (url.endsWith('/me')) return { data: { mail: 'asha@devx.work' } };
       if (/\/me\/messages\?/.test(url)) {
         return { data: { value: [
-          { id: 'msgA', internetMessageId: '<a@x>', subject: 'Invoice CC/120 for October', from: { emailAddress: { name: 'Clean Co', address: 'billing@cleanco.in' } }, receivedDateTime: '2026-11-05T10:00:00Z', bodyPreview: 'Please find attached' },
-          { id: 'msgB', internetMessageId: '<b@x>', subject: 'Lunch plan', from: { emailAddress: { name: 'Friend', address: 'friend@gmail.com' } }, receivedDateTime: '2026-11-05T11:00:00Z', bodyPreview: 'menu attached' },
+          { id: 'msgA', internetMessageId: '<a@x>', subject: 'Invoice CC/120 for October', from: { emailAddress: { name: 'Clean Co', address: 'billing@cleanco.in' } }, receivedDateTime: T1, bodyPreview: 'Please find attached' },
+          { id: 'msgB', internetMessageId: '<b@x>', subject: 'Lunch plan', from: { emailAddress: { name: 'Friend', address: 'friend@gmail.com' } }, receivedDateTime: T2, bodyPreview: 'menu attached' },
         ] } };
       }
       const att = url.match(/\/messages\/(msg\w)\/attachments$/);
@@ -81,7 +84,7 @@ test('mailbox: sign-in stores only a sealed token; polling collects the bill and
   assert.equal(bills[0].status, 'ready');
   const m = (await env.store.snapshot()).doc('bb_mail');
   assert.equal(m.skipped[0].name, 'menu.pdf'); assert.match(m.skipped[0].reason, /No bill words/);
-  assert.equal(m.cursors.m1.since, '2026-11-05T11:00:00Z');
+  assert.equal(m.cursors.m1.since, T2);
 
   // the next check sees the same emails again (inclusive cursor): nothing is added twice
   const [res2] = await mail.pollAll();
@@ -122,11 +125,11 @@ const USERS = [
   { id: '4', username: 'none', name: 'No', role: 'user', active: true, permissions: { sales: { enabled: true, sections: {} } } },
 ];
 
-async function api() {
+async function api(http = fakeGraph()) {
   const env = H.setup();
   await H.seedConfig();
   const router = require('..');
-  router.init({ zc: env.zc, lookups: env.lookups, files: env.files, extractFn: H.fakeExtract({ '*': {} }), loadUsers: async () => USERS, http: fakeGraph(), log: { error() {} } });
+  router.init({ zc: env.zc, lookups: env.lookups, files: env.files, extractFn: H.fakeExtract({ '*': {} }), loadUsers: async () => USERS, http, log: { error() {} } });
   const app = express();
   app.use(express.json());
   app.use('/api/bill-booking', (req, res, next) => { if (req.headers['x-user']) req.user = { id: req.headers['x-user'] }; next(); }, router);
@@ -203,5 +206,120 @@ test('API: the mailbox sign-in callback rejects a forged state', async () => {
     const r = await fetch(`${base}/oauth/callback?state=forged.state&code=x`);
     assert.equal(r.status, 400);
     assert.match(await r.text(), /expired/);
+  } finally { server.close(); }
+});
+
+// ── Microsoft refusing the app (25 Nov 2026: the page showed only "Request failed with status code 401") ──
+// axios ≥ 1.7 puts the HTTP status on the error itself, so it must not be mistaken for the module's own messages
+const axiosErr = (status, data) => Object.assign(new Error(`Request failed with status code ${status}`), { isAxiosError: true, status, response: { status, data } });
+const BAD_SECRET = axiosErr(401, {
+  error: 'invalid_client',
+  error_description: "AADSTS7000215: Invalid client secret provided. Ensure the secret being sent in the request is the client secret value, not the client secret ID, for a secret added to app 'abc'. Trace ID: 1111 Correlation ID: 2222 Timestamp: 2026-11-25 06:00:00Z",
+});
+function refusingGraph(err = BAD_SECRET) {
+  const http = fakeGraph();
+  const post = http.post;
+  http.bodies = [];
+  http.post = async (url, body) => { http.bodies.push(String(body)); if (/oauth2\/v2.0\/token/.test(url)) throw err; return post(url, body); };
+  return http;
+}
+
+test('mailbox: a refused code exchange says why (Microsoft\'s reason + what to fix), without trace ids', async () => {
+  const env = H.setup();
+  await H.seedConfig();
+  const http = refusingGraph();
+  const mail = ML.create({ store: env.store, pipeline: env.pipeline, files: env.files, lookups: env.lookups, http, log: { error() {} } });
+  const cfg = C.merge((await env.store.snapshot()).doc('bb_config'));
+  const state = new URL(mail.authUrl(cfg.team[0], 'http://localhost:3002/cb', user)).searchParams.get('state');
+  await assert.rejects(mail.completeAuth(state, 'code-1', 'http://localhost:3002/cb'), e => {
+    assert.equal(e.status, 400); assert.ok(!e.isAxiosError);
+    assert.match(e.message, /^Microsoft refused to complete the sign-in: AADSTS7000215: Invalid client secret provided/);
+    assert.match(e.message, /BB_MS_CLIENT_SECRET/); assert.match(e.message, /"Value"/);
+    assert.ok(!/Trace ID|Correlation/.test(e.message)); assert.ok(!/client-secret-test/.test(e.message), 'the secret itself is never echoed');
+    return true;
+  });
+  assert.equal(C.merge((await env.store.snapshot()).doc('bb_config')).team[0].connection?.status === 'connected', false);
+});
+
+test('mailbox: settings pasted with spaces, a line break or quotes are sent clean', async () => {
+  const keep = process.env.BB_MS_CLIENT_SECRET;
+  process.env.BB_MS_CLIENT_SECRET = '  "client-secret-test"\r\n';
+  try {
+    const env = H.setup();
+    const http = fakeGraph();
+    const bodies = [];
+    const post = http.post;
+    http.post = async (url, body) => { bodies.push(String(body)); return post(url, body); };
+    await connectedMember(env, http);
+    assert.match(bodies[0], /client_secret=client-secret-test&/);
+  } finally { process.env.BB_MS_CLIENT_SECRET = keep; }
+});
+
+test('API: the sign-in page shows Microsoft\'s reason for a 401, not "Request failed"', async () => {
+  const { server, call, base } = await api(refusingGraph());
+  try {
+    const { url } = await (await call('1', 'POST', '/config/team/m1/connect')).json();
+    const state = new URL(url).searchParams.get('state');
+    const r = await fetch(`${base}/oauth/callback?state=${encodeURIComponent(state)}&code=x`);
+    const html = await r.text();
+    assert.equal(r.status, 400);
+    assert.match(html, /AADSTS7000215/); assert.match(html, /BB_MS_CLIENT_SECRET/);
+    assert.ok(!/Request failed with status code/.test(html));
+  } finally { server.close(); }
+});
+
+// ── Vercel's time limit (25 Nov 2026: "Check all now" online ran past 300 s; Vercel's own error crashed the page) ──
+test('mailbox: a check with a deadline stops between emails; the next check continues from there', async () => {
+  const env = H.setup();
+  const http = fakeGraph();
+  const mail = await connectedMember(env, http);
+  const get = http.get;
+  http.get = async (url, cfg) => { if (/msgA\/attachments\/a1\/\$value$/.test(url)) await new Promise(r => setTimeout(r, 120)); return get(url, cfg); };
+  const [res] = await mail.pollAll({ deadline: Date.now() + 40 });
+  assert.equal(res.more, true);
+  assert.equal(res.messages, 1, 'the email started before the deadline is finished, the next one is not started');
+  assert.equal(res.ingested, 1); assert.equal(res.skipped, 0);
+  assert.equal((await env.store.snapshot()).doc('bb_mail').cursors.m1.since, T1, 'cursor stops at the last handled email');
+  assert.equal((await env.store.snapshot()).doc('bb_mail').log[0].more, true);
+
+  const [next] = await mail.pollAll();
+  assert.equal(next.more, false); assert.equal(next.existing, 1); assert.equal(next.skipped, 1);
+  assert.equal((await env.store.snapshot()).doc('bb_mail').cursors.m1.since, T2);
+
+  const [late] = await mail.pollAll({ deadline: Date.now() - 1 });
+  assert.equal(late.not_started, true); assert.equal(late.more, true);
+  assert.equal((await env.store.snapshot()).doc('bb_mail').cursors.m1.since, T2, 'a member not started keeps its cursor');
+});
+
+test('reading left unfinished by a stopped request is picked up again — once, with a lease', async () => {
+  const env = H.setup();
+  await H.seedConfig();
+  const r = await env.pipeline.ingest({ buffer: H.pdf('left'), name: 'left.pdf', mime: 'application/pdf', source: 'erp_upload', source_ref: { erp_ref: 'L1' }, member_id: 'm1', by: 'test' });
+  await env.pipeline.idle();
+  assert.notEqual((await env.store.bill(r.id)).status, 'received');
+  // as if Vercel stopped the request before the bill was read, six minutes ago
+  const old = new Date(Date.now() - 6 * 60000).toISOString();
+  await env.store.tx(async t => { const b = t.bill(r.id); delete b.extraction; b.status = 'received'; b.updated_at = old; t.putBill(b); });
+
+  assert.equal(await env.pipeline.resumeStale(10 * 60000), 0, 'not older than the limit → maybe still being read elsewhere');
+  assert.equal(await env.pipeline.resumeStale(5 * 60000), 1);
+  assert.ok((await env.store.bill(r.id)).read_lease, 'leased');
+  await env.pipeline.idle();
+  assert.equal(env.pipeline.pending(), 0);
+  assert.notEqual((await env.store.bill(r.id)).status, 'received', 'read after all');
+
+  // a check running at the same time does not take a bill another one just leased
+  await env.store.tx(async t => { const b = t.bill(r.id); delete b.extraction; b.status = 'received'; b.updated_at = old; b.read_lease = new Date().toISOString(); t.putBill(b); });
+  assert.equal(await env.pipeline.resumeStale(5 * 60000), 0);
+});
+
+test('API: an outside service\'s 401 is never passed on as 401 (the dashboard would sign the user out)', async () => {
+  const { env, server, call } = await api();
+  try {
+    env.zc.checkAccess = async () => { throw axiosErr(401, { code: 57, message: 'You are not authorized to perform this operation' }); };
+    const r = await call('1', 'POST', '/zoho/check', { company: 'devx' });
+    assert.notEqual(r.status, 401);
+    assert.equal(r.status, 500);
+    assert.match((await r.json()).error, /not authorized to perform this operation/);
   } finally { server.close(); }
 });
