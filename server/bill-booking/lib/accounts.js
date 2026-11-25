@@ -34,6 +34,30 @@ function mappingFor(line, { mappings, company, vendorId, categoryId, threshold }
 
 // ── History ───────────────────────────────────────────────────────────────────
 
+/** How alike a bill line and an earlier Zoho bill line are, 0–1: the description, plus the same HSN/SAC */
+function lineSimilarity(line, hl) {
+  let s = T.similarity(line.description, hl.description);
+  if (line.hsn_sac && hl.hsn_or_sac && line.hsn_sac === String(hl.hsn_or_sac)) s = Math.min(1, s + 0.15);
+  return s;
+}
+
+/**
+ * The vendor's earlier Zoho bills ranked by how alike they are to this bill as a whole: every line of this
+ * bill is compared with the earlier bill's lines, and the earlier bill scores the average of the best matches.
+ * → [{ h, s }] best first (newest first on a tie); empty when this bill has nothing to compare
+ */
+function similarBills(bill, historyBills) {
+  let mine = (bill.lines || []).filter(l => l.description || l.hsn_sac);
+  if (!mine.length && bill.fields?.description) mine = [{ description: bill.fields.description, hsn_sac: '' }];
+  if (!mine.length) return [];
+  return (historyBills || []).map(h => {
+    const theirs = h.lines || [];
+    if (!theirs.length) return { h, s: 0 };
+    const best = mine.map(l => Math.max(...theirs.map(hl => lineSimilarity(l, hl))));
+    return { h, s: best.reduce((a, b) => a + b, 0) / best.length };
+  }).filter(x => x.s > 0).sort((a, b) => b.s - a.s || String(b.h.date).localeCompare(String(a.h.date)));
+}
+
 /**
  * historyBills: compact Zoho bills (lines with account, tax, HSN/SAC) of this vendor, newest first.
  * → { account|null, alternatives[], status: 'matched'|'inconsistent'|'no_match'|'no_history', basis }
@@ -47,8 +71,7 @@ function fromHistory(line, historyBills, threshold) {
       if (!hl.account_id) continue;
       if (!used.has(hl.account_id)) used.set(hl.account_id, { id: hl.account_id, name: hl.account_name, count: 0 });
       used.get(hl.account_id).count++;
-      let s = T.similarity(line.description, hl.description);
-      if (line.hsn_sac && hl.hsn_or_sac && line.hsn_sac === String(hl.hsn_or_sac)) s = Math.min(1, s + 0.15);
+      const s = lineSimilarity(line, hl);
       if (s >= threshold) hits.push({ s, h, hl });
     }
   }
@@ -162,4 +185,4 @@ function billLevel(historyBills, listRows = []) {
   return out;
 }
 
-module.exports = { mappingFor, fromHistory, suggestTax, billTax, billLevel, taxKind, nearestSlab };
+module.exports = { mappingFor, fromHistory, similarBills, lineSimilarity, suggestTax, billTax, billLevel, taxKind, nearestSlab, fmtRef, pct };

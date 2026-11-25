@@ -296,8 +296,14 @@ export default function BillDrawer({ id, meta, onClose, onSaved, onOpen }) {
                   <option value="">— choose —</option>
                   {meta.categories.filter(c => c.active !== false || c.id === form.category_id).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
                 </select>
-                {bill.category?.source && <Tag tone={bill.category.source === 'manual' ? 'green' : 'grey'}>{SOURCE_LABEL[bill.category.source]}</Tag>}
+                {bill.category?.source && <Tag tone={bill.category.source === 'manual' ? 'green' : bill.category.source === 'zoho_bill' ? 'blue' : 'grey'}>{SOURCE_LABEL[bill.category.source]}</Tag>}
                 <div style={{ ...S.small, marginTop: 4 }}>{bill.category?.basis}</div>
+                {bill.zoho_category?.values?.length > 0 && (
+                  <div style={{ ...S.small, marginTop: 4, color: '#5D6C7B' }}>
+                    In Zoho, the vendor's similar bill {bill.zoho_category.ref?.bill_number || ''} ({dt(bill.zoho_category.ref?.date)}) is booked as {bill.zoho_category.values.map(v => `${v.label}: ${v.value}`).join(' · ')}
+                    {(!bill.zoho_category.maps_to || bill.zoho_category.maps_to === form.category_id) ? ' — the Zoho draft gets the same.' : ' — not copied to the Zoho draft, because a different category is chosen here.'}
+                  </div>
+                )}
                 {!form.category_id && bill.category?.suggested && editable && <button style={{ ...S.btn, marginTop: 4 }} onClick={() => setForm(f => ({ ...f, category_id: bill.category.suggested }))}>Use {meta.categories.find(c => c.id === bill.category.suggested)?.name}</button>}
               </div>
             </div>

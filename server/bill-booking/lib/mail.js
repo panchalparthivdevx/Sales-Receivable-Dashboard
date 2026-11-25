@@ -13,6 +13,7 @@
 
 const C = require('./config');
 const SEC = require('./secrets');
+const OS = require('./ownsale');
 
 const GRAPH = 'https://graph.microsoft.com/v1.0';
 const GMAIL = 'https://gmail.googleapis.com/gmail/v1/users/me';
@@ -312,6 +313,9 @@ function create({ store, pipeline, files, http = require('axios'), lookups, log 
       const token = await accessToken(member);
       const msgs = member.provider === 'gmail' ? await gmailMessages(member, token, since) : await graphMessages(member, token, since);
       const vendorsMail = cfg.settings.mail_scope === 'likely_bills' ? await vendorEmails(member) : new Set();
+      // Our own sales invoices (named by their invoice number, e.g. "IN26-27GJ2632.pdf") are not collected
+      let sales = null;
+      try { sales = lookups?.salesInvoices ? await lookups.salesInvoices(cfg.companies.map(c => c.id)) : null; } catch (_) {}
       if (msgs.length >= MAX_MESSAGES) res.more = true;
       for (const msg of msgs) {
         // the cursor only moves past emails that were fully handled, so the next check starts here
@@ -332,6 +336,12 @@ function create({ store, pipeline, files, http = require('axios'), lookups, log 
           const likely = BILL_WORDS.test(msg.subject) || BILL_WORDS.test(a.name) || BILL_WORDS.test(msg.body) || vendorsMail.has(msg.from_address);
           if (cfg.settings.mail_scope === 'likely_bills' && !likely) {
             skipped.push({ key: `${member.id}:${msg.id}:${a.id}`.slice(0, 400), ...ref, name: a.name, size: a.size, type: mime, at: started, reason: 'No bill words in the subject, file name or text, and the sender is not a Zoho vendor' });
+            res.skipped++;
+            continue;
+          }
+          const own = sales?.size ? OS.byFileName({ fileName: a.name, companies: cfg.companies, sales }) : null;
+          if (own) {
+            skipped.push({ key: `${member.id}:${msg.id}:${a.id}`.slice(0, 400), ...ref, name: a.name, size: a.size, type: mime, at: started, reason: own.reason, own_sale: true });
             res.skipped++;
             continue;
           }

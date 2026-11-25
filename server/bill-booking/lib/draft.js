@@ -1,8 +1,9 @@
 /**
  * The Zoho Books bill created as a DRAFT from a validated bill. Only what is confirmed goes in:
  * vendor, invoice number/dates, lines with their accounts, GST taxes chosen per the rules in
- * accounts.js, branch/TDS from consistent history or the team, and the category fields the user
- * mapped to Zoho fields. `is_draft: true` keeps it out of the books until the team opens it in Zoho.
+ * accounts.js, branch/TDS from consistent history or the team, the category fields the user
+ * mapped to Zoho fields, and Zoho's "Category" / "Vendor Category" as on the vendor's similar Zoho bill.
+ * `is_draft: true` keeps it out of the books until the team opens it in Zoho.
  */
 
 'use strict';
@@ -62,10 +63,19 @@ function buildPayload(bill, { category, customFieldIds = {}, note = '' } = {}) {
     else if (def.zoho.target === 'line_field') p.line_items.forEach(li => { li[def.zoho.key] = v; });
     else if (def.zoho.target === 'bill_custom_field') {
       const id = customFieldIds[def.zoho.key];
-      custom.push(id ? { customfield_id: id, value: v } : { api_name: def.zoho.key, value: v });
+      custom.push(id ? { customfield_id: id, value: v, api_name: def.zoho.key } : { api_name: def.zoho.key, value: v });
     }
   }
-  if (custom.length) p.custom_fields = custom;
+  // Zoho's own "Category" / "Vendor Category" as on the vendor's similar bill in Zoho — when the bill's category
+  // is the one those values stand for (or they stand for none), and no category field already sets them
+  const zc = bill.zoho_category;
+  if (zc?.values?.length && (!zc.maps_to || zc.maps_to === bill.category?.id)) {
+    for (const v of zc.values) {
+      if (custom.some(c => c.api_name === v.api_name || (v.customfield_id && c.customfield_id === v.customfield_id))) continue;
+      custom.push(v.customfield_id ? { customfield_id: v.customfield_id, value: v.value, api_name: v.api_name } : { api_name: v.api_name, value: v.value });
+    }
+  }
+  if (custom.length) p.custom_fields = custom.map(c => (c.customfield_id ? { customfield_id: c.customfield_id, value: c.value } : c));
   return p;
 }
 

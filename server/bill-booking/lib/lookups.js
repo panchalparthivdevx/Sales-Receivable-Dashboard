@@ -47,6 +47,25 @@ function create({ store, zc, readSynced }) {
   }
 
   /**
+   * Our own sales invoices in Zoho (central sync, invoices_fy) of these companies → Map(normalised number → invoice),
+   * to recognise them when they arrive by email. Kept in memory for 10 minutes: the synced list is large.
+   */
+  const salesMemo = new Map();
+  async function salesInvoices(companyIds) {
+    const key = [...companyIds].sort().join(',');
+    const hit = salesMemo.get(key);
+    if (hit && Date.now() - hit.at < 10 * 60000) return hit.map;
+    const per = [];
+    for (const id of companyIds) {
+      const s = await synced(id, 'invoices_fy');
+      per.push({ company: id, rows: [...(s?.data || []), ...(s?.future || [])].filter(r => r.status !== 'void') });
+    }
+    const map = require('./ownsale').salesIndex(per);
+    salesMemo.set(key, { at: Date.now(), map });
+    return map;
+  }
+
+  /**
    * The vendor's recent bills with their lines, newest first, without drafts this module created
    * and has not yet seen reviewed. → { bills: [compact], rows: [list rows] }
    */
@@ -80,7 +99,7 @@ function create({ store, zc, readSynced }) {
     return { bills, rows, from };
   }
 
-  return { accounts, taxes, branches, projects, ownGstins, vendors, zohoBills, vendorHistory, cached };
+  return { accounts, taxes, branches, projects, ownGstins, vendors, zohoBills, salesInvoices, vendorHistory, cached };
 }
 
 module.exports = { create };

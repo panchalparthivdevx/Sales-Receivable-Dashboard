@@ -44,6 +44,30 @@ const DEFAULT_CATEGORIES = [
     keywords: ['fundraising', 'fund raising', 'placement fee', 'investment banking', 'debt syndication', 'syndication fee', 'arranger fee', 'success fee', 'due diligence', 'valuation', 'merchant banking', 'rating fee', 'term sheet'] },
 ].map(c => ({ ...c, active: true, fields: [], vendor_category_aliases: [] }));
 
+// "Zoho categories" of each bill category: the values of the Zoho bill fields "Category" / "Vendor Category"
+// (and the vendor master's "Vendor Category") that mean this category. A bill similar to one booked in Zoho
+// under one of these values gets this category. Taken from the values used on DevX's bills; editable in the app.
+const DEFAULT_ZOHO_CATEGORIES = {
+  rent_cam: ['landlord', 'property rental expenses', 'property maintenance expenses', 'rent/maint. vendors'],
+  brokers_consultants: ['brokrage', 'brokers', 'professional/consultancy service', 'consultants vendors', 'legal and professional vendor'],
+  hk_security_gardening: ['hk salary (recurring)', 'hk material (recurring)', 'security salary (recurring)', 'hygiene services (recurring)'],
+  pantry_vending_parking: ['ccd material (recurring)', 'vending machine (recurring)', 'parking (recurring)', 'valet salary (recurring)', 'milk (recurring)'],
+  furniture_fixtures: ['loose furniture', 'modular workstation'],
+  electrical_projects: ['project vendor', 'project vendors', 'electrical & networking work', 'civil', 'carpentry', 'gypsum', 'hvac', 'fas'],
+  repairs_maintenance: ['maintanance vendor', 'repairs & maint. vendors'],
+  amc: ['amc (annual main. contract)', 'pest control (amc)', 'hvac (amc)', 'electrical and fire audit (amc)'],
+};
+
+/** Adds the default Zoho categories to a stored configuration once (later edits in the app are kept) */
+function seedZohoCategories(categories) {
+  return categories.map(c => {
+    const add = DEFAULT_ZOHO_CATEGORIES[c.id];
+    if (!add) return c;
+    const have = c.vendor_category_aliases || [];
+    return { ...c, vendor_category_aliases: [...have, ...add.filter(a => !have.some(h => String(h).toLowerCase() === a))] };
+  });
+}
+
 const DEFAULT_COMPANIES = [
   { id: 'devx',   name: 'Dev Accelerator Ltd',             org_id: '60027116474', gstins: [], pans: [], name_hints: ['dev accelerator', 'devx'] },
   { id: 'neddle', name: 'Needle And Thread Designs LLP',  org_id: '60007894213', gstins: [], pans: [], name_hints: ['needle and thread', 'needle & thread', 'neddle'] },
@@ -76,9 +100,10 @@ function defaults() {
   return {
     version: 1,
     companies: DEFAULT_COMPANIES.map(c => ({ ...c })),
-    categories: DEFAULT_CATEGORIES.map(c => ({ ...c, keywords: [...c.keywords] })),
+    categories: seedZohoCategories(DEFAULT_CATEGORIES.map(c => ({ ...c, keywords: [...c.keywords] }))),
     team: [],
     settings: { ...DEFAULT_SETTINGS },
+    zoho_categories_seeded: true,
   };
 }
 
@@ -90,6 +115,9 @@ function merge(cfg) {
   out.settings = { ...d.settings, ...(cfg.settings || {}) };
   out.companies = cfg.companies?.length ? cfg.companies : d.companies;
   out.categories = Array.isArray(cfg.categories) ? cfg.categories : d.categories;
+  // Configurations saved before the Zoho categories existed get the defaults once; the flag is stored with the next save
+  if (!cfg.zoho_categories_seeded) out.categories = seedZohoCategories(out.categories);
+  out.zoho_categories_seeded = true;
   out.team = Array.isArray(cfg.team) ? cfg.team : [];
   return out;
 }

@@ -178,7 +178,7 @@ export default function TeamTab({ meta, reloadMeta }) {
       </div>
 
       <div style={S.card}>
-        <div style={S.cardHead}><span style={S.cardTitle}>Skipped attachments</span><span style={S.small}>Attachments that did not look like bills — read any of them on request</span></div>
+        <div style={S.cardHead}><span style={S.cardTitle}>Skipped attachments</span><span style={S.small}>Attachments that did not look like bills, and our own sales invoices — read any of them on request</span></div>
         <div style={{ ...S.cardBody, maxHeight: 300, overflow: 'auto' }}>
           {!log?.skipped?.length && <div style={S.muted}>Nothing skipped.</div>}
           {(log?.skipped || []).map(s => (

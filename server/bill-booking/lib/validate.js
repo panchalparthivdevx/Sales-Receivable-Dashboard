@@ -119,6 +119,8 @@ function status(bill) {
 
 /** Is the document a bill? → null (yes) or { reason } */
 function notBill(bill) {
+  // One of our own sales invoices (see ownsale.js) is never a vendor bill
+  if (bill.own_sale && !bill.extraction?.unreadable) return { reason: bill.own_sale.reason, own_sale: true };
   const t = bill.doc_type?.value;
   // 'other' (no heading found) and unreadable scans stay with the team — never skipped as "not a bill"
   if (!t || BILL_TYPES.has(t) || t === 'other' || bill.extraction?.unreadable) return null;

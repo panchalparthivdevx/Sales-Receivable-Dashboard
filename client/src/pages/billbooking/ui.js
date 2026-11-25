@@ -14,7 +14,7 @@ export const STATUS_META = {
 };
 export const STATUS_ORDER = ['received', 'extracted', 'needs_input', 'ready', 'draft_created', 'reviewed', 'duplicate', 'failed', 'not_bill'];
 
-export const SOURCE_LABEL = { history: 'Earlier bill', mapping: 'Confirmed mapping', manual: 'Chosen by team', description: 'Bill wording', team: 'Team', extraction: 'Read from bill', default: 'Default', '': '' };
+export const SOURCE_LABEL = { history: 'Earlier bill', zoho_bill: 'Earlier Zoho bill', mapping: 'Confirmed mapping', manual: 'Chosen by team', description: 'Bill wording', team: 'Team', extraction: 'Read from bill', default: 'Default', '': '' };
 
 export function StatusPill({ status, statuses }) {
   const m = STATUS_META[status] || STATUS_META.received;

@@ -404,6 +404,23 @@ test('Vercel scheduler: the route needs the scheduler secret; a check by hand re
   } finally { router.init({ vercel: false, zc: env.zc, lookups: env.lookups, files: env.files }); server.close(); }
 });
 
+test('Vercel scheduler: also checks again the bills checked under older rules; the report says how many are left', async () => {
+  const { env, server, call, router } = await api();
+  try {
+    router.init({ zc: env.zc, lookups: env.lookups, files: env.files, extractFn: H.fakeExtract({ '*': {} }), loadUsers: async () => USERS, http: fakeGraph(), log: { error() {} }, vercel: true });
+    const r0 = await env.pipeline.ingest({ buffer: H.pdf('old-rules'), name: 'old.pdf', mime: 'application/pdf', source: 'erp_upload', source_ref: { erp_ref: 'O1' }, member_id: 'm1', by: 'test' });
+    await env.pipeline.idle();
+    await env.store.tx(async t => { const b = t.bill(r0.id); delete b.rules_v; t.putBill(b); });
+    assert.equal((await (await call('1', 'GET', '/bills')).json()).rechecking, 1);
+    const x = await (await call('3', 'POST', '/mail/poll', {})).json();
+    assert.ok(x.results, 'a check by hand does not wait for re-checks');
+    const r = await router.cronTick();
+    assert.equal(r.rechecking, 0);
+    assert.equal((await env.store.bill(r0.id)).rules_v, env.pipeline.RULES_V);
+    assert.equal((await (await call('1', 'GET', '/bills')).json()).rechecking, 0);
+  } finally { router.init({ vercel: false, zc: env.zc, lookups: env.lookups, files: env.files }); server.close(); }
+});
+
 test('API: an outside service\'s 401 is never passed on as 401 (the dashboard would sign the user out)', async () => {
   const { env, server, call } = await api();
   try {

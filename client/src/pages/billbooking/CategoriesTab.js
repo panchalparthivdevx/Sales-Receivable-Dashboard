@@ -64,7 +64,7 @@ export default function CategoriesTab({ meta, reloadMeta }) {
                   <Field label="Keywords that point to this category (comma separated)">
                     <textarea rows={2} style={{ ...S.input, width: '100%' }} disabled={!can} value={c.keywords.join(', ')} onChange={e => upd(i, { keywords: e.target.value.split(',').map(s => s.trimStart()) })} />
                   </Field>
-                  <Field label="Zoho vendor categories that point here">
+                  <Field label="Zoho categories that point here — the Category / Vendor Category on Zoho bills, or the vendor master Vendor Category (comma separated)">
                     <input style={{ ...S.input, width: '100%' }} disabled={!can} value={(c.vendor_category_aliases || []).join(', ')} onChange={e => upd(i, { vendor_category_aliases: e.target.value.split(',').map(s => s.trimStart()) })} placeholder="e.g. HK Salary (Recurring)" />
                   </Field>
                   <Field label="Status">

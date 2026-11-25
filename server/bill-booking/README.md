@@ -6,7 +6,7 @@ Purchase bills from the finance team's mailboxes and from manual ERP uploads are
 
 Every bill goes through the same steps:
 
-**collect → read → company → vendor → duplicates → category → expense account and GST per line → branch and TDS → category fields → checks → Zoho draft → review tracking**
+**collect → read → our own sales invoice? → company → vendor → duplicates → category → expense account and GST per line → branch and TDS → category fields → checks → Zoho draft → review tracking**
 
 Each step records its basis on the bill and adds an entry to the bill's audit trail.
 
@@ -15,13 +15,25 @@ Each step records its basis on the bill and adds an entry to the bill's audit tr
 | Read | Claude (if `ANTHROPIC_API_KEY` is set), otherwise the PDF text layer or OCR | Claude read it. A built-in reading needs one "details checked" confirmation. |
 | Company | Billed-to GSTIN or PAN (GSTINs from Zoho plus Settings), then the name on the bill, then the receiving member | It matches a GSTIN or PAN, or the name. Taking the member's company is flagged. |
 | Vendor | Synced `vendors_all` of that company: GSTIN, then PAN, then name | Exactly one active vendor has the GSTIN (or the name is unique with no GSTIN on the bill) |
-| Category | Keywords in the bill lines and email, the vendor's earlier categories here, the Zoho vendor category, the member's categories (tie-break only) | The score reaches `category_min_score` and is 1.5 times the next category |
+| Category | 1) The vendor's similar bill already booked in Zoho: its Zoho "Category" (then "Vendor Category"), translated through each category's "Zoho categories" list. 2) Otherwise keywords in the bill lines and email, the vendor's earlier categories here, the Zoho vendor master category, the member's categories (tie-break only) | 1) The earlier bill is similar (same rule as the account) and its Zoho category is listed under one bill category. 2) The score reaches `category_min_score` and is 1.5 times the next category |
 | Account | 1) a confirmed mapping, 2) a similar line among the vendor's last `history_days` of Zoho bills | Similarity is at least `similarity_threshold` and the similar lines agree. The vendor alone never decides. |
 | GST tax | A mapping for vendor and account, or the same tax on the vendor's earlier lines of that account | Same rate and the same IGST or CGST+SGST split as the bill |
 | Branch / TDS | The same value on all of the vendor's recent bills | The value is consistent; mixed values are left for the reviewer |
 | Duplicates | Same file, same vendor and number, already in Zoho (sync data, plus a live check before creating), same date and total | Exact or likely matches are marked Duplicate; possible ones go to the team |
 
-The statuses are Received, Extracted, Needs Input, Ready for Draft, Draft Created, Reviewed, Duplicate, Failed and Not a Bill.
+The statuses are Received, Extracted, Needs Input, Ready for Draft, Draft Created, Reviewed, Duplicate, Failed and Not a Bill. The report filters on one or several statuses (chips or the Status list).
+
+## Our own sales invoices
+
+Invoices issued by our own companies to customers (payment reminders from Accounts Receivable, forwarded invoices) are not vendor bills (`lib/ownsale.js`):
+
+- **Not collected:** an email attachment named like one of our sales invoices in Zoho (central sync `invoices_fy`, e.g. `IN26-27GJ2632.pdf`) is listed under Team & Mailboxes → Skipped attachments with the reason.
+- **Not a Bill:** a collected document is set aside with the reason when its number is one of our Zoho sales invoices (and the date or total does not contradict it), when the seller block before "Bill To / Buyer …" carries only our company's name and GSTIN, or when the reader found our GSTIN as the supplier. "It is a bill" overrules it.
+- An invoice from one of our companies to another (DevX ↔ Neddle) is a purchase bill for the buyer and is collected as usual.
+
+## Category from the vendor's Zoho bills
+
+Zoho bills carry their own "Category" and "Vendor Category" fields. When a bill is similar to one of the vendor's bills in Zoho (the last `history_days`, the same line comparison as for the account), the category it was booked under there decides: each bill category lists the Zoho values that mean it ("Zoho categories" in Categories & Fields; DevX's values are filled in by default, once). The Zoho draft gets the same Zoho "Category" / "Vendor Category" as that similar bill, unless the team chose a different bill category.
 
 ## Zoho draft bills
 
@@ -59,6 +71,7 @@ The Zoho refresh token must include `ZohoBooks.bills.CREATE`. Settings → **Che
   - Bills are taken one at a time (three at a time with Claude): the fewest tries first, then the oldest. Each is leased so two calls never read the same bill.
   - A bill not finished after 3 tries becomes **Failed** with the reason, so it cannot hold up the others.
   - OCR has a 120 s limit per bill.
+  - After reading, the scheduler checks again the bills last checked under older rules (`RULES_V` in `lib/pipeline.js`), without reading them again and keeping the team's choices. The office PC does this when the server starts.
 
 ## Tests
 

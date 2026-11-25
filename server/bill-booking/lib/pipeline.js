@@ -18,9 +18,14 @@ const D = require('./duplicates');
 const V = require('./validate');
 const DR = require('./draft');
 const EX = require('./extract');
+const OS = require('./ownsale');
 
 const AUDIT_MAX = 200;
 const ACTIVE_ZOHO = new Set(['draft', 'pending_approval']);
+// Version of the checks after reading. Bills checked under an older version are checked again in the
+// background (recheckOld), so a new rule also reaches bills collected before it.
+//   2 — own sales invoices set aside; category from the vendor's similar Zoho bill
+const RULES_V = 2;
 
 function create({ store, zc, lookups, files, extractFn = EX.extract, log = console }) {
   const now = () => new Date().toISOString();
@@ -171,17 +176,25 @@ function create({ store, zc, lookups, files, extractFn = EX.extract, log = conso
     const co = cfg.companies.find(c => c.id === company.id);
     const org = co?.org_id;
 
+    // One of our own sales invoices (a customer reminder, a forwarded invoice)? Never a vendor bill.
+    let ownSale = null;
+    try {
+      const sales = lookups.salesInvoices ? await lookups.salesInvoices(cfg.companies.map(c => c.id)) : null;
+      ownSale = OS.check({ fields: b0.fields, text: b0.extraction.text_sample, fileName: b0.source_ref?.attachment_name, companies, sales });
+    } catch (e) { log.error(`[bill-booking] ${id}: own sales invoice check: ${e.message}`); }
+    const ownAside = !!ownSale && !b0.not_bill?.overridden;
+
     // Look-ups (outside the lock)
     const notes = [];
     let vendors = [], hist = { bills: [], rows: [] }, taxes = [], zohoBills = [];
-    if (co) {
+    if (co && !ownAside) {
       try { vendors = M.vendorIndex(await lookups.vendors(co.id)); } catch (e) { notes.push(`Zoho vendors could not be loaded: ${e.message}`); }
       try { zohoBills = await lookups.zohoBills(co.id); } catch (_) {}
     }
     let vendor = b0.vendor?.match === 'manual' ? b0.vendor
-      : (co ? M.matchVendor({ fields: b0.fields, fromEmail: b0.source_ref?.from_address || '', vendors }) : null);
-    // Quotations, statements … (unless the team said it is a bill) need no account history: saves Zoho calls
-    const setAside = b0.not_bill?.manual || (!b0.not_bill?.overridden && V.notBill(b0));
+      : (co && !ownAside ? M.matchVendor({ fields: b0.fields, fromEmail: b0.source_ref?.from_address || '', vendors }) : null);
+    // Quotations, statements, our own sales invoices … (unless the team said it is a bill) need no account history: saves Zoho calls
+    const setAside = b0.not_bill?.manual || (!b0.not_bill?.overridden && V.notBill({ ...b0, own_sale: ownSale }));
     if (co && vendor?.id && !setAside) {
       const snap = await store.snapshot();
       const ours = new Set(snap.bills.filter(x => x.status === 'draft_created' && x.zoho?.bill_id).map(x => x.zoho.bill_id));
@@ -195,6 +208,7 @@ function create({ store, zc, lookups, files, extractFn = EX.extract, log = conso
       const b = t.bill(id);
       if (!b || V.STICKY.has(b.status)) return b;
       const before = summary(b);
+      b.own_sale = ownSale || null;
       b.company = company.id || '';
       b.company_basis = company.basis;
       b.company_sure = company.sure !== false;
@@ -209,13 +223,22 @@ function create({ store, zc, lookups, files, extractFn = EX.extract, log = conso
       const dup = D.check(b, t.bills(), zohoBills);
       b.duplicate = dup ? { ...dup, dismissed, at: now() } : (dismissed.length ? { dismissed } : null);
 
-      // Category
+      // Category: first from the vendor's similar bill already booked in Zoho (its "Category" / "Vendor Category"),
+      // otherwise from the bill's wording, this vendor's earlier bills here and its Zoho vendor category
       const categories = cfg.categories.filter(c => c.active !== false);
+      const fromZoho = vendor?.id && hist.bills.length
+        ? M.categoryFromZohoBills({ bill: b, historyBills: hist.bills, categories, threshold: cfg.settings.similarity_threshold }) : null;
+      b.zoho_category = fromZoho?.zoho?.length ? { values: fromZoho.zoho, ref: fromZoho.ref, maps_to: fromZoho.maps_to } : null;
       if (b.category?.source !== 'manual') {
-        const vendorHistory = vendor?.id ? t.bills().filter(x => x.id !== b.id && x.company === b.company && x.vendor?.id === vendor.id && x.category?.id
-          && (x.category.source === 'manual' || x.status === 'reviewed' || x.status === 'draft_created')).map(x => ({ category_id: x.category.id })) : [];
-        const cat = M.categorise({ bill: b, categories, member, vendorHistory, vendorZohoCategory: b.vendor?.zoho_category, minScore: cfg.settings.category_min_score });
-        b.category = cat;
+        if (fromZoho?.category) b.category = fromZoho.category;
+        else {
+          const vendorHistory = vendor?.id ? t.bills().filter(x => x.id !== b.id && x.company === b.company && x.vendor?.id === vendor.id && x.category?.id
+            && (x.category.source === 'manual' || x.status === 'reviewed' || x.status === 'draft_created')).map(x => ({ category_id: x.category.id })) : [];
+          const cat = M.categorise({ bill: b, categories, member, vendorHistory, vendorZohoCategory: b.vendor?.zoho_category, minScore: cfg.settings.category_min_score });
+          if (fromZoho?.basis) cat.basis = `${cat.basis} · ${fromZoho.basis}`;
+          if (!cat.id && fromZoho?.suggested) cat.suggested = fromZoho.suggested;
+          b.category = cat;
+        }
       } else if (!categories.some(c => c.id === b.category.id)) {
         b.category = { id: '', name: '', source: '', basis: `Category "${b.category.name}" is no longer active — choose another` };
       }
@@ -274,10 +297,11 @@ function create({ store, zc, lookups, files, extractFn = EX.extract, log = conso
       const nb = V.notBill(b);
       if (b.not_bill?.overridden) { /* the team said it is a bill */ }
       else if (b.not_bill?.manual) { /* the team said it is not */ }
-      else b.not_bill = nb ? { reason: nb.reason } : null;
+      else b.not_bill = nb ? { reason: nb.reason, ...(nb.own_sale ? { own_sale: true } : {}) } : null;
 
       b.issues = V.issues(b, { category: catDef, acks: b.acks || [] });
       b.evaluated_at = now();
+      b.rules_v = RULES_V;
       b.status = V.status(b);
       b.updated_at = now();
       const after = summary(b);
@@ -300,6 +324,7 @@ function create({ store, zc, lookups, files, extractFn = EX.extract, log = conso
       b.category?.id ? `category ${b.category.name} (${b.category.source || 'suggested'})` : 'category ?',
       ...b.lines.map((l, i) => `line ${i + 1}: ${l.account?.name ? `${l.account.name} [${l.account.source}]` : 'account ?'}${l.tax?.name ? `, ${l.tax.name} [${l.tax.source}]` : l.tax_needed ? ', tax ?' : ''}`),
     ];
+    if (b.not_bill?.reason && !b.not_bill.overridden) parts.push(`not a bill: ${b.not_bill.reason}`);
     if (b.duplicate?.certainty) parts.push(`duplicate: ${b.duplicate.reason}`);
     const blocks = (b.issues || []).filter(i => i.severity === 'block' && !i.acked).length;
     if (blocks) parts.push(`${blocks} open issue(s)`);
@@ -798,7 +823,27 @@ function create({ store, zc, lookups, files, extractFn = EX.extract, log = conso
   /** Bills (all instances) not read yet */
   const waitingCount = async () => (await store.snapshot()).bills.filter(waitingToRead).length;
 
-  return { ingest, processBill, evaluate, edit, action, createDraft, draftTest, refreshZoho, resume, readStale, pending, waitingCount, enqueue, idle, config, MAX_READ_TRIES };
+  // ── Bills checked under older rules ──────────────────────────────────────────
+  const checkedUnderOldRules = b => b.extraction && !b.processing_error && !V.STICKY.has(b.status) && (b.rules_v || 0) < RULES_V;
+  /**
+   * Checks again, oldest first, the bills last checked under older rules (RULES_V) — without reading them again
+   * and keeping every choice the team made by hand. Stops when less than minLeftMs is left before `until`.
+   * → the number of bills checked
+   */
+  async function recheckOld({ until = 0, minLeftMs = 20000 } = {}) {
+    const ids = (await store.snapshot()).bills.filter(b => checkedUnderOldRules(b) && !queued.has(b.id))
+      .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at))).map(b => b.id);
+    let n = 0;
+    for (const id of ids) {
+      if (until && until - Date.now() < minLeftMs) break;
+      try { await evaluate(id, { by: 'system (re-check)' }); } catch (e) { log.error(`[bill-booking] re-check ${id}: ${e.message}`); }
+      n++;
+    }
+    return n;
+  }
+  const oldRulesCount = async () => (await store.snapshot()).bills.filter(checkedUnderOldRules).length;
+
+  return { ingest, processBill, evaluate, edit, action, createDraft, draftTest, refreshZoho, resume, readStale, recheckOld, oldRulesCount, pending, waitingCount, enqueue, idle, config, MAX_READ_TRIES, RULES_V };
 }
 
 module.exports = { create };

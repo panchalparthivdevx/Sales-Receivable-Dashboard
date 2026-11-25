@@ -6,6 +6,7 @@
 'use strict';
 
 const T = require('./text');
+const A = require('./accounts');
 
 // ── Company ───────────────────────────────────────────────────────────────────
 
@@ -137,4 +138,63 @@ function categorise({ bill, categories, member, vendorHistory = [], vendorZohoCa
   return { id: top.id, name: top.name, source: fromHistory && top.reasons.length === 1 ? 'history' : 'description', confidence: top.score >= minScore * 2 ? 'high' : 'medium', scores: scores.slice(0, 5), basis };
 }
 
-module.exports = { detectCompany, vendorIndex, matchVendor, categorise, companyGstins, companyPans };
+// ── Category from the vendor's similar bill already booked in Zoho ─────────────
+
+// The Zoho bill's own category fields, in the order they are trusted: "Category", then "Vendor Category"
+const ZOHO_CATEGORY_FIELDS = ['cf_category', 'cf_vendor_category'];
+const normCat = s => String(s ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
+
+/** A Zoho bill's category values → [{ api_name, customfield_id, label, value }] (filled ones only) */
+function zohoCategoryValues(h) {
+  return ZOHO_CATEGORY_FIELDS.map(k => (h.custom_fields || []).find(c => c.api_name === k))
+    .filter(c => c && normCat(c.value))
+    .map(c => ({ api_name: c.api_name, customfield_id: c.customfield_id || '', label: c.label || c.api_name, value: String(c.value).trim() }));
+}
+
+/** The bill category whose "Zoho categories" list names one of these values (Category first) → category | null */
+function categoryOfZoho(values, categories) {
+  for (const v of values) {
+    const hits = categories.filter(c => c.active !== false && (c.vendor_category_aliases || []).some(a => normCat(a) === normCat(v.value)));
+    if (hits.length === 1) return hits[0];
+  }
+  return null;
+}
+
+/**
+ * The vendor's earlier Zoho bill most like this bill (same rule as the expense account: similar lines, not the
+ * vendor alone) gives the category it was booked under in Zoho, translated to a bill category through each
+ * category's "Zoho categories" list.
+ * → { category|null, zoho: values of the similar bill, ref, maps_to, status, basis }
+ *   status: 'matched' | 'unmapped' (Zoho category not linked to a bill category) | 'no_zoho_category'
+ *           | 'inconsistent' (similar bills booked under different categories) | 'no_similar' | 'no_history'
+ */
+function categoryFromZohoBills({ bill, historyBills = [], categories = [], threshold = 0.5 }) {
+  if (!historyBills.length) return { category: null, status: 'no_history', basis: '' };
+  const sims = A.similarBills(bill, historyBills).filter(x => x.s >= threshold);
+  if (!sims.length) return { category: null, status: 'no_similar', basis: `No earlier Zoho bill of this vendor is similar enough to take its category from` };
+  for (const x of sims) { x.values = zohoCategoryValues(x.h); x.cat = categoryOfZoho(x.values, categories); }
+  const top = sims.find(x => x.values.length);
+  const label = x => x.values.map(v => `${v.label} "${v.value}"`).join(', ');
+  const refOf = x => ({ bill_id: x.h.bill_id, bill_number: x.h.bill_number, date: x.h.date, similarity: Math.round(x.s * 100) / 100 });
+  if (!top) return { category: null, status: 'no_zoho_category', basis: `The similar Zoho bill ${A.fmtRef(sims[0].h)} has no Category in Zoho` };
+  const out = { zoho: top.values, ref: refOf(top), maps_to: top.cat?.id || '' };
+  if (!top.cat) {
+    return { ...out, category: null, status: 'unmapped',
+      basis: `The similar Zoho bill ${A.fmtRef(top.h)} (${A.pct(top.s)} similar) is booked as ${label(top)} — no bill category lists it under "Zoho categories" (Categories & Fields)` };
+  }
+  const rival = sims.find(x => x.cat && x.cat.id !== top.cat.id && top.s - x.s < 0.25);
+  if (rival) {
+    return { ...out, category: null, status: 'inconsistent', suggested: top.cat.id,
+      basis: `Similar Zoho bills of this vendor were booked under different categories: ${A.fmtRef(top.h)} as ${label(top)}; ${A.fmtRef(rival.h)} as ${label(rival)} — choose the category` };
+  }
+  return {
+    ...out, status: 'matched',
+    category: {
+      id: top.cat.id, name: top.cat.name, source: 'zoho_bill', confidence: top.s >= 0.75 ? 'high' : 'medium',
+      basis: `As booked in Zoho on the vendor's similar ${A.fmtRef(top.h)} (${A.pct(top.s)} similar): ${label(top)}`,
+      ref: refOf(top),
+    },
+  };
+}
+
+module.exports = { detectCompany, vendorIndex, matchVendor, categorise, categoryFromZohoBills, zohoCategoryValues, categoryOfZoho, companyGstins, companyPans, ZOHO_CATEGORY_FIELDS };

@@ -107,6 +107,9 @@ function row(b, cfg) {
     description: b.fields?.description || lines[0]?.description || '',
     sub_total: b.fields?.sub_total ?? null, tax_total: b.fields?.tax_total ?? null, total: b.fields?.total ?? null, currency: b.fields?.currency || 'INR',
     category_id: b.category?.id || '', category: b.category?.name || '', category_source: b.category?.source || '', category_basis: b.category?.basis || '',
+    zoho_category: (b.zoho_category?.values || []).map(v => v.value).join(' · '),
+    zoho_category_ref: b.zoho_category?.ref ? `${b.zoho_category.ref.bill_number || b.zoho_category.ref.bill_id} dated ${b.zoho_category.ref.date}` : '',
+    not_bill_reason: b.status === 'not_bill' ? (b.not_bill?.reason || '') : '', own_sale: b.status === 'not_bill' && !!b.not_bill?.own_sale,
     account: lines.map(l => l.account?.name).filter(Boolean).filter((v, i, a) => a.indexOf(v) === i).join(', '),
     account_source: lines.map(l => l.account?.source).filter(Boolean)[0] || '',
     account_basis: lines.map(l => l.account?.basis || l.account_issue).filter(Boolean).join(' | '),
@@ -269,13 +272,17 @@ const VERCEL_LIMIT_MS = 300000, COLLECT_MS = 150000, ANSWER_MS = 240000, WORK_MS
 const STALE_MS = VERCEL_LIMIT_MS + 15000;   // untouched this long → no request is reading it any more
 const readers = () => (EX.claudeEnabled() ? 3 : 1);   // Claude waits on the network, OCR uses the processor
 
-/** Vercel: read until the answer is due, keep reading in the background → bills still waiting to be read */
-async function settleReading(started) {
+/**
+ * Vercel: read until the answer is due, keep reading in the background → bills still waiting to be read.
+ * recheck (the scheduler only): afterwards, check again the bills last checked under older rules.
+ */
+async function settleReading(started, { recheck = false } = {}) {
   if (!IS_VERCEL) return 0;
   const { pipeline } = need();
   const work = (async () => {
     await pipeline.idle();
     await pipeline.readStale({ staleMs: STALE_MS, until: started + WORK_MS, workers: readers() });
+    if (recheck) await pipeline.recheckOld({ until: started + WORK_MS });
   })().catch(e => console.error('[bill-booking] reading:', e.message));
   background(work);
   const left = started + ANSWER_MS - Date.now();
@@ -303,8 +310,8 @@ router.cronTick = async () => {
       mail = { mailboxes: results.length, new_bills: results.reduce((s, r) => s + r.ingested, 0), more: results.some(r => r.more), errors: results.filter(r => r.error).length };
     } catch (e) { mail = { error: e.message }; console.error('[bill-booking] scheduled mailbox check:', e.message); }
   }
-  const waiting = await settleReading(started);
-  return { ok: true, mail, waiting };
+  const waiting = await settleReading(started, { recheck: true });
+  return { ok: true, mail, waiting, rechecking: await need().pipeline.oldRulesCount() };
 };
 router.cron = async (req, res) => {
   try { res.json(await router.cronTick()); } catch (e) { console.error('[bill-booking] cron:', e.message); res.status(500).json({ ok: false, error: e.message }); }
@@ -366,7 +373,10 @@ router.get('/bills', gate(), wrap(async (req, res) => {
   const rows = snap.bills.map(b => row(b, cfg))
     .filter(r => (!from || r.received_at.slice(0, 10) >= from) && (!to || r.received_at.slice(0, 10) <= to))
     .sort((a, b) => b.received_at.localeCompare(a.received_at));
-  res.json({ rows, generated_at: new Date().toISOString() });
+  // Bills last checked under older rules — checked again in the background (pipeline.recheckOld)
+  const RV = need().pipeline.RULES_V;
+  const rechecking = snap.bills.filter(b => b.extraction && !b.processing_error && !['draft_created', 'reviewed'].includes(b.status) && (b.rules_v || 0) < RV).length;
+  res.json({ rows, rechecking, generated_at: new Date().toISOString() });
 }));
 
 router.get('/bills/:id', gate(), wrap(async (req, res) => {
@@ -546,7 +556,7 @@ router.startScheduler = () => {
   if (timer || IS_VERCEL) return;
   const { pipeline, mail } = need();
   let lastPoll = 0, lastRefresh = 0;
-  pipeline.resume().catch(e => console.error('[bill-booking] resume:', e.message));
+  pipeline.resume().then(() => pipeline.recheckOld()).catch(e => console.error('[bill-booking] resume:', e.message));
   timer = setInterval(async () => {
     try {
       const cfg = await cfgNow();

@@ -1,6 +1,6 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import * as XLSX from 'xlsx';
-import { RefreshCw, Download, Search, Mail, Upload, ExternalLink, Paperclip, AlertTriangle } from 'lucide-react';
+import { RefreshCw, Download, Search, Mail, Upload, ExternalLink, Paperclip, AlertTriangle, ChevronDown } from 'lucide-react';
 import { bb, errMsg } from './bbApi';
 import { S, StatusPill, Tag, STATUS_ORDER, STATUS_META, SOURCE_LABEL, money, dt, dtm, ymd, Msg } from './ui';
 import BillDrawer from './BillDrawer';
@@ -30,18 +30,20 @@ function periodRange(key, custom) {
 
 export default function ReportTab({ meta, onChanged }) {
   const [rows, setRows] = useState(null);
+  const [rechecking, setRechecking] = useState(0);
   const [error, setError] = useState('');
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState('');
   const [period, setPeriod] = useState('90');
   const [custom, setCustom] = useState({ from: '', to: '' });
-  const [f, setF] = useState({ status: ALL, company: ALL, member: ALL, category: ALL, source: ALL, q: '', vendor: '', exceptions: false });
+  // statuses: the chosen statuses (several allowed); none chosen = every open bill (all but Not a Bill)
+  const [f, setF] = useState({ statuses: [], company: ALL, member: ALL, category: ALL, source: ALL, q: '', vendor: '', exceptions: false });
   const [page, setPage] = useState(0);
   const [open, setOpen] = useState(null);
 
   const load = useCallback(async () => {
     setError('');
-    try { setRows((await bb.bills(periodRange(period, custom))).rows); } catch (e) { setError(errMsg(e)); setRows([]); }
+    try { const d = await bb.bills(periodRange(period, custom)); setRows(d.rows); setRechecking(d.rechecking || 0); } catch (e) { setError(errMsg(e)); setRows([]); }
   }, [period, custom]);
   useEffect(() => { load(); }, [load]);
   // Bills still being read refresh by themselves
@@ -52,6 +54,7 @@ export default function ReportTab({ meta, onChanged }) {
   }, [rows, load]);
 
   const set = (k, v) => { setF(x => ({ ...x, [k]: v })); setPage(0); };
+  const toggleStatus = s => set('statuses', f.statuses.includes(s) ? f.statuses.filter(x => x !== s) : STATUS_ORDER.filter(x => x === s || f.statuses.includes(x)));
   const base = useMemo(() => (rows || []).filter(r =>
     (!f.company || r.company === f.company) && (!f.member || r.member_id === f.member) && (!f.category || (f.category === '__none' ? !r.category_id : r.category_id === f.category))
     && (!f.source || r.source === f.source)
@@ -59,7 +62,7 @@ export default function ReportTab({ meta, onChanged }) {
     && (!f.q || `${r.id} ${r.invoice_number} ${r.subject} ${r.from} ${r.file_name} ${r.description} ${r.zoho_bill_number}`.toLowerCase().includes(f.q.toLowerCase()))
     && (!f.exceptions || r.blocks > 0 || r.warns > 0)), [rows, f]);
   const counts = useMemo(() => { const c = {}; for (const r of base) c[r.status] = (c[r.status] || 0) + 1; return c; }, [base]);
-  const shown = useMemo(() => base.filter(r => (f.status ? r.status === f.status : r.status !== 'not_bill')), [base, f.status]);
+  const shown = useMemo(() => base.filter(r => (f.statuses.length ? f.statuses.includes(r.status) : r.status !== 'not_bill')), [base, f.statuses]);
   const pageRows = shown.slice(page * PAGE, (page + 1) * PAGE);
   const automated = useMemo(() => {
     const drafted = base.filter(r => r.status === 'draft_created' || r.status === 'reviewed');
@@ -80,9 +83,10 @@ export default function ReportTab({ meta, onChanged }) {
       Vendor: r.vendor, 'Vendor GSTIN': r.vendor_gstin, Company: r.company_name, 'Zoho organisation': r.org_id,
       'Invoice no.': r.invoice_number, 'Invoice date': r.invoice_date, 'Due date': r.due_date, Description: r.description,
       'Basic amount': r.sub_total, GST: r.tax_total, 'Invoice total': r.total, Currency: r.currency,
-      'Bill category': r.category, 'Category basis': r.category_basis, 'Suggested expense account': r.account,
+      'Bill category': r.category, 'Category basis': r.category_basis, 'Zoho category (similar Zoho bill)': r.zoho_category, 'Similar Zoho bill': r.zoho_category_ref,
+      'Suggested expense account': r.account,
       'Account basis': r.account_basis, 'Open issues': r.blocks, Warnings: r.warns, 'Exceptions / missing information': r.exceptions,
-      'Duplicate warning': r.duplicate, 'Zoho bill no.': r.zoho_bill_number, 'Zoho bill ID': r.zoho_bill_id, 'Zoho status': r.zoho_status, 'Zoho link': r.zoho_url,
+      'Duplicate warning': r.duplicate, 'Not a bill — reason': r.not_bill_reason, 'Zoho bill no.': r.zoho_bill_number, 'Zoho bill ID': r.zoho_bill_id, 'Zoho status': r.zoho_status, 'Zoho link': r.zoho_url,
     }));
     const ws = XLSX.utils.json_to_sheet(data, { cellDates: true });
     ws['!cols'] = Object.keys(data[0] || { a: 1 }).map(k => ({ wch: Math.min(40, Math.max(10, k.length + 2)) }));
@@ -109,6 +113,11 @@ export default function ReportTab({ meta, onChanged }) {
                 {meta.integrations?.vercel ? ` (online: every 5 minutes, ${meta.integrations?.claude?.enabled ? 'three bills at a time' : 'one bill at a time with the built-in reader'})` : ''} — press Refresh to see the details as they come in.
               </div>
             )}
+            {rechecking > 0 && (
+              <div style={{ ...S.small, marginTop: 3 }}>
+                {rechecking} bill(s) are being checked again with the latest rules (our own sales invoices set aside, category from the vendor's similar Zoho bill){meta.integrations?.vercel ? ' — in the background, every 5 minutes' : ''}. Press Refresh to see the results.
+              </div>
+            )}
           </div>
           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
             <button style={S.ghost} onClick={load}><RefreshCw size={13} /> Refresh</button>
@@ -122,12 +131,13 @@ export default function ReportTab({ meta, onChanged }) {
 
         {/* Status strip */}
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', padding: '0.7rem 1.1rem', borderBottom: '1px solid #F2F2F2' }}>
-          <button onClick={() => set('status', ALL)} style={chip(!f.status, '#1C4942')}>All open <b>{base.filter(x => x.status !== 'not_bill').length}</b></button>
+          <button onClick={() => set('statuses', [])} style={chip(!f.statuses.length, '#1C4942')}>All open <b>{base.filter(x => x.status !== 'not_bill').length}</b></button>
           {STATUS_ORDER.map(s => (
-            <button key={s} onClick={() => set('status', f.status === s ? ALL : s)} style={chip(f.status === s, STATUS_META[s].color)}>
+            <button key={s} onClick={() => toggleStatus(s)} aria-pressed={f.statuses.includes(s)} style={chip(f.statuses.includes(s), STATUS_META[s].color)}>
               {meta.statuses[s]} <b>{counts[s] || 0}</b>
             </button>
           ))}
+          <span style={{ ...S.small, alignSelf: 'center' }}>Click several statuses to see them together</span>
         </div>
 
         {/* Filters */}
@@ -139,6 +149,7 @@ export default function ReportTab({ meta, onChanged }) {
             <input type="date" style={S.input} value={custom.from} onChange={e => setCustom(c => ({ ...c, from: e.target.value }))} />
             <input type="date" style={S.input} value={custom.to} onChange={e => setCustom(c => ({ ...c, to: e.target.value }))} />
           </>}
+          <StatusFilter value={f.statuses} onChange={v => set('statuses', v)} counts={counts} statuses={meta.statuses} />
           <select style={S.select} value={f.company} onChange={e => set('company', e.target.value)}>
             <option value="">All companies</option>
             {meta.companies.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
@@ -197,11 +208,15 @@ export default function ReportTab({ meta, onChanged }) {
                   <td style={{ ...S.td, textAlign: 'right', whiteSpace: 'nowrap' }}>{money(x.sub_total, x.currency)}</td>
                   <td style={{ ...S.td, textAlign: 'right', whiteSpace: 'nowrap' }}>{money(x.tax_total, x.currency)}</td>
                   <td style={{ ...S.td, textAlign: 'right', whiteSpace: 'nowrap', fontWeight: 600 }}>{money(x.total, x.currency)}</td>
-                  <td style={S.td} title={x.category_basis}>{x.category ? <><div>{x.category}</div><Tag tone={x.category_source === 'manual' ? 'green' : 'grey'}>{SOURCE_LABEL[x.category_source] || 'Suggested'}</Tag></> : <span style={{ color: '#B45309' }}>—</span>}</td>
+                  <td style={{ ...S.td, maxWidth: 200 }} title={[x.category_basis, x.zoho_category ? `In Zoho (similar bill ${x.zoho_category_ref}): ${x.zoho_category}` : ''].filter(Boolean).join('\n')}>
+                    {x.category ? <><div>{x.category}</div><Tag tone={x.category_source === 'manual' ? 'green' : x.category_source === 'zoho_bill' ? 'blue' : 'grey'}>{SOURCE_LABEL[x.category_source] || 'Suggested'}</Tag></> : <span style={{ color: '#B45309' }}>—</span>}
+                    {x.zoho_category && <div style={{ ...S.small, marginTop: 2 }}>Zoho: {x.zoho_category}</div>}
+                  </td>
                   <td style={{ ...S.td, maxWidth: 200 }} title={x.account_basis}>
                     {x.account ? <><div>{x.account}</div><Tag tone={x.account_source === 'manual' ? 'green' : x.account_source === 'mapping' ? 'blue' : 'grey'}>{SOURCE_LABEL[x.account_source] || ''}</Tag></> : <span style={{ color: '#B45309' }}>—</span>}
                   </td>
                   <td style={{ ...S.td, maxWidth: 260 }}>
+                    {x.not_bill_reason && <div style={{ color: '#5D6C7B', fontSize: '0.72rem' }} title={x.not_bill_reason}>{x.not_bill_reason}</div>}
                     {x.duplicate && <div style={{ color: '#9F1239', fontSize: '0.72rem' }}>⧉ {x.duplicate}</div>}
                     {x.blocks > 0 && <div style={{ color: '#B45309', fontSize: '0.72rem', display: 'flex', gap: 4 }} title={x.exceptions}><AlertTriangle size={12} style={{ flexShrink: 0, marginTop: 1 }} />{x.blocks} to resolve: {x.exceptions.split(' | ')[0]}</div>}
                     {!x.blocks && x.warns > 0 && <div style={{ color: '#5D6C7B', fontSize: '0.72rem' }} title={x.exceptions}>{x.warns} note(s)</div>}
@@ -228,6 +243,45 @@ export default function ReportTab({ meta, onChanged }) {
         <div style={S.notice}><Upload size={13} style={{ verticalAlign: -2 }} /> Bills appear here as they are collected. Use <b>Upload ERP Bills</b> for bills downloaded from the ERP, and <b>Team &amp; Mailboxes</b> to connect the finance mailboxes.</div>
       )}
       {open && <BillDrawer id={open} meta={meta} onClose={() => setOpen(null)} onSaved={() => { load(); onChanged?.(); }} onOpen={setOpen} />}
+    </div>
+  );
+}
+
+/** Status filter: tick one or several statuses; nothing ticked = all open bills (everything except Not a Bill) */
+function StatusFilter({ value, onChange, counts, statuses }) {
+  const [open, setOpen] = useState(false);
+  const box = useRef(null);
+  useEffect(() => {
+    if (!open) return undefined;
+    const close = e => { if (box.current && !box.current.contains(e.target)) setOpen(false); };
+    const esc = e => { if (e.key === 'Escape') setOpen(false); };
+    document.addEventListener('mousedown', close);
+    document.addEventListener('keydown', esc);
+    return () => { document.removeEventListener('mousedown', close); document.removeEventListener('keydown', esc); };
+  }, [open]);
+  const label = !value.length ? 'All open' : value.length <= 2 ? value.map(s => statuses[s]).join(', ') : `${value.length} statuses`;
+  const flip = s => onChange(value.includes(s) ? value.filter(x => x !== s) : STATUS_ORDER.filter(x => x === s || value.includes(x)));
+  return (
+    <div ref={box} style={{ position: 'relative' }}>
+      <button type="button" style={{ ...S.select, display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer', minWidth: 160, justifyContent: 'space-between' }}
+        aria-haspopup="true" aria-expanded={open} onClick={() => setOpen(o => !o)}>
+        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>Status: {label}</span><ChevronDown size={13} style={{ flexShrink: 0 }} />
+      </button>
+      {open && (
+        <div style={{ position: 'absolute', zIndex: 20, top: 'calc(100% + 4px)', left: 0, background: '#FFFFFF', border: '1px solid #DFE7E3', borderRadius: 8, boxShadow: '0 6px 18px rgba(0,0,0,0.08)', padding: '0.45rem 0.6rem', minWidth: 220 }}>
+          {STATUS_ORDER.map(s => (
+            <label key={s} style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '0.22rem 0', fontSize: '0.8rem', cursor: 'pointer' }}>
+              <input type="checkbox" checked={value.includes(s)} onChange={() => flip(s)} />
+              <span style={{ width: 8, height: 8, borderRadius: 4, background: STATUS_META[s].color, flexShrink: 0 }} />
+              <span style={{ flex: 1 }}>{statuses[s]}</span><span style={S.small}>{counts[s] || 0}</span>
+            </label>
+          ))}
+          <div style={{ display: 'flex', justifyContent: 'space-between', borderTop: '1px solid #F2F2F2', marginTop: 4, paddingTop: 6 }}>
+            <button type="button" style={S.ghost} onClick={() => onChange([])}>All open</button>
+            <button type="button" style={S.ghost} onClick={() => setOpen(false)}>Done</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
