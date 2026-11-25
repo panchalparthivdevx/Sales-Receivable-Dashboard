@@ -6,12 +6,15 @@ import DataFreshness from '../components/DataFreshness';
 import { formatINR } from '../utils/format';
 import Modal from '../components/Modal';
 import { VCS, FYToggle, QUARTER_MONTHS, QUARTER_LABELS } from './PurchaseDashboard';
+import RecurringComparisonReport from './RecurringComparisonReport';
 
 // ─── Recurring Exps. Reports — sub-module of Purchase & Payables ─────────────
-// Home of the recurring expense reports. The first one is the Month-wise & Branch-wise Recurring
-// Expense Report, moved here from the Purchase & Payables page (same data:
-// /api/purchase/charts/recurring-expense-report). Who can open it follows the
-// "Recurring Exps. Reports page" tick under Purchase & Payables in User Settings.
+// Home of the recurring expense reports:
+// • Month-wise & Branch-wise Recurring Expense Report, moved here from the Purchase & Payables page
+//   (same data: /api/purchase/charts/recurring-expense-report);
+// • Recurring Expense Comparison Report (RecurringComparisonReport.js): two periods with the change
+//   and the reason for it (/api/purchase/charts/recurring-expense-comparison).
+// Who can open the page follows the "Recurring Exps. Reports page" tick under Purchase & Payables in User Settings.
 
 // Fallback colours for an expense head without its own colour in HEAD_COLORS
 const COLORS = ['#3b82f6', '#8b5cf6', '#10b981', '#f59e0b', '#ef4444', '#06b6d4', '#84cc16', '#f97316'];
@@ -43,6 +46,16 @@ export default function RecurringExpReports() {
   const [recurHead,    setRecurHead]    = useState('all');
   const [recurFY,      setRecurFY]      = useState('current');
   const [recurQuarter, setRecurQuarter] = useState('all');
+  const [cmpReload,    setCmpReload]    = useState(0);     // bumped by Refresh: the comparison loads again
+
+  // Bill list pop-up (both reports): Note column only when some row is part of a bill or still an estimate
+  const openBills = (title, bills) => {
+    const rows = bills.map(b => ({
+      ...b,
+      note: [b.part != null ? `Part of bill (${b.part}%)` : '', b.est ? 'Estimate — exact figures loading' : ''].filter(Boolean).join(' · '),
+    }));
+    setModal({ title, rows, columns: billCols(rows.some(r => r.note)) });
+  };
 
   const loadRecur = useCallback((fy = 'current') => {
     setRecurLoading(true);
@@ -63,6 +76,7 @@ export default function RecurringExpReports() {
     try { await api.clearCache(); } catch (e) { console.error('cache clear', e); }
     setRefreshing(false);
     loadRecur(recurFY);
+    setCmpReload(n => n + 1);
   };
 
   return (
@@ -96,14 +110,11 @@ export default function RecurringExpReports() {
         onFYChange={fy => { setRecurFY(fy); loadRecur(fy); }}
         quarter={recurQuarter}
         onQuarterChange={setRecurQuarter}
-        onCellClick={(title, bills) => {
-          const rows = bills.map(b => ({
-            ...b,
-            note: [b.part != null ? `Part of bill (${b.part}%)` : '', b.est ? 'Estimate — exact figures loading' : ''].filter(Boolean).join(' · '),
-          }));
-          setModal({ title, rows, columns: billCols(rows.some(r => r.note)) });
-        }}
+        onCellClick={openBills}
       />
+
+      {/* ── Recurring Expense Comparison Report ─────────────────────────── */}
+      <RecurringComparisonReport headColors={HEAD_COLORS} reloadKey={cmpReload} onBillsClick={openBills} />
 
       {modal && <Modal title={modal.title} data={modal.rows} columns={modal.columns} totals wide onClose={() => setModal(null)} />}
 

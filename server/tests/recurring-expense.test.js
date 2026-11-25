@@ -111,7 +111,7 @@ test('a changed bill (new last-modified time) is re-queued and shown as an estim
     bills: [bill({ id: 'B5', date: '2026-08-01', total: 236, balance: 0, lmt: 'NEW', status: 'paid' })],
     details: { B5: det },
   });
-  assert.deepEqual(out.needDetail, [{ bill_id: 'B5', lmt: 'NEW' }]);
+  assert.deepEqual(out.needDetail, [{ bill_id: 'B5', lmt: 'NEW', mk: '2026-08' }]);
   const b = cellOf(out, 'hk_material', 'Amd_Binori B Square_3', '2026-08').bills[0];
   assert.equal(b.est, true);
   assert.equal(b.outstanding, 0);                      // balance from the (fresher) list
@@ -171,7 +171,7 @@ test('FY 2025-26: bills come from their details; a bill not read yet is pending,
   assert.deepEqual([c.bills[0].gst, c.bills[0].bill_amount, c.bills[0].paid_date], [180, 1180, '2025-06-01']);
   assert.equal(out.bills_pending, 1);
   assert.equal(out.bills_pending_basic, 700);
-  assert.deepEqual(out.needDetail, [{ bill_id: 'P2', lmt: null }]);
+  assert.deepEqual(out.needDetail, [{ bill_id: 'P2', lmt: null, mk: '2025-05', pending: true }]);
 });
 
 test('FY 2025-26: an open bill read over a week ago is read again', () => {

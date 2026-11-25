@@ -23,6 +23,8 @@
 //   and only counted (`excluded`).
 
 const path = require('path');
+const CMP = require('./recurring-comparison');
+const { slimItems } = CMP;
 
 const HEADS = [
   { key: 'hk_material', label: 'Housekeeping Material Expense', account_id: '1714732000000071386' },
@@ -98,6 +100,16 @@ function fyInfo(fyParam, today, currentFYTag) {
   const tag = currentFYTag();                       // e.g. '2026-27'
   const y = parseInt(tag.slice(0, 4), 10);
   return { tag, label: `FY ${tag}`, start: `${y}-04-01`, end: `${y + 1}-03-31`, lastMonth: today.slice(0, 7), current: true };
+}
+
+// The FY a month belongs to (same shape as fyInfo); used by the comparison report, whose periods can span two FYs
+function fyOfMonth(mk, today, currentFYTag) {
+  const [y, m] = mk.split('-').map(Number);
+  const sy = m >= 4 ? y : y - 1;
+  const tag = `${sy}-${String((sy + 1) % 100).padStart(2, '0')}`;
+  const current = tag === currentFYTag();
+  const end = `${sy + 1}-03-31`;
+  return { tag, label: `FY ${tag}`, start: `${sy}-04-01`, end, lastMonth: current ? today.slice(0, 7) : end.slice(0, 7), current };
 }
 
 function monthList(fy) {
@@ -185,7 +197,7 @@ function computeReport({ heads = HEADS, months, ledgers, list, details, payIdx, 
     } : null;
 
     if (!src) {                                          // FY 2025-26 bill whose detail is not read yet
-      needDetail.push({ bill_id: billId, lmt: null });
+      needDetail.push({ bill_id: billId, lmt: null, mk, pending: true });
       pendingBills++; pendingBasic += sumBasic;
       continue;
     }
@@ -202,7 +214,7 @@ function computeReport({ heads = HEADS, months, ledgers, list, details, payIdx, 
       else detFresh = !(det.bal > 0.5 && now - Date.parse(det.at || 0) > PAST_DETAIL_RECHECK_MS);
     }
     const useDetail = det && !exactFromList;
-    if (!exactFromList && !detFresh) needDetail.push({ bill_id: billId, lmt: src.lmt || null });
+    if (!exactFromList && !detFresh) needDetail.push({ bill_id: billId, lmt: src.lmt || null, mk });
     const est = !exactFromList && !detFresh;
     if (est) estimated++;
 
@@ -238,6 +250,7 @@ function computeReport({ heads = HEADS, months, ledgers, list, details, payIdx, 
       const cell = getCell(h, src.br || 'Unassigned', mk);
       cell.basic += basic; cell.bill += billAmt; cell.outstanding += outAmt;
       cell.bills.push({
+        bill_id: billId, vendor_id: src.vid || '',
         account_name: h.label, branch_name: src.br || 'Unassigned', vendor_name: src.vn || '',
         bill_number: src.bn || '', date: src.d || pb.date,
         basic: r2(basic), gst: r2(gst), tds: r2(tds), bill_amount: r2(billAmt),
@@ -282,12 +295,32 @@ function create(deps) {
   let storeP = null;
   const loadStore = () => (storeP = storeP || db.readJSON(STORE_KEY, STORE_FILE, null).then(v => v || {}));
   const saveStore = async () => db.writeJSON(STORE_KEY, STORE_FILE, await loadStore());
+  // Item lines of the bills (for the comparison report's reasons): one store per bill month, so a
+  // save writes ~100 KB rather than every bill of two years. Filled by the same fetch as the detail.
+  const ITEM_ACCTS = new Set(HEADS.map(h => h.account_id));
+  const itemStores = new Map();                       // 'YYYY-MM' → Promise<{ bill_id → slimItems }>
+  const itemsKey   = mk => `recur_bill_items_${mk}`;
+  const itemsFile  = mk => path.join(__dirname, `recur_bill_items_${mk}.json`);
+  const itemsMonth = mk => {
+    if (!itemStores.has(mk)) itemStores.set(mk, db.readJSON(itemsKey(mk), itemsFile(mk), null).then(v => v || {}));
+    return itemStores.get(mk);
+  };
+  const dirtyItems = new Set();
+  const saveItems = async () => {
+    for (const mk of [...dirtyItems]) { dirtyItems.delete(mk); await db.writeJSON(itemsKey(mk), itemsFile(mk), await itemsMonth(mk)); }
+  };
+
+  // Queue entry: { bill_id, lmt, mk, detail (keep the slim detail for the report's figures), items }
   const queue = new Map();
   let worker = null, detailBlockedUntil = 0;
 
   function queueDetails(items) {
     if (Date.now() < detailBlockedUntil) return null;
-    for (const it of items) if (!queue.has(it.bill_id)) queue.set(it.bill_id, it);
+    for (const it of items) {
+      const q = queue.get(it.bill_id);
+      if (q) { q.detail = q.detail || it.detail !== false; q.items = q.items || !!it.items; q.mk = q.mk || it.mk; q.lmt = q.lmt || it.lmt; }
+      else queue.set(it.bill_id, { ...it, detail: it.detail !== false });
+    }
     if (!queue.size) return worker;
     if (!worker) worker = drain().finally(() => { worker = null; });
     return worker;
@@ -295,7 +328,7 @@ function create(deps) {
 
   async function drain() {
     const store = await loadStore();
-    let unsaved = 0, blocked = false;
+    let unsaved = 0, itemsUnsaved = 0, blocked = false;
     try {
       while (queue.size && !blocked) {
         const batch = [...queue.values()].slice(0, 3);
@@ -303,19 +336,35 @@ function create(deps) {
         await Promise.all(batch.map(async b => {
           try {
             const bill = (await pacedGet(`/bills/${b.bill_id}`)).bill;
-            if (bill) { store[b.bill_id] = slimDetail(bill, b.lmt); unsaved++; }
+            if (bill) {
+              if (b.detail) { store[b.bill_id] = slimDetail(bill, b.lmt); unsaved++; }
+              // Item lines come free with every detail read
+              const mk = String(bill.date || b.mk || '').slice(0, 7);
+              if (/^\d{4}-\d{2}$/.test(mk)) {
+                (await itemsMonth(mk))[b.bill_id] = slimItems(bill, ITEM_ACCTS, b.lmt || bill.last_modified_time);
+                dirtyItems.add(mk); itemsUnsaved++;
+              }
+            }
           } catch (e) {
-            if (e.response?.status === 404) { store[b.bill_id] = { gone: true, lmt: b.lmt, at: new Date().toISOString() }; unsaved++; }
+            if (e.response?.status === 404) {
+              if (b.detail) { store[b.bill_id] = { gone: true, lmt: b.lmt, at: new Date().toISOString() }; unsaved++; }
+              if (b.mk) { (await itemsMonth(b.mk))[b.bill_id] = { gone: true, lmt: b.lmt, at: new Date().toISOString(), li: [] }; dirtyItems.add(b.mk); itemsUnsaved++; }
+            }
             else if (e.response?.status === 429 || /LIMIT/.test(e.message)) blocked = true;
             else console.warn(`[recurring] bill ${b.bill_id} detail failed:`, e.message);
           }
         }));
-        if (unsaved >= 50) { await saveStore(); unsaved = 0; onChange(); }
+        if (unsaved + itemsUnsaved >= 50) {
+          if (unsaved) await saveStore();
+          await saveItems();
+          unsaved = 0; itemsUnsaved = 0; onChange();
+        }
       }
     } finally {
       // Throttled: stop and retry in 10 minutes (the next report load queues what is still missing)
       if (blocked) { queue.clear(); detailBlockedUntil = Date.now() + 10 * 60e3; }
       if (unsaved) await saveStore();
+      if (dirtyItems.size) await saveItems();
       onChange();
     }
   }
@@ -368,11 +417,9 @@ function create(deps) {
     return { ledgers, oldest, missing };
   }
 
-  async function report(fyParam) {
-    const today = localDate(new Date());
-    const fy = fyInfo(fyParam, today, currentFYTag);
-    const months = monthList(fy);
-
+  // One FY's inputs: the ledgers (read first if missing, refreshed in the background when stale) and,
+  // for the current FY, the synced bill list and payment index
+  async function loadInputs(fy) {
     let L = await readLedgers(fy);
     const maxAge = fy.current ? LEDGER_MAX_AGE_MS.current : LEDGER_MAX_AGE_MS.past;
     if (L.missing) {
@@ -394,6 +441,14 @@ function create(deps) {
         payIdx = buildPayIndex(pays?.data || []);
       } catch (_) { payIdx = new Map(); }
     }
+    return { L, list, payIdx };
+  }
+
+  async function report(fyParam) {
+    const today = localDate(new Date());
+    const fy = fyInfo(fyParam, today, currentFYTag);
+    const months = monthList(fy);
+    const { L, list, payIdx } = await loadInputs(fy);
 
     const details = await loadStore();
     let out = computeReport({ months, ledgers: L.ledgers, list, details, payIdx, current: fy.current });
@@ -418,7 +473,115 @@ function create(deps) {
     };
   }
 
-  return { report, refreshLedgers: fyParam => refreshLedgers(fyInfo(fyParam, localDate(new Date()), currentFYTag)) };
+  // ── Recurring Expense Comparison Report ───────────────────────────────────────
+  // q = { curFrom, curTo, prevFrom, prevTo } ('YYYY-MM'). A "to" after this month is cut at this month
+  // (a running quarter / half year); the label still names the whole period.
+  async function compare(q) {
+    const today = localDate(new Date());
+    const maxMonth = today.slice(0, 7);
+    const bad = msg => Object.assign(new Error(msg), { status: 400 });
+    const MK = /^\d{4}-(0[1-9]|1[0-2])$/;
+    for (const k of ['curFrom', 'curTo', 'prevFrom', 'prevTo']) if (!MK.test(q[k] || '')) throw bad(`${k} must be YYYY-MM`);
+    for (const [f, t] of [[q.curFrom, q.curTo], [q.prevFrom, q.prevTo]]) {
+      if (f < CMP.MIN_MONTH) throw bad(`Months before ${CMP.monLabel(CMP.MIN_MONTH)} are not available`);
+      if (f > maxMonth) throw bad(`${CMP.monLabel(f)} has not started yet`);
+      if (t < f) throw bad('A period cannot end before it starts');
+      if (CMP.monthsBetween(f, t).length > 24) throw bad('A period can be at most 24 months');
+    }
+    const curLbl = CMP.periodLabel(q.curFrom, q.curTo), prevLbl = CMP.periodLabel(q.prevFrom, q.prevTo);
+    const curKeys  = CMP.monthsBetween(q.curFrom,  q.curTo  > maxMonth ? maxMonth : q.curTo);
+    const prevKeys = CMP.monthsBetween(q.prevFrom, q.prevTo > maxMonth ? maxMonth : q.prevTo);
+    const curRunning = q.curTo >= maxMonth;
+    const need = new Set([...curKeys, ...prevKeys]);
+
+    // The FYs those months belong to, each with its inputs
+    const parts = [];
+    for (const mk of [...need].sort()) {
+      const fy = fyOfMonth(mk, today, currentFYTag);
+      let p = parts.find(x => x.fy.tag === fy.tag);
+      if (!p) { p = { fy, months: [], ...(await loadInputs(fy)) }; parts.push(p); }
+      p.months.push({ key: mk, label: CMP.monLabel(mk) });
+    }
+    const headOrder = new Map(HEADS.map((h, i) => [h.key, i]));
+    const build = details => {
+      const merged = new Map(), needDetail = [], excluded = {};
+      let estimated = 0;
+      for (const p of parts) {
+        const out = computeReport({ months: p.months, ledgers: p.L.ledgers, list: p.list, details, payIdx: p.payIdx, current: p.fy.current });
+        for (const r of out.rows) {
+          const k = `${r.head_key}|||${r.branch}`;
+          if (merged.has(k)) Object.assign(merged.get(k).monthly, r.monthly);
+          else merged.set(k, { ...r, monthly: { ...r.monthly } });
+        }
+        needDetail.push(...out.needDetail);
+        estimated += out.details_pending;
+        for (const [k, e] of Object.entries(out.excluded)) {
+          const x = excluded[k] || (excluded[k] = { count: 0, amount: 0 });
+          x.count += e.count; x.amount = r2(x.amount + e.amount);
+        }
+      }
+      const rows = [...merged.values()].sort((a, b) => (headOrder.get(a.head_key) - headOrder.get(b.head_key)) || a.branch.localeCompare(b.branch));
+      return { rows, needDetail, estimated, excluded };
+    };
+    const lmtOf = (id, details) => {
+      for (const p of parts) { const b = p.list?.get(id); if (b) return b.last_modified_time || null; }
+      return details[id]?.lmt || null;
+    };
+    // Item lines of every bill in the two periods; missing or changed ones are queued
+    const collectItems = async (rows, details) => {
+      const items = {}, want = [];
+      for (const r of rows) for (const mk of need) for (const b of r.monthly[mk]?.bills || []) {
+        if (b.bill_id in items) continue;
+        const e = (await itemsMonth(mk))[b.bill_id];
+        const lmt = lmtOf(b.bill_id, details);
+        items[b.bill_id] = e || null;
+        if (!e || (lmt && e.lmt && e.lmt !== lmt)) want.push({ bill_id: b.bill_id, lmt, mk, items: true, detail: false });
+      }
+      for (const k of Object.keys(items)) if (!items[k]) delete items[k];
+      return { items, want };
+    };
+
+    let details = await loadStore();
+    let B = build(details);
+    let I = await collectItems(B.rows, details);
+    const toQueue = [...B.needDetail.map(n => ({ ...n, items: true })), ...I.want];
+    if (toQueue.length) {
+      // A few changed bills are read before answering; a big backlog fills in the background
+      const w = queueDetails(toQueue);
+      if (w && toQueue.length <= 30) {
+        await w;
+        details = await loadStore();
+        B = build(details);
+        I = await collectItems(B.rows, details);
+      }
+    }
+
+    const rows = CMP.computeComparison({
+      heads: HEADS, rows: B.rows, curKeys, prevKeys, items: I.items,
+      curLabel: curLbl.short, prevLabel: prevLbl.short, curRunning,
+    });
+    const pendingIn = keys => B.needDetail.filter(n => n.pending && keys.includes(n.mk)).length;
+    return {
+      cur:  { from: q.curFrom,  to: q.curTo,  months: curKeys,  label: curLbl.short,  long: curLbl.long,  running: curRunning },
+      prev: { from: q.prevFrom, to: q.prevTo, months: prevKeys, label: prevLbl.short, long: prevLbl.long },
+      heads: HEADS.map(h => ({ key: h.key, label: h.label })),
+      rows,
+      all_branches: ['All Branches', ...[...new Set(rows.map(r => r.branch))].sort()],
+      details_pending: B.estimated,
+      bills_pending: { cur: pendingIn(curKeys), prev: pendingIn(prevKeys) },
+      items_pending: rows.reduce((s, r) => s + r.items_pending, 0),
+      items_missing: I.want.length,
+      excluded: B.excluded,
+      ledger: parts.map(p => {
+        const st = ledgerState[p.fy.tag] || {};
+        return { fy: p.fy.label, fetched_at: p.L.oldest, missing: p.L.missing, refreshing: !!st.running, error: st.error || null };
+      }),
+      detail_queue: queue.size,
+      on_vercel: isVercel || undefined,
+    };
+  }
+
+  return { report, compare, refreshLedgers: fyParam => refreshLedgers(fyInfo(fyParam, localDate(new Date()), currentFYTag)) };
 }
 
-module.exports = { create, computeReport, slimDetail, buildPayIndex, paidDateFromIndex, isStdGst, monthList, fyInfo, HEADS };
+module.exports = { create, computeReport, slimDetail, buildPayIndex, paidDateFromIndex, isStdGst, monthList, fyInfo, fyOfMonth, HEADS };

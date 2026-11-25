@@ -97,6 +97,8 @@ export const api = {
   purApAging:          () => axios.get(`${BASE}/purchase/kpi/ap-aging`).then(r => r.data),
   purRentMonthwise:         (fy) => axios.get(`${BASE}/purchase/charts/rent-monthwise${fy ? `?fy=${fy}` : ''}`, { timeout: 600000 }).then(r => r.data),
   purRecurExpenseReport:    (fy) => axios.get(`${BASE}/purchase/charts/recurring-expense-report${fy ? `?fy=${fy}` : ''}`, { timeout: 300000 }).then(r => r.data),
+  // { cur_from, cur_to, prev_from, prev_to } as YYYY-MM
+  purRecurExpenseComparison: (params) => axios.get(`${BASE}/purchase/charts/recurring-expense-comparison`, { params, timeout: 300000 }).then(r => r.data),
   purVendorCategoryReport: ()  => axios.get(`${BASE}/purchase/charts/vendor-category-report`).then(r => r.data),
   purPOReport:             ()  => axios.get(`${BASE}/purchase/po-report`).then(r => r.data),
   purMSMEVendors:          ()  => axios.get(`${BASE}/purchase/msme-vendors`).then(r => r.data),

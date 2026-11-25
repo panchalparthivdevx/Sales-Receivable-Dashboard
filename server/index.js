@@ -3800,6 +3800,30 @@ app.get('/api/purchase/charts/recurring-expense-report', async (req, res) => {
   }
 });
 
+// Recurring Expense Comparison Report: two periods (month / quarter / half year / custom months) per
+// expense head × branch with the change and a reason worked out from the bills and their item lines
+// (server/recurring-comparison.js). ?cur_from=&cur_to=&prev_from=&prev_to= as YYYY-MM.
+app.get('/api/purchase/charts/recurring-expense-comparison', async (req, res) => {
+  const q = {
+    curFrom: String(req.query.cur_from || ''), curTo: String(req.query.cur_to || ''),
+    prevFrom: String(req.query.prev_from || ''), prevTo: String(req.query.prev_to || ''),
+  };
+  const cacheKey = `pur-recur-exp-cmp-v1-${q.curFrom}-${q.curTo}-${q.prevFrom}-${q.prevTo}`;
+  const hit = cache.get(cacheKey);
+  if (hit) return res.json(hit);
+  try {
+    const result = await recurringExpense.compare(q);
+    const busy = result.details_pending || result.bills_pending.cur || result.bills_pending.prev || result.items_missing
+      || result.ledger.some(l => l.refreshing || l.missing);
+    cache.set(cacheKey, result, busy ? 60 : 600);
+    res.json(result);
+  } catch (e) {
+    if (e.status === 400) return res.status(400).json({ error: e.message });
+    console.error('[recurring-expense-comparison]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ─── Purchase KPI: AP Aging ───────────────────────────────────────────────────
 app.get('/api/purchase/kpi/ap-aging', cached('pur-ap-aging', 60, async () => {
   const [openResult, overdueResult] = await Promise.all([
