@@ -89,6 +89,8 @@ export const t = {
   removeGroup:   (entity, id) => axios.post(`${B}/clients/remove`, { entity, id }).then(d),
   noCustomer:    (entity, tan, on, note) => axios.post(`${B}/clients/no-customer`, { entity, tan, on, note }).then(d),
   reject:        (entity, customer_id, tan, on = true, name = '') => axios.post(`${B}/clients/reject`, { entity, customer_id, tan, on, name }).then(d),
+  deductors:     entity    => axios.get(`${B}/clients/deductors`, { params: { entity } }).then(d),
+  journalDeductor: body    => axios.post(`${B}/clients/journal-deductor`, body, { timeout: 180000 }).then(d),
 
   decide:        body      => axios.post(`${B}/review/decision`, body, { timeout: 180000 }).then(d),
   attach:        form      => axios.post(`${B}/review/attachment`, form, { timeout: 300000 }).then(d),

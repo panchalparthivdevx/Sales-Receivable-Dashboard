@@ -29,12 +29,13 @@ const ML       = require('./lib/mail');
 const T        = require('./lib/text');
 
 const router = express.Router();
-const IS_VERCEL = !!process.env.VERCEL;
+let IS_VERCEL = !!process.env.VERCEL;   // tests may switch on the Vercel behaviour through init({ vercel: true })
 
 // ── Wiring (index.js calls init with the synced-data reader; tests inject fakes) ──
 let ctx = null;
 let usersOf = loadUsers;
 router.init = (deps = {}) => {
+  if (deps.vercel !== undefined) IS_VERCEL = !!deps.vercel;
   if (!deps.files) files.init();
   if (deps.loadUsers) usersOf = deps.loadUsers;
   const zc = deps.zc || ZC.create({ zoho: deps.zoho });
@@ -259,28 +260,62 @@ router.post('/config/team/:id/disconnect', gate(), wrap(async (req, res) => {
 
 // ── Vercel time limit ─────────────────────────────────────────────────────────
 // Vercel ends every request at maxDuration (300 s, vercel.json) and then answers with its own error.
-// A request therefore collects mail for up to COLLECT_MS, waits for the reading only until ANSWER_MS and
-// then answers; reading carries on in the background until Vercel stops it. What is left — emails not yet
-// reached, bills not yet read — is picked up by the next check or upload. The office PC has no limit.
-const VERCEL_LIMIT_MS = 300000, COLLECT_MS = 150000, ANSWER_MS = 240000;
-const leftovers = () => (IS_VERCEL ? need().pipeline.resumeStale(VERCEL_LIMIT_MS + 15000) : 0);
+// So on Vercel a request collects mail for up to COLLECT_MS. It then reads: first its own new bills, then
+// bills that earlier requests left unread. It answers by ANSWER_MS. Reading carries on in the background,
+// and no bill is started after WORK_MS minus a margin. Whatever is left is read by the next call: the
+// scheduler (vercel.json, every 5 minutes: /api/cron/bill-booking), a check or an upload.
+// The office PC has no limit and reads everything in its own process.
+const VERCEL_LIMIT_MS = 300000, COLLECT_MS = 150000, ANSWER_MS = 240000, WORK_MS = 285000;
+const STALE_MS = VERCEL_LIMIT_MS + 15000;   // untouched this long → no request is reading it any more
+const readers = () => (EX.claudeEnabled() ? 3 : 1);   // Claude waits on the network, OCR uses the processor
+
+/** Vercel: read until the answer is due, keep reading in the background → bills still waiting to be read */
 async function settleReading(started) {
   if (!IS_VERCEL) return 0;
-  const done = background(need().pipeline.idle());
+  const { pipeline } = need();
+  const work = (async () => {
+    await pipeline.idle();
+    await pipeline.readStale({ staleMs: STALE_MS, until: started + WORK_MS, workers: readers() });
+  })().catch(e => console.error('[bill-booking] reading:', e.message));
+  background(work);
   const left = started + ANSWER_MS - Date.now();
   let timer = null;
-  if (left > 0) await Promise.race([done, new Promise(r => { timer = setTimeout(r, left); })]);
+  if (left > 0) await Promise.race([work, new Promise(r => { timer = setTimeout(r, left); })]);
   clearTimeout(timer);
-  return need().pipeline.pending();
+  return pipeline.waitingCount();
 }
+
+/**
+ * Vercel's scheduler (every 5 minutes): checks the mailboxes when poll_minutes have passed since the last
+ * check (scheduled or by hand), then reads waiting bills until shortly before the time limit.
+ */
+router.cronTick = async () => {
+  const started = Date.now();
+  const cfg = await cfgNow();
+  const mailDoc = (await store.snapshot()).doc('bb_mail') || {};
+  const last = Math.max(0, ...[mailDoc.last_auto_poll, ...Object.values(mailDoc.cursors || {}).map(c => c.last_poll)].filter(Boolean).map(Date.parse).filter(Number.isFinite));
+  const connected = cfg.team.some(m => m.active && m.connection?.status === 'connected');
+  let mail = null;
+  if (connected && started - last >= cfg.settings.poll_minutes * 60000) {
+    await store.tx(async t => { t.setDoc('bb_mail', { ...(t.doc('bb_mail') || {}), last_auto_poll: new Date(started).toISOString() }); });
+    try {
+      const results = await need().mail.pollAll({ by: 'schedule', deadline: started + COLLECT_MS / 2 });
+      mail = { mailboxes: results.length, new_bills: results.reduce((s, r) => s + r.ingested, 0), more: results.some(r => r.more), errors: results.filter(r => r.error).length };
+    } catch (e) { mail = { error: e.message }; console.error('[bill-booking] scheduled mailbox check:', e.message); }
+  }
+  const waiting = await settleReading(started);
+  return { ok: true, mail, waiting };
+};
+router.cron = async (req, res) => {
+  try { res.json(await router.cronTick()); } catch (e) { console.error('[bill-booking] cron:', e.message); res.status(500).json({ ok: false, error: e.message }); }
+};
 
 // ── Mail ──────────────────────────────────────────────────────────────────────
 router.post('/mail/poll', gate('review'), wrap(async (req, res) => {
   const started = Date.now();
-  const resumed = await leftovers();
   const results = await need().mail.pollAll({ memberId: req.body?.member_id || null, by: byName(req), deadline: IS_VERCEL ? started + COLLECT_MS : 0 });
-  const reading = await settleReading(started);
-  res.json({ results, reading, resumed });
+  const waiting = await settleReading(started);
+  res.json({ results, waiting });
 }));
 
 router.get('/mail/log', gate(), wrap(async (req, res) => {
@@ -308,7 +343,6 @@ router.post('/upload', gate('review'), (req, res, next) => upload.array('files',
   if (memberId && !cfg.team.some(m => m.id === memberId)) return bad(res, 400, 'Unknown team member');
   if (!req.files?.length) return bad(res, 400, 'Choose at least one bill file');
   const started = Date.now();
-  await leftovers();
   const out = [];
   for (const f of req.files) {
     try {
@@ -320,8 +354,8 @@ router.post('/upload', gate('review'), (req, res, next) => upload.array('files',
       out.push({ name: files.fixName(f.originalname), id: r.id });
     } catch (e) { out.push({ name: files.fixName(f.originalname), error: e.message }); }
   }
-  const reading = await settleReading(started);
-  res.json({ files: out, reading });
+  const waiting = await settleReading(started);
+  res.json({ files: out, waiting });
 }));
 
 // ── Report ────────────────────────────────────────────────────────────────────

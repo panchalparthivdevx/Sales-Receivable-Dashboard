@@ -124,6 +124,7 @@ const PUBLIC_API = new Set([
   'GET /api/cron/pl',
   'GET /api/cron/gstr2b',
   'GET /api/cron/gstr2b-recheck',
+  'GET /api/cron/bill-booking',
   // Mailbox sign-in returns here from Microsoft / Google; it checks its own signed state
   'GET /api/bill-booking/oauth/callback',
 ]);
@@ -16283,6 +16284,8 @@ billBooking.init({
   },
 });
 app.use('/api/bill-booking', billBooking);
+// Online, Vercel's scheduler (vercel.json, every 5 minutes) checks the mailboxes and reads waiting bills; same Bearer CRON_SECRET as the other cron routes
+app.get('/api/cron/bill-booking', cronAuth, billBooking.cron);
 
 // ─── GSTR-2B Reco (Zoho read-only sync + GSTR-2B statements → reconciliation) ─
 // Self-contained module — see server/gstr2b/README.md and DESIGN.md. It only READS from Zoho Books and keeps its own

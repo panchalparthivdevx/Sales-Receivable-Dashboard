@@ -38,7 +38,8 @@ The Zoho client has GET only (`server/gstr2b/lib/zohoRead.js`). The fields below
 | **Control amount** | `GET /chartofaccounts/transactions?account_id&date_start&date_end`, per mapped TDS Receivable ledger. This report **ignores `date.start`/`date.end`** (and `from_date`/`to_date`) and then returns the whole ledger history; only `date_start`/`date_end` apply a range (verified live). Every answer is checked, and postings outside the window stop the sync. | `categorized_transaction_id`, `transaction_type` (invoice / customer_payment / journal / creditnote …), `transaction_id` (**empty for customer_payment**), `transaction_date`, `customer_id`, `payee`, `description`, `entry_number` (the invoice number on invoice and payment rows), `debit_amount`, `credit_amount` |
 | Invoice | `GET /invoices/{id}` | `sub_total` (basic), `tax_total` (GST), `total` (net of TDS), `tds_amount`, `tds_percent`, `tds_summary[].tds_name`, and the client's TAN when kept in a custom field (DevX: `cf_organization_tan_number`) |
 | Payment | `GET /customerpayments/{id}` | `invoices[].tax_amount_withheld`, `amount_applied`, `total`. The payment behind a posting is found by customer, date and invoice number. The dashboard's central `customer_payments_fy` cache is used where it covers the month. |
-| Journal | `GET /journals/{id}` | `line_items[].customer_id`. The TDS line often has no customer, but the receivable line does. The notes and reference supply invoice numbers. |
+| Journal | `GET /journals/{id}` | `line_items[].customer_id`. The TDS line often has no customer, but the receivable line does. The notes and reference supply invoice numbers, a TAN or the deductor's name. |
+| Invoice named in a journal | `GET /invoices?invoice_number=…`, then `GET /invoices/{id}` | For numbers the module does not know yet — DevX numbers last year's invoices `25-26/UP/00024`, and the central lists hold only this year's, the last 12 months' paid and the unpaid ones. Only an answer with exactly that number counts. A number Zoho does not know is remembered and asked again only by a **full** sync. At most 200 look-ups per sync run. Not yet tried on live Zoho. |
 
 How postings become Zoho entries (`lib/booksModel.js`):
 
@@ -46,7 +47,13 @@ How postings become Zoho entries (`lib/booksModel.js`):
 - **Journal lines:**
   - Lines on mapped ledgers are netted per customer and section.
   - A journal that only moves TDS between the entity's own TDS ledgers nets to zero. It is listed as a transfer and not counted.
-  - A journal whose customer cannot be identified is **unallocated** and shown separately.
+  - A journal without a customer still gets a **client** (25 Nov 2026, `lib/clients.js`) — TDS booked by journal for a bank's fixed deposit, interest on a loan given, or a client the journal does not name as a customer. In this order:
+    1. the deductor a reviewer chose for the journal (item → "Choose the deductor"; "Use the Reference number / Notes again" undoes it);
+    2. the TAN on the invoice(s) its Reference number / Notes name (last year's invoices too, see above);
+    3. a TAN written in the Reference number / Notes;
+    4. the name of a Form 26AS deductor (or a client group, or a Zoho customer with one known TAN) written there: all the name's words, the name as a phrase ("Bank of India" — and "State Bank of India" wins over it when that is written), or its initials ("SBI"); when no name fits fully, a distinctive word only one name has ("Kotak"). Legal words (Pvt, Ltd …) are ignored; generic words (Bank, Services …) never identify on their own; narration words (TDS, FD …) are never initials.
+    Two equally good fits for different clients identify nothing: the item lists them with "It is …" buttons. A TAN marked "no Zoho customer" (a bank) is used too. Transactions shows under the client how it was found ("Journal: found from "ZETA BANK"", "— check" for initials or a single word, "deductor chosen by …").
+  - Only a journal none of this identifies is **unallocated** and shown separately; its reason says so (dates in the narration are no longer called "references that are not Zoho invoices").
 - **Comparable base:**
   - TDS booked on an invoice uses the invoice basic value.
   - A payment uses the share of the invoice it settles: (applied + TDS) ÷ gross.
@@ -221,7 +228,7 @@ Admins can load **demo data** (Settings & audit) to see every case first. It is 
 
 ## Tests
 
-`npm run test:tds26as` (51 tests):
+`npm run test:tds26as` (56 tests):
 
 - parser: text, Excel, CSV, PDF, protected PDF, protected ZIP
 - clients matched on the TAN (`tests/tanmatch.test.js`, synthetic): one TAN under three Zoho customers with only one mapped, one TAN under two customers with nothing mapped, a mistyped invoice TAN, another client's TAN on an invoice, a ruled-out pair, a name suggestion joining two TANs, order independence
@@ -229,6 +236,7 @@ Admins can load **demo data** (Settings & audit) to see every case first. It is 
 - every acceptance case on the demo scenario
 - sync on a fake Zoho with the live response shapes, the report pacing, the block handling and the stored lock
 - the same amount several times in one quarter, paired in date order (`tests/equalamounts.test.js`, synthetic)
+- journals without a customer (`tests/journals.test.js`, synthetic): deductor from a name, initials, a phrase, a TAN, an invoice reference, a "no Zoho customer" TAN; ambiguous and empty narrations; the reviewer's choice and its undo; name-scoring edge cases; the routes (rights, unknown journal, journal with a customer, audit); the sync's look-up of unknown invoice numbers (once; misses only on a full sync)
 - period-end timing differences (`tests/timing.test.js`, synthetic): the list (clear / for a check / same quarter), carried forward together, settled in the later quarter, one matched row when both dates are in view (bridge and totals tie), the Zoho side, and the routes (rights, stale page, audit)
 - the HTTP routes: rights, entity limits, upload, review, export, audit; Client totals (rows = the Transactions list per client, whole-client status with remarks, stale page refused, carry-forward items kept, clear, export, audit)
 

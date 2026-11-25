@@ -52,7 +52,13 @@ The Zoho refresh token must include `ZohoBooks.bills.CREATE`. Settings → **Che
 - **Vercel:** Neon `kv_store` (keys `bb_*`) and private Blob storage under `bill-booking/`.
 - **Mailbox tokens:** AES-256-GCM in `bb_secrets`. They are never returned by any route or written to logs.
 - **Mail access:** read-only. Nothing is moved, marked or sent.
-- **Mailbox checks:** every `poll_minutes`, and Zoho draft status every 30 minutes, on the office PC only. On Vercel, use "Check mailboxes now".
+- **Mailbox checks:** every `poll_minutes`. Zoho draft status is checked every 30 minutes on the office PC; online, use "Refresh Zoho status".
+- **Reading online (Vercel):** Vercel ends every request after 300 s, so the work is split up:
+  - `/api/cron/bill-booking` runs every 5 minutes (`vercel.json`, Bearer `CRON_SECRET`). It checks the mailboxes once `poll_minutes` have passed, then reads waiting bills until shortly before the limit.
+  - "Check mailboxes now" and uploads also read until they answer.
+  - Bills are taken one at a time (three at a time with Claude): the fewest tries first, then the oldest. Each is leased so two calls never read the same bill.
+  - A bill not finished after 3 tries becomes **Failed** with the reason, so it cannot hold up the others.
+  - OCR has a 120 s limit per bill.
 
 ## Tests
 

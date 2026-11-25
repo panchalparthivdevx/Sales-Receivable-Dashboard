@@ -38,10 +38,17 @@ function zBrief(z, org) {
 const cBrief = c => ({ key: c.key, deductor: c.deductor, tan: c.tan, section: c.section, section_raw: c.section_raw, txn_date: c.txn_date, quarter: c.txn_date ? PER.quarterOf(c.txn_date) : '', booking_date: c.booking_date,
   status: c.status, remarks: c.remarks, amount_paid: c.amount_paid, deducted: c.deducted, deposited: c.deposited, src: c.src, stmt: c.stmt, fy: c.fy });
 
+/** How the client of a journal without a customer was found (lib/clients: reviewer's choice, invoice TAN, TAN / name in the notes), or null */
+function clientFrom(d, z) {
+  const e = d.clients && d.clients.entryInfo ? d.clients.entryInfo.get(z.key) : null;
+  if (!e || !/^journal_/.test(e.basis)) return null;
+  return { basis: e.basis, tans: e.tans || [], name: e.name || '', matched_name: e.matched_name || '', words: e.words || [], by: e.by || '', at: e.at || '', note: e.note || '', candidates: e.candidates || [] };
+}
+
 function unitView(u, d, mp, org) {
   const zs = u.zoho.map(k => mp.zBy.get(k)).filter(Boolean), cs = u.credits.map(k => mp.cBy.get(k)).filter(Boolean);
   return { ...u, method_label: METHOD[u.method] || u.method, status_label: STATUS[u.status], final_label: u.final_status ? STATUS[u.final_status] : '', effective_label: STATUS[u.effective],
-    zoho_lines: zs.map(z => zBrief(z, org)), credit_lines: cs.map(cBrief) };
+    zoho_lines: zs.map(z => ({ ...zBrief(z, org), client_from: clientFrom(d, z) })), credit_lines: cs.map(cBrief) };
 }
 
 /** The comparison table for one unit (Zoho | 26AS | calculated) */

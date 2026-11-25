@@ -20,6 +20,13 @@ export default function TransactionsTab({ meta, params, stamp, drill, clearDrill
   const zRef = u => u.zoho_lines.map(z => `${z.type_label} ${z.number || ''}`.trim()).join(' + ');
   // the Zoho customer(s) behind a client's entries, shown when they differ from the client's name (branches sharing one TAN)
   const zCust = u => [...new Set(u.zoho_lines.map(z => z.customer).filter(Boolean))].filter(n => n !== u.client).join(', ');
+  // a journal without a customer whose deductor came from its Reference number / Notes, or from a reviewer
+  const jFrom = u => {
+    const f = (u.zoho_lines.find(z => z.client_from && z.client_from.tans.length) || {}).client_from;
+    if (!f) return '';
+    return f.basis === 'journal_manual' ? `Journal: deductor chosen by ${f.by || 'a reviewer'}` : f.basis === 'journal_invoice_tan' ? 'Journal: TAN of the invoice it names'
+      : f.basis === 'journal_tan' ? 'Journal: TAN written in it' : `Journal: found from "${(f.words || []).join(' ')}"${f.basis === 'journal_name' ? '' : ' — check'}`;
+  };
   return (
     <div>
       <Msg error={err} onClose={() => setErr('')} />
@@ -50,7 +57,7 @@ export default function TransactionsTab({ meta, params, stamp, drill, clearDrill
                   const basic = u.zoho_lines.length && u.zoho_lines.every(z => z.base && z.base.comparable != null) ? u.zoho_lines.reduce((a, z) => a + z.base.comparable, 0) : null;
                   return (
                     <tr key={u.id} style={{ cursor: 'pointer' }} onClick={() => setOpen(u.id)}>
-                      <td style={S.td}><div style={{ fontWeight: 600 }}>{u.client || '—'}</div><div style={S.small}>{u.tans.join(', ')}</div>{zCust(u) && <div style={S.small} title="The Zoho customer the entry is booked under (one client can be several Zoho customers with the same TAN)">Zoho: {zCust(u)}</div>}</td>
+                      <td style={S.td}><div style={{ fontWeight: 600 }}>{u.client || '—'}</div><div style={S.small}>{u.tans.join(', ')}</div>{zCust(u) && <div style={S.small} title="The Zoho customer the entry is booked under (one client can be several Zoho customers with the same TAN)">Zoho: {zCust(u)}</div>}{jFrom(u) && <div style={S.small} title="The journal has no Zoho customer; its deductor was found from its Reference number / Notes, or chosen by a reviewer (open the item to see or change it)">{jFrom(u)}</div>}</td>
                       <td style={{ ...S.td, fontSize: '0.72rem' }}>{zRef(u) || <span style={S.small}>—</span>}{u.zoho_lines.some(z => z.invoice_no && z.type !== 'invoice') && <div style={S.small}>inv {u.zoho_lines.map(z => z.invoice_no).filter(Boolean).join(', ')}</div>}</td>
                       <td style={{ ...S.td, fontSize: '0.72rem' }}>{u.zoho_lines.length ? <>posted {u.zoho_lines.map(z => dt(z.date)).filter((v, i, a) => a.indexOf(v) === i).join(', ')}{u.zoho_lines.some(z => z.invoice_date && z.invoice_date !== z.date) && <div style={S.small}>invoice {u.zoho_lines.map(z => dt(z.invoice_date)).join(', ')}</div>}{u.zoho_lines.some(z => z.payment) && <div style={S.small}>payment {u.zoho_lines.filter(z => z.payment).map(z => dt(z.payment.date)).join(', ')}</div>}</> : '—'}</td>
                       <td style={{ ...S.td, fontSize: '0.72rem' }}>{u.credit_lines.length ? u.credit_lines.map(c => <div key={c.key}>{dt(c.txn_date)} · {c.section_raw} · {c.status}{u.credit_lines.length === 1 && <div style={S.small}>{c.deductor}</div>}</div>) : u.evidence.length ? <span style={{ color: '#B45309' }}>other period: {u.evidence.map(e => dt(e.txn_date || e.date)).join(', ')}</span> : '—'}</td>

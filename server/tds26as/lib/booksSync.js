@@ -13,6 +13,10 @@
  *               and the client's TAN when the organisation keeps it in a custom field (DevX: cf_organization_tan_number)
  *   payments    GET /customerpayments/{id}: invoices[].tax_amount_withheld / amount_applied — the allocation of the TDS to invoices
  *   journals    GET /journals/{id}: line_items[].customer_id (the TDS line often has none; the receivable line does), notes, reference
+ *   invoice numbers a journal names in its Reference number / Notes that are not known yet (DevX: last year's invoices, numbered
+ *               "25-26/UP/00024" — the central lists hold only this year's, the last 12 months' paid and the unpaid ones):
+ *               GET /invoices?invoice_number=… (the answer is checked for the exact number), then GET /invoices/{id}. A number Zoho does
+ *               not know is remembered and asked again only by a full sync.
  * The dashboard's central sync data (customer payments, invoices of the current year) is used where it exists, so fewer calls are made.
  */
 
@@ -21,6 +25,9 @@
 const store = require('./store');
 const PER = require('./periods');
 const { toPaise, todayIST, sleep } = require('./util');
+const { refsIn } = require('./booksModel');
+
+const MAX_REF_LOOKUPS = 200;     // invoice numbers looked up by number in one sync run
 
 const trimRow = (t, acc) => ({
   id: String(t.categorized_transaction_id || `${t.transaction_id}|${t.transaction_date}|${t.debit_amount}|${t.credit_amount}|${t.entry_number}`),
@@ -183,6 +190,19 @@ function create({ zr, cfgNow, readSynced = async () => null, log = console }) {
         if (!(await take('invoices', '/invoices', 'invoice', inv => trimInvoice(inv, entity.tan_field), putDocs('invoices')))) return result(true);
       }
       if (!(await take('journals', '/journals', 'journal', trimJournal, putDocs('journals')))) return result(true);
+      // 3. invoice numbers the journals name but that are not known yet: looked up by number, then read in detail (customer, TAN, base)
+      if (!q._refs_checked) { const r = await refQueue(entity, st.run); q.refs = r.lookup; for (const id of r.read) if (!q.invoices.includes(id)) q.invoices.push(id); q._refs_checked = true; await save(); }
+      while ((q.refs || []).length) {
+        if (timeLeft() < 8000) { await save(); return result(true); }
+        const no = q.refs[0];
+        let hit = null, asked = true;
+        try { const res = await get('/invoices', { invoice_number: no, filter_by: 'Status.All' }); hit = ((res && res.invoices) || []).find(i => String(i.invoice_number || '').toUpperCase() === no) || null; }
+        catch (e) { if (e.stopped || e.limit) throw e; asked = false; st.run.errors.push(`invoice number ${no}: ${zr.errText(e)}`.slice(0, 300)); }
+        if (asked) await store.update(docsKey(entity.id), EMPTY_DOCS, d => { d.refs = d.refs || {}; d.refs[no] = { at: new Date().toISOString(), id: hit ? String(hit.invoice_id) : '' }; });
+        if (hit && !q.invoices.includes(String(hit.invoice_id))) q.invoices.push(String(hit.invoice_id));
+        q.refs.shift(); await save();
+      }
+      if (!(await take('invoices', '/invoices', 'invoice', inv => trimInvoice(inv, entity.tan_field), putDocs('invoices')))) return result(true);
 
       st.last_ok_at = new Date().toISOString();
       st.last_period = { from: st.run.from, to: st.run.to, mode: st.run.mode };
@@ -209,7 +229,7 @@ function create({ zr, cfgNow, readSynced = async () => null, log = console }) {
     function result(more) {
       const r = st.run;
       return { more, calls: calls.n, phase: r ? r.phase : 'done', months_left: r ? r.months_todo.length : 0, months_done: r ? r.months_done.length : 0,
-        details_left: r && r.details ? r.details.invoices.length + r.details.payments.length + r.details.journals.length : 0, last_ok_at: st.last_ok_at || null, error: st.last_error || null };
+        details_left: r && r.details ? r.details.invoices.length + r.details.payments.length + r.details.journals.length + (r.details.refs || []).length : 0, last_ok_at: st.last_ok_at || null, error: st.last_error || null };
     }
   }
 
@@ -277,6 +297,34 @@ function create({ zr, cfgNow, readSynced = async () => null, log = console }) {
       if (!inv && r.no) { const c = (centralInv ? centralInv.data : []).find(i => String(i.invoice_number).toUpperCase() === r.no.toUpperCase()); if (c && !d.invoices[c.invoice_id]) invoices.add(String(c.invoice_id)); }
     }
     return { invoices: [...invoices], payments: [...payments], journals: [...journals] };
+  }
+
+  /** Invoice numbers named in the run's journals (Reference number / Notes) that are not known: read in detail when a central list has
+   *  the number, else looked up by number — once; a full sync asks again for the numbers Zoho did not know */
+  async function refQueue(entity, run) {
+    const d = await docs(entity.id);
+    const full = run.mode === 'full';
+    const rows = (await ledgerRows(entity.id)).filter(r => r.type === 'journal' && r.tid && r.date >= run.from && r.date <= run.to);
+    const lists = {};
+    for (const name of ['invoices_fy', 'invoices_paid_12mo', 'invoices_unpaid']) {
+      const c = await centralFor(entity, name);
+      for (const i of (c ? c.data : [])) { const n = String(i.invoice_number || '').toUpperCase(); if (n && !lists[n]) lists[n] = { id: String(i.invoice_id), fy: name === 'invoices_fy' }; }
+    }
+    const wanted = new Set();
+    for (const tid of new Set(rows.map(r => r.tid))) {
+      const j = d.journals[tid];
+      const text = j ? `${j.notes} ${j.ref}` : rows.filter(r => r.tid === tid).map(r => `${r.desc} ${r.ref}`).join(' ');
+      for (const no of refsIn(text, d.invno || {}).other) wanted.add(no);
+    }
+    const read = new Set(), lookup = [];
+    for (const no of wanted) {
+      const l = lists[no], seen = (d.refs || {})[no];
+      if (l) { if (!l.fy && !d.invoices[l.id]) read.add(l.id); continue; }      // this year's list is used by the model as it is
+      if (seen && seen.id) { if (!d.invoices[seen.id]) read.add(seen.id); continue; }
+      if (seen && !full) continue;
+      lookup.push(no);
+    }
+    return { read: [...read], lookup: lookup.sort().slice(0, MAX_REF_LOOKUPS) };
   }
 
   async function cancel(entityId) {

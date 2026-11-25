@@ -9,7 +9,9 @@
  *   - journal: the lines on the mapped ledgers are netted per customer and section. A journal whose lines on mapped ledgers net to zero
  *     for a customer only moves TDS between the entity's own TDS ledgers (e.g. into a prior-year ledger) — listed as a transfer, not
  *     counted. The customer of a journal line without one comes from the journal's other lines (the receivable line), else from the
- *     invoice numbers in its notes; when neither identifies it the entry is UNALLOCATED and shown separately.
+ *     invoice numbers in its Reference number / Notes (last year's invoices too: the sync looks unknown numbers up in Zoho). Without a
+ *     customer, lib/clients.index still finds the DEDUCTOR from the Reference number / Notes (a TAN, or a Form 26AS deductor's name —
+ *     banks on fixed deposits, borrowers on loan interest), or a reviewer chooses it; only then is the entry UNALLOCATED.
  *   - anything else (opening balance, bank entries …): one entry per posting
  */
 
@@ -21,11 +23,13 @@ const { ledgerFy, sectionFamily } = require('./config');
 const TYPE_LABEL = { invoice: 'Invoice', customer_payment: 'Customer payment', journal: 'Journal', creditnote: 'Credit note', credit_note: 'Credit note' };
 const ZOHO_KIND = { invoice: 'invoices', customer_payment: 'paymentsreceived', journal: 'journals', creditnote: 'creditnotes', credit_note: 'creditnotes' };
 const REF_RE = /[A-Z0-9]{1,8}(?:[/-][A-Z0-9]{1,8}){1,5}/gi;
+// a date written in a narration ("FD interest 01/10/2025 to 31/03/2026") is not an invoice number
+const DATE_RE = /^(?:\d{1,2}[/-]\d{1,2}[/-](?:\d{2}|\d{4})|\d{4}[/-]\d{1,2}[/-]\d{1,2})$/;
 
 function refsIn(text, invno) {
   const found = [], other = [];
   for (const m of String(text || '').toUpperCase().match(REF_RE) || []) {
-    if (invno[m]) { if (!found.includes(m)) found.push(m); } else if (/\//.test(m) && /\d/.test(m) && !other.includes(m)) other.push(m);
+    if (invno[m]) { if (!found.includes(m)) found.push(m); } else if (/\//.test(m) && /\d/.test(m) && !DATE_RE.test(m) && !other.includes(m)) other.push(m);
   }
   return { found, other };
 }

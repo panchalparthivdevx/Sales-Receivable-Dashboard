@@ -45,19 +45,34 @@ function shimCanvas() {
   }
 }
 
-async function ocrBuffers(images) {
+// OCR gets a time limit. tesseract.js starts a worker thread without listening for its errors, so a worker
+// that cannot start (seen as bills stuck in Received online, 25 Nov 2026) would otherwise wait for ever.
+// A bill whose OCR runs out of time is marked Failed with the reason instead.
+const OCR_MAX_MS = 120000;
+
+async function ocrBuffers(images, maxMs = OCR_MAX_MS) {
   const { createWorker } = require('tesseract.js');
-  const worker = await createWorker('eng', 1, { logger: () => {}, errorHandler: () => {} });
-  let text = '';
-  try {
+  let worker = null, timer = null, timedOut = false;
+  const work = (async () => {
+    // the language data is downloaded once per server instance; Vercel can only write to its temporary folder
+    worker = await createWorker('eng', 1, { logger: () => {}, errorHandler: () => {}, ...(process.env.VERCEL ? { cachePath: require('os').tmpdir() } : {}) });
+    let text = '';
     for (const img of images) {
+      if (timedOut) break;
       const { data } = await worker.recognize(img);
       text += (data.text || '') + '\n';
     }
+    return text;
+  })();
+  const limit = new Promise((_, reject) => { timer = setTimeout(() => { timedOut = true; reject(new Error(`OCR did not finish within ${Math.round(maxMs / 1000)} seconds — the scan could not be read automatically`)); }, maxMs); });
+  try {
+    return await Promise.race([work, limit]);
   } finally {
-    await worker.terminate();
+    clearTimeout(timer);
+    work.catch(() => {});
+    if (worker) worker.terminate().catch(() => {});
+    else if (timedOut) work.then(() => worker && worker.terminate().catch(() => {}), () => {});
   }
-  return text;
 }
 
 async function ocrPdf(buffer, maxPages = 3) {
@@ -425,6 +440,6 @@ async function extract(buffer, mime, ctx = {}, deps = {}) {
 }
 
 module.exports = {
-  extract, readText, parseText, normalise, docTypeFromText, claudeEnabled, claudeModel,
+  extract, readText, ocrBuffers, parseText, normalise, docTypeFromText, claudeEnabled, claudeModel,
   BILL_TYPES, DOC_TYPES, DOC_TYPE_LABEL, SCHEMA,
 };

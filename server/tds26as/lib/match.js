@@ -112,7 +112,8 @@ function reconcile(ctx) {
   const used = new Set();
   const units = [];
   // the client of an entry comes from the TAN on its invoice (lib/clients.index); a plain group index (no entry()) maps by customer
-  const groupOfZ = z => (!z.customer_id ? null : ctx.clients.entry ? ctx.clients.entry(z).group : ctx.clients.byCust.get(z.customer_id) || null);
+  // (a journal without a customer can still have a client: the deductor found from its Reference number / Notes — lib/clients)
+  const groupOfZ = z => (ctx.clients.entry ? ctx.clients.entry(z).group : z.customer_id ? ctx.clients.byCust.get(z.customer_id) || null : null);
   const groupOfC = c => ctx.clients.byTan.get(c.tan) || null;
   const gName = g => (g ? (ctx.clients.groups.get(g) || {}).name || g : '');
 
@@ -188,7 +189,15 @@ function reconcile(ctx) {
   const slot = g => groups.get(g) || groups.set(g, { z: [], c: [] }).get(g);
   for (const z of Z) {
     if (used.has(z.key)) continue;
-    if (!z.customer_id) { addUnit({ method: 'single', step: 1, zoho: [z.key], credits: [], status: 'need_check', reason: { code: 'unallocated', text: `Unallocated: the ${z.type_label.toLowerCase()} ${z.number || ''} has no customer${z.refs_unresolved && z.refs_unresolved.length ? ` and its references (${z.refs_unresolved.join(', ')}) are not Zoho invoices` : ''}`, figures: { amount: z.amount } } }); continue; }
+    if (!z.customer_id && !groupOfZ(z)) {
+      const info = ctx.clients.entry ? ctx.clients.entry(z) : {};
+      const refs = z.refs_unresolved && z.refs_unresolved.length ? ` (its references ${z.refs_unresolved.join(', ')} are not Zoho invoices)` : '';
+      const text = z.type !== 'journal' ? `Unallocated: the ${z.type_label.toLowerCase()} ${z.number || ''} has no customer${refs}`
+        : info.basis === 'journal_ambiguous' ? `Unallocated: the journal ${z.number || ''} has no customer, and its Reference number / Notes fit several deductors (${info.candidates.map(c => `${c.name || '?'} ${c.tan}`).join('; ')}) — choose the deductor in the item`
+        : `Unallocated: the journal ${z.number || ''} has no customer, and its Reference number / Notes name no Zoho invoice, TAN or Form 26AS deductor${refs} — choose the deductor in the item`;
+      addUnit({ method: 'single', step: 1, zoho: [z.key], credits: [], status: 'need_check', reason: { code: 'unallocated', text, figures: { amount: z.amount } } });
+      continue;
+    }
     const g = groupOfZ(z);
     if (!g) {
       const info = ctx.clients.entry ? ctx.clients.entry(z) : { basis: '', tans: [] };

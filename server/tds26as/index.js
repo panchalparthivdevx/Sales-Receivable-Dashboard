@@ -377,7 +377,7 @@ router.get('/clients', gate(), wrap(async (req, res) => {
     if (!g || !stats.has(g)) continue;
     const st = stats.get(g);
     st.zoho += z.amount; st.entries++;
-    st.per_customer[z.customer_id] = (st.per_customer[z.customer_id] || 0) + z.amount;
+    if (z.customer_id) st.per_customer[z.customer_id] = (st.per_customer[z.customer_id] || 0) + z.amount;
   }
   for (const c of d.credits) { const g = d.clients.byTan.get(c.tan); if (g && stats.has(g)) { stats.get(g).credits += c.deducted; stats.get(g).n_credits++; } }
   const view = g => ({ ...g, totals: stats.get(g.id) });
@@ -398,6 +398,26 @@ router.post('/clients/approve', gate('review'), clientsChange((e, req) => CL.app
 router.post('/clients/group', gate('review'), clientsChange((e, req) => CL.saveGroup(e.id, byName(req), req.body?.group || {})));
 router.post('/clients/remove', gate('review'), clientsChange((e, req) => CL.removeGroup(e.id, byName(req), String(req.body?.id || ''))));
 router.post('/clients/no-customer', gate('review'), clientsChange((e, req) => CL.noCustomer(e.id, byName(req), req.body?.tan, req.body?.on !== false, req.body?.note)));
+// the deductor of a journal without a customer (bank fixed deposits, interest on loans given …): chosen by a reviewer, or back to automatic
+router.post('/clients/journal-deductor', gate('review'), clientsChange(async (e, req) => {
+  const jid = String(req.body?.journal_id || '');
+  const d = await need().recon.load(e);
+  const z = d.items.find(x => x.type === 'journal' && x.journal && x.journal.id === jid);
+  if (!z) throw Object.assign(new Error('This journal is not among the entity\'s Zoho TDS entries (reload the page)'), { status: 404 });
+  if (z.customer_id) throw Object.assign(new Error('This journal has a Zoho customer — its client comes from the customer'), { status: 400 });
+  const tan = String(req.body?.tan || '').trim().toUpperCase();
+  const names = d.credits.filter(c => c.tan === tan).map(c => c.deductor);
+  return CL.journalDeductor(e.id, byName(req), jid, tan, { note: req.body?.note, number: z.number, name: names[0] || '' });
+}));
+// the deductors a journal can be given: every TAN in the uploaded statements (name, credits) and the client groups' TANs
+router.get('/clients/deductors', gate(), wrap(async (req, res) => {
+  const e = entityOf(req);
+  const d = await need().recon.load(e);
+  const by = new Map();
+  for (const c of d.credits) { const x = by.get(c.tan) || by.set(c.tan, { tan: c.tan, name: c.deductor, credits: 0, deposited: 0 }).get(c.tan); x.credits++; x.deposited += c.deposited; }
+  for (const g of d.clientsDoc.groups) for (const t of g.tans) if (!by.has(t.tan)) by.set(t.tan, { tan: t.tan, name: t.name || g.name, credits: 0, deposited: 0 });
+  res.json({ deductors: [...by.values()].sort((a, b) => a.name.localeCompare(b.name)) });
+}));
 router.post('/clients/reject', gate('review'), clientsChange((e, req) => CL.reject(e.id, byName(req), String(req.body?.customer_id || ''), req.body?.tan, req.body?.on !== false, req.body?.name)));
 router.get('/clients/customers', gate(), wrap(async (req, res) => {
   const e = entityOf(req);

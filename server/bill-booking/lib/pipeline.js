@@ -537,13 +537,13 @@ function create({ store, zc, lookups, files, extractFn = EX.extract, log = conso
         audit(b, by, 'confirmed', key);
       } else if (act === 'reprocess') {
         b.status = 'received';
-        delete b.processing_error;
+        delete b.processing_error; delete b.read_attempts; delete b.read_lease;
         b.extraction = null; b.acks = []; b.cat_fields = {}; b.vendor = null; b.category = null; b.not_bill = null;
         if (b.zoho && !b.zoho.bill_id) delete b.zoho.error;
         audit(b, by, 'reprocess', 'Read again from the original file (earlier changes discarded)');
         reprocess = true;
       } else if (act === 'retry') {
-        delete b.processing_error;
+        delete b.processing_error; delete b.read_attempts; delete b.read_lease;
         if (b.zoho) delete b.zoho.error;
         audit(b, by, 'retry', 'Retry');
         reprocess = !b.extraction;
@@ -744,33 +744,61 @@ function create({ store, zc, lookups, files, extractFn = EX.extract, log = conso
     return idle();
   }
 
-  /**
-   * Vercel: bills that a stopped request left unread (Vercel ends every request at its time limit).
-   * Only bills untouched for longer than that limit are taken — any request that was reading them has
-   * ended by then — and each is leased (read_lease) so a check running at the same time leaves it alone.
-   * → the number of bills queued again
-   */
-  async function resumeStale(staleMs) {
+  // ── Vercel: reading what earlier requests left unread ───────────────────────
+  // Vercel ends every request at its time limit, so on Vercel a bill is read by whichever request or scheduler
+  // call is running. Bills are taken one at a time: the fewest tries first, then the oldest. Taking one means
+  // a lease (read_lease) and one try counted. A bill is only taken when it has been untouched for longer than
+  // the time limit, because any request that was reading it has ended by then. A bill that has used all its
+  // tries is set aside as Failed with the reason, so one unreadable file cannot hold up the bills behind it.
+  const MAX_READ_TRIES = 3;
+  const waitingToRead = b => b.status === 'received' && !b.processing_error;
+
+  async function leaseNext(staleMs) {
     const cut = Date.now() - staleMs;
-    const ids = await store.tx(async t => {
-      const out = [];
-      for (const b of t.bills()) {
-        if (b.status !== 'received' || b.processing_error || queued.has(b.id)) continue;
-        if (Date.parse(b.read_lease || b.updated_at || b.created_at) >= cut) continue;
-        b.read_lease = now();
+    return store.tx(async t => {
+      const ready = t.bills().filter(b => waitingToRead(b) && !queued.has(b.id) && Date.parse(b.read_lease || b.updated_at || b.created_at) < cut);
+      for (const b of ready.filter(x => (x.read_attempts || 0) >= MAX_READ_TRIES)) {
+        b.processing_error = `Reading did not finish within the online server's time limit (${MAX_READ_TRIES} tries). Open the bill to enter the details by hand, or press "Retry".`;
+        audit(b, 'system', 'failed', b.processing_error);
+        b.status = V.status(b);
+        b.updated_at = now();
         t.putBill(b);
-        out.push(b.id);
       }
-      return out;
+      const next = ready.filter(x => (x.read_attempts || 0) < MAX_READ_TRIES)
+        .sort((a, b) => (a.read_attempts || 0) - (b.read_attempts || 0) || String(a.created_at).localeCompare(String(b.created_at)))[0];
+      if (!next) return null;
+      next.read_lease = now();
+      next.read_attempts = (next.read_attempts || 0) + 1;
+      t.putBill(next);
+      return next.id;
     });
-    ids.forEach(enqueue);
-    return ids.length;
+  }
+
+  /**
+   * Reads waiting bills until `until` (ms since epoch). No bill is started with less than minLeftMs to go.
+   * workers: bills read at the same time (1 for the built-in OCR reader; a few with Claude, which waits on the network).
+   * → the number of bills read (successfully or not)
+   */
+  async function readStale({ staleMs, until, workers = 1, minLeftMs = 45000 }) {
+    let read = 0;
+    const worker = async () => {
+      while (until - Date.now() > minLeftMs) {
+        const id = await leaseNext(staleMs);
+        if (!id) return;
+        try { await processBill(id); } catch (e) { log.error(`[bill-booking] ${id}: ${e.message}`); }
+        read++;
+      }
+    };
+    await Promise.all(Array.from({ length: Math.max(1, workers) }, worker));
+    return read;
   }
 
   /** Bills of this server instance still waiting to be read (queued or being read) */
   const pending = () => queue.length + (running ? 1 : 0);
+  /** Bills (all instances) not read yet */
+  const waitingCount = async () => (await store.snapshot()).bills.filter(waitingToRead).length;
 
-  return { ingest, processBill, evaluate, edit, action, createDraft, draftTest, refreshZoho, resume, resumeStale, pending, enqueue, idle, config };
+  return { ingest, processBill, evaluate, edit, action, createDraft, draftTest, refreshZoho, resume, readStale, pending, waitingCount, enqueue, idle, config, MAX_READ_TRIES };
 }
 
 module.exports = { create };

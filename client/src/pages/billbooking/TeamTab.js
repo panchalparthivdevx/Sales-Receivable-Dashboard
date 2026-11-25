@@ -17,8 +17,7 @@ const blank = { name: '', email: '', provider: 'microsoft', categories: [], comp
 function checkNote(x) {
   const parts = [];
   if ((x.results || []).some(r => r.more)) parts.push('more emails are waiting — click "Check all now" again to continue');
-  if (x.reading) parts.push(`${x.reading} bill(s) are still being read and will appear in the report shortly`);
-  if (x.resumed) parts.push(`${x.resumed} bill(s) left unread by an earlier check were picked up again`);
+  if (x.waiting) parts.push(`${x.waiting} bill(s) are waiting to be read — reading continues in the background (online every 5 minutes)`);
   return parts.length ? ` — ${parts.join('; ')}` : '';
 }
 

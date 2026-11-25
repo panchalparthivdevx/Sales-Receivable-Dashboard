@@ -10,6 +10,57 @@ const nextQuarters = from => {
 };
 const quarterOf = iso => { const y = +iso.slice(0, 4), m = +iso.slice(5, 7), s = m >= 4 ? y : y - 1; return `${s}-${String((s + 1) % 100).padStart(2, '0')}-Q${m >= 4 && m <= 6 ? 1 : m >= 7 && m <= 9 ? 2 : m >= 10 ? 3 : 4}`; };
 
+/** How the deductor of a journal without a Zoho customer was found, and (reviewers) choosing it by hand */
+const fromText = f => {
+  if (!f) return 'No deductor found: the Reference number / Notes name no Zoho invoice, TAN or Form 26AS deductor.';
+  const who = `${f.name || '?'} (${f.tans.join(', ')})`;
+  const w = `"${(f.words || []).join('", "')}"`;
+  switch (f.basis) {
+    case 'journal_manual': return `Deductor chosen by ${f.by || 'a reviewer'}${f.at ? ` on ${dt(f.at.slice(0, 10))}` : ''}: ${who}${f.note ? ` — ${f.note}` : ''}`;
+    case 'journal_invoice_tan': return `Deductor from the TAN on the invoice the journal names (${(f.words || []).join(', ')}): ${who}`;
+    case 'journal_tan': return `Deductor from the TAN written in the journal: ${who}`;
+    case 'journal_name': return `Deductor found from the words ${w} in the journal: ${who}`;
+    case 'journal_initials': return `Deductor found from the initials ${w} in the journal: ${who} — please check`;
+    case 'journal_word': return `Deductor found from the word${(f.words || []).length > 1 ? 's' : ''} ${w} only (no other deductor's name has ${(f.words || []).length > 1 ? 'them' : 'it'}): ${who} — please check`;
+    case 'journal_ambiguous': return `The journal's words fit several deductors: ${f.candidates.map(c => `${c.name || '?'} (${c.tan})`).join('; ')} — choose one below.`;
+    default: return '';
+  }
+};
+
+function JournalDeductor({ z, meta, params, onDone, onError }) {
+  const f = z.client_from;
+  const [list, setList] = useState(null);
+  const [tan, setTan] = useState('');
+  const [note, setNote] = useState('');
+  const [busy, setBusy] = useState(false);
+  const save = async (tn, n = note) => {
+    setBusy(true);
+    try { await t.journalDeductor({ entity: params.entity, journal_id: z.journal.id, tan: tn, note: n }); onDone(tn ? 'Deductor saved — the journal is now matched under that client.' : 'The deductor now comes from the journal\'s Reference number / Notes again.'); }
+    catch (e) { onError(errMsg(e)); } finally { setBusy(false); }
+  };
+  const open = () => t.deductors(params.entity).then(x => setList(x.deductors)).catch(e => onError(errMsg(e)));
+  return (
+    <div style={{ marginTop: 4, padding: '0.4rem 0.6rem', background: f && f.tans.length ? '#F0FDF4' : '#FFFBEB', border: `1px solid ${f && f.tans.length ? '#BBF7D0' : '#FDE68A'}`, borderRadius: 6 }}>
+      <div style={{ fontSize: '0.74rem' }}>{fromText(f)}</div>
+      {meta.rights.review && f && f.basis === 'journal_ambiguous' && <div style={{ marginTop: 4, display: 'flex', gap: 6, flexWrap: 'wrap' }}>{f.candidates.map(c => <button key={c.tan} disabled={busy} style={{ ...S.ghost, padding: '0.1rem 0.5rem' }} onClick={() => save(c.tan, 'chosen among the deductors the notes fit')}>It is {c.name || c.tan}</button>)}</div>}
+      {meta.rights.review && (list === null
+        ? <div style={{ marginTop: 4, display: 'flex', gap: 6 }}>
+            <button disabled={busy} style={{ ...S.ghost, padding: '0.1rem 0.5rem' }} onClick={open}>{f && f.tans.length ? 'Choose another deductor' : 'Choose the deductor'}</button>
+            {f && f.basis === 'journal_manual' && <button disabled={busy} style={{ ...S.ghost, padding: '0.1rem 0.5rem' }} onClick={() => save('')}>Use the Reference number / Notes again</button>}
+          </div>
+        : <div style={{ marginTop: 6, display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+            <select style={{ ...S.select, maxWidth: 380 }} value={tan} onChange={e => setTan(e.target.value)}>
+              <option value="">Deductor (Form 26AS) …</option>
+              {list.map(x => <option key={x.tan} value={x.tan}>{x.name} — {x.tan}{x.credits ? ` (${x.credits} credit${x.credits > 1 ? 's' : ''}, ${r(x.deposited)})` : ''}</option>)}
+            </select>
+            <input style={{ ...S.input, maxWidth: 260 }} placeholder="Note (optional)" value={note} onChange={e => setNote(e.target.value)} />
+            <button disabled={busy || !tan} style={S.btn} onClick={() => save(tan)}>Save</button>
+            <button disabled={busy} style={S.ghost} onClick={() => setList(null)}>Cancel</button>
+          </div>)}
+    </div>
+  );
+}
+
 export default function UnitDrawer({ meta, params, id, onClose, onSaved }) {
   const [d, setD] = useState(null);
   const [err, setErr] = useState('');
@@ -96,7 +147,8 @@ export default function UnitDrawer({ meta, params, id, onClose, onSaved }) {
             <div style={S.small}>{z.customer || 'no customer'}{z.customer_basis && z.customer_basis !== 'posting' ? ` (customer from the ${z.customer_basis === 'journal_line' ? 'journal\'s receivable line' : 'invoice named in the journal'})` : ''}{z.tan_hints.length ? ` · TAN on invoice ${z.tan_hints.join(', ')}` : ''}</div>
             {z.invoices.map(i => <div key={i.id} style={S.small}>Invoice {i.url ? <a href={i.url} target="_blank" rel="noreferrer">{i.no}</a> : i.no} of {dt(i.date)}: basic {r(i.basic)}, GST {r(i.gst)}{i.tds_percent != null ? `, TDS ${i.tds_percent}%` : ''}</div>)}
             {z.payment && <div style={S.small}>Payment {z.payment.url ? <a href={z.payment.url} target="_blank" rel="noreferrer">{z.payment.no}</a> : z.payment.no} of {dt(z.payment.date)}{z.payment.applied != null ? `: applied ${r(z.payment.applied)}, TDS ${r(z.payment.withheld_on_invoice)}` : ''}</div>}
-            {z.journal && <div style={S.small}>Journal note: {z.journal.notes || '—'}</div>}
+            {z.journal && <div style={S.small}>Journal reference number: {z.journal.ref || '—'} · notes: {z.journal.notes || '—'}</div>}
+            {z.type === 'journal' && !z.customer_id && z.journal && <JournalDeductor z={z} meta={meta} params={params} onDone={msg => { setOk(msg); onSaved(); onClose(); }} onError={setErr} />}
             <Flags flags={z.flags} />
           </div>))}</div>
       </div>

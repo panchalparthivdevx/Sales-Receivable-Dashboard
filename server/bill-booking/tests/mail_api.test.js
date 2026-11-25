@@ -291,26 +291,117 @@ test('mailbox: a check with a deadline stops between emails; the next check cont
   assert.equal((await env.store.snapshot()).doc('bb_mail').cursors.m1.since, T2, 'a member not started keeps its cursor');
 });
 
-test('reading left unfinished by a stopped request is picked up again — once, with a lease', async () => {
+// bills as Vercel leaves them when it stops a request before they are read (minutes ago)
+async function unreadBills(env, n, { minutesAgo = 6 } = {}) {
+  const ids = [];
+  for (let i = 0; i < n; i++) {
+    const r = await env.pipeline.ingest({ buffer: H.pdf(`left-${i}`), name: `left-${i}.pdf`, mime: 'application/pdf', source: 'erp_upload', source_ref: { erp_ref: `L${i}` }, member_id: 'm1', by: 'test' });
+    ids.push(r.id);
+  }
+  await env.pipeline.idle();
+  await env.store.tx(async t => {
+    ids.forEach((id, i) => {
+      const b = t.bill(id);
+      delete b.extraction; b.status = 'received';
+      b.created_at = b.updated_at = new Date(Date.now() - (minutesAgo * 60000) - (n - i) * 1000).toISOString();
+      t.putBill(b);
+    });
+  });
+  return ids;
+}
+const STALE = 5 * 60000;
+
+test('reading left unfinished by a stopped request is picked up again: one bill at a time, oldest first, with a lease', async () => {
   const env = H.setup();
   await H.seedConfig();
-  const r = await env.pipeline.ingest({ buffer: H.pdf('left'), name: 'left.pdf', mime: 'application/pdf', source: 'erp_upload', source_ref: { erp_ref: 'L1' }, member_id: 'm1', by: 'test' });
-  await env.pipeline.idle();
-  assert.notEqual((await env.store.bill(r.id)).status, 'received');
-  // as if Vercel stopped the request before the bill was read, six minutes ago
-  const old = new Date(Date.now() - 6 * 60000).toISOString();
-  await env.store.tx(async t => { const b = t.bill(r.id); delete b.extraction; b.status = 'received'; b.updated_at = old; t.putBill(b); });
+  const [a, b] = await unreadBills(env, 2);
+  assert.equal(await env.pipeline.waitingCount(), 2);
+  assert.equal(await env.pipeline.readStale({ staleMs: 10 * 60000, until: Date.now() + 120000 }), 0, 'not older than the limit → maybe still being read elsewhere');
 
-  assert.equal(await env.pipeline.resumeStale(10 * 60000), 0, 'not older than the limit → maybe still being read elsewhere');
-  assert.equal(await env.pipeline.resumeStale(5 * 60000), 1);
-  assert.ok((await env.store.bill(r.id)).read_lease, 'leased');
-  await env.pipeline.idle();
-  assert.equal(env.pipeline.pending(), 0);
-  assert.notEqual((await env.store.bill(r.id)).status, 'received', 'read after all');
+  // only one bill's worth of time: the oldest is read, the other keeps waiting untouched
+  const n = await env.pipeline.readStale({ staleMs: STALE, until: Date.now() + 1000, minLeftMs: 0 });
+  assert.ok(n >= 1);
+  const A = await env.store.bill(a);
+  assert.notEqual(A.status, 'received', 'the oldest was read'); assert.equal(A.read_attempts, 1); assert.ok(A.read_lease);
 
-  // a check running at the same time does not take a bill another one just leased
-  await env.store.tx(async t => { const b = t.bill(r.id); delete b.extraction; b.status = 'received'; b.updated_at = old; b.read_lease = new Date().toISOString(); t.putBill(b); });
-  assert.equal(await env.pipeline.resumeStale(5 * 60000), 0);
+  assert.equal(await env.pipeline.readStale({ staleMs: STALE, until: Date.now() + 120000 }), n === 1 ? 1 : 0);
+  assert.notEqual((await env.store.bill(b)).status, 'received');
+  assert.equal(await env.pipeline.waitingCount(), 0);
+
+  // a call running at the same time does not take a bill another one just leased
+  await env.store.tx(async t => { const x = t.bill(b); delete x.extraction; x.status = 'received'; x.updated_at = new Date(0).toISOString(); x.read_lease = new Date().toISOString(); t.putBill(x); });
+  assert.equal(await env.pipeline.readStale({ staleMs: STALE, until: Date.now() + 120000 }), 0);
+  // no time left → nothing is started
+  await env.store.tx(async t => { const x = t.bill(b); delete x.read_lease; t.putBill(x); });
+  assert.equal(await env.pipeline.readStale({ staleMs: STALE, until: Date.now() + 30000 }), 0, 'less than the 45 s margin left');
+});
+
+test('a bill that never finishes reading is set aside as Failed after 3 tries, so it cannot block the others', async () => {
+  const env = H.setup();
+  await H.seedConfig();
+  const [stuck, other] = await unreadBills(env, 2);
+  // the stuck bill has been tried 3 times already (each time Vercel stopped the request)
+  await env.store.tx(async t => { const x = t.bill(stuck); x.read_attempts = 3; x.read_lease = new Date(Date.now() - 6 * 60000).toISOString(); t.putBill(x); });
+  const n = await env.pipeline.readStale({ staleMs: STALE, until: Date.now() + 120000 });
+  assert.equal(n, 1, 'only the other bill is read');
+  const S = await env.store.bill(stuck);
+  assert.equal(S.status, 'failed'); assert.match(S.processing_error, /did not finish within the online server's time limit \(3 tries\)/);
+  assert.equal(S.audit.at(-1).action, 'failed');
+  assert.notEqual((await env.store.bill(other)).status, 'received');
+
+  // fewer tries go first: a bill tried twice (and older) waits behind a fresh one
+  const order = [];
+  const read = H.fakeExtract({ '*': {} });
+  const p = require('../lib/pipeline').create({ store: env.store, zc: env.zc, lookups: env.lookups, files: env.files, log: { error() {} },
+    extractFn: async (buf, mime, ctx) => { order.push(ctx.fileName); return read(buf, mime, ctx); } });
+  const [twice, fresh] = await unreadBills(env, 2);
+  await env.store.tx(async t => { const x = t.bill(twice); x.read_attempts = 2; t.putBill(x); });
+  assert.equal(await p.readStale({ staleMs: STALE, until: Date.now() + 120000 }), 2);
+  assert.deepEqual(order, ['left-1.pdf', 'left-0.pdf'], 'the fresh bill first, although the other is older');
+  assert.equal((await env.store.bill(fresh)).read_attempts, 1); assert.equal((await env.store.bill(twice)).read_attempts, 3);
+
+  // Retry clears the tries
+  await env.pipeline.action(stuck, 'retry', {}, { name: 'Rev', username: 'rev' });
+  const R = await env.store.bill(stuck);
+  assert.equal(R.read_attempts, undefined); assert.equal(R.processing_error, undefined);
+});
+
+test('Vercel scheduler: checks the mailboxes when due, reads waiting bills, and leaves the mailboxes alone until poll_minutes have passed', async () => {
+  const env = H.setup();
+  const http = fakeGraph();
+  await connectedMember(env, http);
+  const ids = await unreadBills(env, 2);
+  const router = require('..');
+  router.init({ zc: env.zc, lookups: env.lookups, files: env.files, extractFn: H.fakeExtract({ '*': {} }), loadUsers: async () => USERS, http, log: { error() {} }, vercel: true });
+  try {
+    const r = await router.cronTick();
+    assert.equal(r.ok, true);
+    assert.equal(r.mail.mailboxes, 1); assert.equal(r.mail.new_bills, 1);
+    assert.equal(r.waiting, 0, 'the new bill and the two left unread are all read');
+    for (const id of ids) assert.notEqual((await env.store.bill(id)).status, 'received');
+    assert.ok((await env.store.snapshot()).doc('bb_mail').last_auto_poll);
+
+    const calls = http.calls.length;
+    const r2 = await router.cronTick();
+    assert.equal(r2.mail, null, 'checked less than poll_minutes ago → not again');
+    assert.equal(http.calls.length, calls, 'Microsoft was not called');
+  } finally { router.init({ vercel: false, zc: env.zc, lookups: env.lookups, files: env.files, http }); }
+});
+
+test('Vercel scheduler: the route needs the scheduler secret; a check by hand reports what is still waiting', async () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', '..', 'index.js'), 'utf8');
+  assert.match(src, /'GET \/api\/cron\/bill-booking'/, 'listed as a scheduler route (no dashboard login)');
+  assert.match(src, /app\.get\('\/api\/cron\/bill-booking', cronAuth, billBooking\.cron\)/, 'guarded by CRON_SECRET');
+  const crons = JSON.parse(require('fs').readFileSync(require('path').join(__dirname, '..', '..', '..', 'vercel.json'), 'utf8')).crons;
+  assert.equal(crons.find(c => c.path === '/api/cron/bill-booking')?.schedule, '*/5 * * * *');
+
+  const { env, server, call, router } = await api();
+  try {
+    router.init({ zc: env.zc, lookups: env.lookups, files: env.files, extractFn: H.fakeExtract({ '*': {} }), loadUsers: async () => USERS, http: fakeGraph(), log: { error() {} }, vercel: true });
+    await unreadBills(env, 1);
+    const x = await (await call('3', 'POST', '/mail/poll', {})).json();
+    assert.equal(x.waiting, 0, 'the bill left unread was read during the check');
+  } finally { router.init({ vercel: false, zc: env.zc, lookups: env.lookups, files: env.files }); server.close(); }
 });
 
 test('API: an outside service\'s 401 is never passed on as 401 (the dashboard would sign the user out)', async () => {

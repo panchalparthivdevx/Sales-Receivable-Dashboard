@@ -18,6 +18,14 @@
  * ignored) wait for a reviewer. Reviewer decisions come first: a TAN in a group belongs to that group, a rejected customer ↔ TAN pair is
  * never used, and a TAN marked "no Zoho customer" (a deductor that never became a customer) gets no automatic client — its credits are
  * reported as "Not in Zoho Books" instead of waiting for a mapping.
+ *
+ * JOURNALS WITHOUT A CUSTOMER (25 Nov 2026): TDS booked by journal for a bank's fixed deposit, interest on a loan given, or a client the
+ * journal does not name as a customer. Their client is found, in this order, from (1) the deductor a reviewer chose for the journal,
+ * (2) the TAN on the invoice(s) its Reference number / Notes name, (3) a TAN written there, (4) the name of a Form 26AS deductor (or of
+ * a client group, or of a Zoho customer with one known TAN) written there — all the name's words, the name as a phrase ("Bank of
+ * India"), or its initials ("SBI"); when no name fits fully, one distinctive word that only one name has ("Kotak"). Equally good
+ * fits for different clients identify nothing (the candidates are listed). A TAN marked "no Zoho customer" (a bank) is used too: the
+ * mark says no customer exists, and a journal is exactly how such TDS is booked.
  */
 
 'use strict';
@@ -26,7 +34,7 @@ const store = require('./store');
 const { TAN_RE, normTan, hashOf } = require('./util');
 
 const key = entity => `clients_${entity}`;
-const EMPTY = { groups: [], no_customer: {}, rejected: {} };
+const EMPTY = { groups: [], no_customer: {}, rejected: {}, journal_tans: {} };
 const load = async entity => ({ ...EMPTY, ...(await store.read(key(entity), EMPTY)) });
 
 const STOP = new Set(['PRIVATE', 'PVT', 'LIMITED', 'LTD', 'LLP', 'THE', 'AND', 'CO', 'COMPANY', 'INDIA', 'OF', 'MS', 'M', 'S', 'INC', 'CORPORATION', 'CORP', 'P', 'L', 'OPC']);
@@ -38,6 +46,50 @@ function similarity(a, b) {
   const sx = new Set(x), sy = new Set(y);
   const common = [...sx].filter(t => sy.has(t)).length;
   return (2 * common) / (sx.size + sy.size);
+}
+
+// words that say nothing about WHO deducted: a name made only of them must be written in full
+const GENERIC = new Set(['BANK', 'SERVICES', 'SERVICE', 'SOLUTIONS', 'SOLUTION', 'TECHNOLOGIES', 'TECHNOLOGY', 'TECH', 'SYSTEMS', 'SOFTWARE', 'CONSULTING', 'CONSULTANCY',
+  'CONSULTANTS', 'ENTERPRISES', 'ENTERPRISE', 'INDUSTRIES', 'GLOBAL', 'INTERNATIONAL', 'GROUP', 'HOLDINGS', 'VENTURES', 'TRADING', 'TRADERS', 'FINANCE', 'FINANCIAL',
+  'CAPITAL', 'INVESTMENTS', 'INVESTMENT', 'MANAGEMENT', 'ASSET', 'ASSETS', 'INFRA', 'INFRASTRUCTURE', 'ENGINEERING', 'ENGINEERS', 'PROJECTS', 'DEVELOPERS', 'REALTY',
+  'CONSTRUCTION', 'CONSTRUCTIONS', 'HEALTHCARE', 'PHARMA', 'LABS', 'DIGITAL', 'MEDIA', 'NETWORKS', 'LOGISTICS', 'BRANCH', 'OFFICE', 'INTEREST', 'LOAN', 'DEPOSIT',
+  'FIXED', 'INCOME', 'RECEIVABLE', 'INVOICE', 'ASSOCIATES', 'PARTNERS', 'BUSINESS', 'MARKETING', 'EDUCATION', 'FOUNDATION', 'TRUST', 'SOCIETY', 'INSURANCE', 'LIFE',
+  'GENERAL', 'OPERATIVE', 'COOPERATIVE', 'NATIONAL', 'STATE', 'CENTRAL', 'UNITED', 'INDIAN', 'ASIA', 'WORLD', 'DATA', 'CLOUD', 'INFO', 'INFOTECH', 'ENERGY', 'POWER',
+  'EXPORTS', 'IMPORTS', 'OVERSEAS', 'CORPORATE', 'SALES', 'RETAIL', 'MUMBAI', 'DELHI', 'AHMEDABAD', 'GUJARAT', 'BANGALORE', 'BENGALURU', 'PUNE', 'HYDERABAD', 'CHENNAI',
+  'KOLKATA', 'NOIDA', 'GURGAON', 'GURUGRAM', 'JAIPUR', 'INDORE', 'BOOKED', 'AGAINST', 'BEING', 'RECEIVED', 'DEDUCTED', 'PAYMENT', 'QUARTER', 'PERIOD']);
+// narration words that are never a deductor's initials ("TDS on FD interest")
+const NARRATION = new Set(['TDS', 'GST', 'INV', 'FD', 'FDR', 'FDS', 'AY', 'FY', 'QTR', 'REF', 'AMT', 'INT', 'JV', 'JR', 'RS', 'INR', 'DT', 'NO', 'PER', 'ACC', 'TAN', 'PAN', 'THE', 'AND', 'FOR']);
+const LEGAL = new Set(['PRIVATE', 'PVT', 'LIMITED', 'LTD', 'LLP', 'THE', 'MS', 'M', 'S', 'P', 'L', 'OPC', 'INC', 'CO', 'COMPANY']);
+const words = s => String(s || '').toUpperCase().replace(/&/g, ' AND ').replace(/[^A-Z0-9 ]/g, ' ').split(/\s+/).filter(Boolean);
+
+/** cands: [{ tan, key (the client it means), name }] → text → { tan, key, name, words, basis } | { candidates } | null (see the header) */
+function nameFinder(cands) {
+  const prep = cands.map(c => {
+    const w = words(c.name).filter(x => !LEGAL.has(x));
+    const tok = tokens(c.name).filter(t => t.length >= 2);
+    const acr = [...new Set([w.map(x => x[0]).join(''), w.filter(x => x !== 'OF' && x !== 'AND').map(x => x[0]).join('')])].filter(a => a.length >= 3 && !NARRATION.has(a));
+    return { ...c, w, tok, acr };
+  }).filter(c => c.w.length && c.tok.length);
+  const uses = new Map();                              // word → the clients whose names have it
+  for (const c of prep) for (const t of new Set(c.tok)) (uses.get(t) || uses.set(t, new Set()).get(t)).add(c.key);
+  const telling = t => t.length >= 4 && !GENERIC.has(t) && !NARRATION.has(t);
+  return text => {
+    const tw = words(text), set = new Set(tw), line = ` ${tw.join(' ')} `;
+    const best = new Map(), weak = new Map(), loose = new Map();
+    const put = (m, c, score, ws, basis) => { const b = m.get(c.key); if (!b || score > b.score) m.set(c.key, { tan: c.tan, key: c.key, name: c.name, score, words: ws, basis }); };
+    for (const c of prep) {
+      if (c.w.length >= 2 && line.includes(` ${c.w.join(' ')} `)) put(best, c, c.w.length + 0.5, [c.w.join(' ')], 'journal_name');
+      else if (c.tok.every(t => set.has(t)) && (c.tok.length >= 2 || !GENERIC.has(c.tok[0])) && c.tok.some(t => t.length >= 3)) put(best, c, c.tok.length, c.tok, 'journal_name');
+      else { const a = c.acr.find(x => set.has(x)); if (a) put(best, c, 1.5, [a], 'journal_initials'); }
+      const hit = c.tok.filter(t => telling(t) && set.has(t));
+      if (hit.length) { put(loose, c, hit.length, hit, 'journal_word'); const own = hit.filter(t => uses.get(t).size === 1); if (own.length) put(weak, c, own.length, own, 'journal_word'); }
+    }
+    const pick = m => { const all = [...m.values()]; const top = Math.max(...all.map(x => x.score)); return all.filter(x => x.score === top); };
+    if (best.size) { const top = pick(best); return top.length === 1 ? top[0] : { candidates: top }; }
+    if (weak.size === 1) return [...weak.values()][0];
+    const many = [...(weak.size ? weak : loose).values()];
+    return many.length > 1 && many.length <= 8 ? { candidates: many } : null;
+  };
 }
 
 const AUTO = 'tan:';
@@ -88,12 +140,44 @@ function index(doc, { items = [], credits = [], invoices = {} } = {}) {
     if (cust && !g.customers.some(c => c.id === cust) && !g.tan_customers.some(c => c.id === cust)) g.tan_customers.push({ id: cust, name: custName.get(cust) || '' });
   };
 
+  // journals without a customer: the deductor from the reviewer's choice, the invoice TAN, a TAN or a name in the Reference number / Notes
+  let finder = null;
+  const keyOfTan = t => byTan.get(t) || AUTO + t;
+  const nameFind = text => {
+    if (!finder) {
+      const cands = [];
+      for (const [t, names] of deductor) for (const n of names.keys()) cands.push({ tan: t, key: keyOfTan(t), name: n });
+      for (const g of doc.groups || []) if (g.tans.length) cands.push({ tan: g.tans[0].tan, key: g.id, name: g.name });
+      for (const [cust, tans] of custTans) { const k = [...tans].filter(t => known(t) && !rejected[`${cust}|${t}`]); if (k.length === 1 && custName.get(cust)) cands.push({ tan: k[0], key: keyOfTan(k[0]), name: custName.get(cust) }); }
+      finder = nameFinder(cands);
+    }
+    return finder(text);
+  };
+  const nameOfTan = t => { const names = deductor.get(t); return names ? [...names.entries()].sort((a, b) => b[1] - a[1])[0][0] : ''; };
+  function journalClient(z) {
+    const j = z.journal || {};
+    const man = j.id && (doc.journal_tans || {})[j.id];
+    if (man && TAN_RE.test(man.tan)) return { group: groupOfTan(man.tan, ''), basis: 'journal_manual', tans: [man.tan], name: nameOfTan(man.tan) || man.name || '', by: man.by, at: man.at, note: man.note || '' };
+    const hints = [...new Set((z.tan_hints || []).map(normTan))].filter(t => TAN_RE.test(t));
+    if (hints.length === 1) return { group: groupOfTan(hints[0], ''), basis: 'journal_invoice_tan', tans: hints, name: nameOfTan(hints[0]), words: (z.refs || []).slice(0, 5) };
+    const text = `${j.ref || ''} ${j.notes || ''}`;
+    const inText = [...new Set(words(text).filter(w => TAN_RE.test(w)))];
+    const tan = inText.length === 1 ? inText[0] : inText.filter(known).length === 1 ? inText.filter(known)[0] : null;
+    if (tan) return { group: groupOfTan(tan, ''), basis: 'journal_tan', tans: [tan], name: nameOfTan(tan), words: [tan] };
+    if (inText.length > 1) return { group: null, basis: 'journal_ambiguous', tans: [], candidates: inText.map(t => ({ tan: t, name: nameOfTan(t) })) };
+    const f = nameFind(text);
+    if (f && f.tan) return { group: groupOfTan(f.tan, ''), basis: f.basis, tans: [f.tan], name: nameOfTan(f.tan) || f.name, matched_name: f.name, words: f.words };
+    if (f && f.candidates) return { group: null, basis: 'journal_ambiguous', tans: [], candidates: f.candidates.map(c => ({ tan: c.tan, name: nameOfTan(c.tan) || c.name, words: c.words })) };
+    return null;
+  }
+
   /** client of one entry: { group, basis, tans (the TANs it rests on), alt (known TANs of the customer, for a TAN no statement has) } */
   const memo = new Map();
   function entry(z) {
     if (memo.has(z.key)) return memo.get(z.key);
     const cust = z.customer_id;
     let out = { group: null, basis: cust ? 'no_tan' : 'no_customer', tans: [] };
+    if (!cust && z.type === 'journal') out = journalClient(z) || out;
     if (cust) {
       const raw = [...new Set((z.tan_hints || []).map(normTan))].filter(t => TAN_RE.test(t));
       const own = raw.filter(t => usable(cust, t));
@@ -233,6 +317,20 @@ async function noCustomer(entity, by, tan, on, note = '') {
 }
 /** A customer ↔ TAN pair that is NOT the same client (a suggestion, or a TAN on the customer's invoices the TAN rule must not use);
  *  on = false undoes it */
+/** The deductor of a journal without a customer (a bank, a borrower …), chosen by a reviewer; an empty TAN goes back to the automatic rule */
+async function journalDeductor(entity, by, journalId, tan, { note = '', number = '', name = '' } = {}) {
+  return change(entity, by, d => {
+    const jid = String(journalId || '');
+    if (!jid) throw Object.assign(new Error('Which journal?'), { status: 400 });
+    d.journal_tans = d.journal_tans || {};
+    const t = normTan(tan);
+    if (!t) { delete d.journal_tans[jid]; return { what: `journal ${number || jid}: deductor back to the automatic rule` }; }
+    if (!TAN_RE.test(t)) throw Object.assign(new Error('Not a valid TAN'), { status: 400 });
+    d.journal_tans[jid] = { tan: t, name: String(name || '').slice(0, 160), number: String(number || '').slice(0, 60), by, at: new Date().toISOString(), note: String(note || '').slice(0, 300) };
+    return { what: `journal ${number || jid}: deductor ${name ? `${name} ` : ''}(${t})` };
+  });
+}
+
 async function reject(entity, by, customerId, tan, on = true, name = '') {
   return change(entity, by, d => {
     const k = `${customerId}|${normTan(tan)}`;
@@ -241,4 +339,4 @@ async function reject(entity, by, customerId, tan, on = true, name = '') {
   });
 }
 
-module.exports = { load, index, suggestions, approve, saveGroup, removeGroup, noCustomer, reject, similarity, tokens, isAuto };
+module.exports = { load, index, suggestions, approve, saveGroup, removeGroup, noCustomer, reject, journalDeductor, similarity, tokens, isAuto, nameFinder };

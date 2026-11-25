@@ -103,10 +103,16 @@ export default function ReportTab({ meta, onChanged }) {
               {rows ? `${shown.length} of ${rows.length} bills` : 'Loading…'}
               {automated.bills > 0 && ` · ${automated.drafted} of ${automated.bills} reached a Zoho draft`}
             </span>
+            {(rows || []).some(x => x.status === 'received') && (
+              <div style={{ ...S.small, marginTop: 3 }}>
+                {rows.filter(x => x.status === 'received').length} bill(s) are waiting to be read. Reading runs by itself in the background
+                {meta.integrations?.vercel ? ` (online: every 5 minutes, ${meta.integrations?.claude?.enabled ? 'three bills at a time' : 'one bill at a time with the built-in reader'})` : ''} — press Refresh to see the details as they come in.
+              </div>
+            )}
           </div>
           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
             <button style={S.ghost} onClick={load}><RefreshCw size={13} /> Refresh</button>
-            {r.review && <button style={S.btn} disabled={!!busy} onClick={() => run('mail', () => bb.poll(), x => `Mailboxes checked: ${x.results.reduce((s, y) => s + y.ingested, 0)} new bill(s)${x.results.some(y => y.error) ? ' — some mailboxes reported an error (Team & Mailboxes)' : ''}${!x.results.length ? ' — no mailbox is connected yet' : ''}`)}>
+            {r.review && <button style={S.btn} disabled={!!busy} onClick={() => run('mail', () => bb.poll(), x => `Mailboxes checked: ${x.results.reduce((s, y) => s + y.ingested, 0)} new bill(s)${x.results.some(y => y.error) ? ' — some mailboxes reported an error (Team & Mailboxes)' : ''}${!x.results.length ? ' — no mailbox is connected yet' : ''}${x.results.some(y => y.more) ? ' — more emails are waiting: check again to continue' : ''}${x.waiting ? ` — ${x.waiting} bill(s) waiting to be read (continues in the background)` : ''}`)}>
               <Mail size={13} /> {busy === 'mail' ? 'Checking…' : 'Check mailboxes now'}</button>}
             {r.review && <button style={S.btn} disabled={!!busy} onClick={() => run('zoho', () => bb.refreshZoho(), x => `Zoho drafts checked: ${x.results.length}`)}>
               <RefreshCw size={13} /> {busy === 'zoho' ? 'Checking…' : 'Refresh Zoho status'}</button>}
