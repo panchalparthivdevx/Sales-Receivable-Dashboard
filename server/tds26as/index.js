@@ -282,6 +282,35 @@ router.get('/recon/unit', gate(), wrap(async (req, res) => {
   res.json({ unit: RP.unitView(u, d, mp, orgOf(e)), comparison: RP.comparison(u, mp), history, links,
     evidence: u.evidence.map(x => ({ ...x, credit_line: x.credit ? RP.cBrief(mp.cBy.get(x.credit)) : null, zoho_line: x.zoho && mp.zBy.get(x.zoho) ? RP.zBrief(mp.zBy.get(x.zoho), orgOf(e)) : null })) });
 }));
+// Client totals: per client, the period's Zoho TDS, 26AS deducted / deposited, difference and statuses; a status for whole clients
+router.get('/reports/clients', gate(), wrap(async (req, res) => {
+  const { period, d, res: r } = await runFor(req);
+  res.json({ period, ...RP.clientTotals(d, r, period), rounding_tol_p: d.settings.rounding_tol_p });
+}));
+router.post('/review/client-decision', gate('review'), wrap(async (req, res) => {
+  const e = entityOf(req);
+  const period = periodOf(req.body || {});
+  const asked = Array.isArray(req.body?.clients) ? req.body.clients.slice(0, 3000) : [];
+  if (!asked.length) return bad(res, 400, 'Choose at least one client');
+  const { d, res: r } = await need().recon.run(e, period);
+  const ct = RP.clientTotals(d, r, period);
+  const byId = new Map(r.units.map(u => [u.id, u]));
+  const chosen = [];
+  for (const a of asked) {
+    const row = ct.rows.find(x => x.id === String(a?.id || ''));
+    const seen = (Array.isArray(a?.units) ? a.units : []).map(String).sort().join(',');
+    if (!row || row.units.slice().sort().join(',') !== seen) return bad(res, 409, `${row ? row.client : 'A client'} changed since the page was loaded (new entries, credits or links) — reload and try again`);
+    chosen.push({ id: row.id, client: row.client, zoho: row.zoho, deposited: row.deposited, diff: row.diff, units: row.units.map(id => byId.get(id)) });
+  }
+  let out;
+  try { out = await RV.decideClients(e.id, byName(req), chosen, req.body || {}, period); } catch (x) { return bad(res, x.status || 400, x.message); }
+  const label = req.body.final_status ? M.STATUS[req.body.final_status] : 'system status';
+  const names = chosen.map(c => `${c.client} (${c.units.length} item${c.units.length === 1 ? '' : 's'}, difference ${fmtR(c.diff)})`).join('; ');
+  await AUD.log({ by: byName(req), action: 'review.client_decision', entity: e.id, ref: chosen.length === 1 ? chosen[0].id : `${chosen.length} clients`,
+    detail: `${period.label || `${period.from} to ${period.to}`} → ${label}: ${names.length > 1500 ? `${names.slice(0, 1500)}…` : names}${req.body.remarks ? ` — ${String(req.body.remarks).slice(0, 200)}` : ''}${out.skipped_carry_forward ? ` · ${out.skipped_carry_forward} carry-forward item(s) left as they are` : ''}` });
+  need().recon.bump();
+  res.json(out);
+}));
 router.get('/reports/followup', gate(), wrap(async (req, res) => {
   const { period, d, res: r } = await runFor(req);
   const fu = RP.followUp(d, r, period, people(req.t26.users));
@@ -428,7 +457,7 @@ router.post('/recon/rerun', gate('prepare'), wrap(async (req, res) => {
 // ── Export ────────────────────────────────────────────────────────────────────
 router.get('/export/xlsx', gate(), wrap(async (req, res) => {
   const { e, period, d, res: r } = await runFor(req);
-  const kind = ['followup', 'transactions', 'corrections', 'carryforward', 'all'].includes(req.query.report) ? req.query.report : 'all';
+  const kind = ['followup', 'clients', 'transactions', 'corrections', 'carryforward', 'all'].includes(req.query.report) ? req.query.report : 'all';
   const mp = RP.maps(d);
   const dash = RP.dashboard(d, r, period);
   const fu = RP.followUp(d, r, period, people(req.t26.users));
@@ -439,7 +468,7 @@ router.get('/export/xlsx', gate(), wrap(async (req, res) => {
   const cov = await coverageOf(e, period, d);
   const buf = EX.build({
     kind, scope: { entity: e.name, pan: e.pan, period: period.label, filters: Object.entries(req.query).filter(([k, v]) => v && !['entity', 'fy', 'q', 'from', 'to', 'report'].includes(k)).map(([k, v]) => `${k}=${v}`).join(', ') },
-    dash, fu, units: unitsSel.map(u => RP.unitView(u, d, mp, orgOf(e))), cr: RP.corrections(d, r, orgOf(e)), cf: RP.carryForward(d, period.from, period.to, req.query.by === 'fy' ? 'fy' : 'quarter'),
+    dash, fu, ct: kind === 'clients' || kind === 'all' ? RP.clientTotals(d, r, period) : null, units: unitsSel.map(u => RP.unitView(u, d, mp, orgOf(e))), cr: RP.corrections(d, r, orgOf(e)), cf: RP.carryForward(d, period.from, period.to, req.query.by === 'fy' ? 'fy' : 'quarter'),
     coverage: [{ label: 'Last Zoho sync', value: d.sync.last_ok_at || 'never' }, ...cov.statements.map(s => ({ label: `Form 26AS FY ${s.fy}`, value: s.missing ? 'not uploaded' : `dated ${s.statement_date} (version ${s.version})` })), ...cov.gaps.map(g => ({ label: 'Coverage gap', value: g }))],
     generatedBy: byName(req), today: todayIST(),
   });

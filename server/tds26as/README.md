@@ -168,6 +168,12 @@ All reports filter by entity, period, client, TAN, section and status, and expor
   - shown separately: excess credit (never netted), subsequent-period credit, needs review first
   - also: owner, remarks, oldest open date
   - rows for unmapped customers or deductors and unallocated postings, so the totals tie to both sources
+- **Client totals (24 Nov 2026):**
+  - one row per client (same rows as the follow-up report): items, TDS booked in Zoho, 26AS deducted and deposited, **difference = Zoho − deposited**, and how many items have each status
+  - each row is the sum of the client's units, so it shows exactly what the Transactions list filtered to that client shows ("Items" opens that list)
+  - filters: search, **difference up to ₹** (either way), clients with open items / with or without a whole-client status; sort by name or by difference
+  - **status for the whole client:** tick one or more clients and set one final status with remarks (required), references and an attachment. Every item of those clients in the period gets that final status (same record as a single review, history marked "for the whole client"); items a reviewer carried forward are left as they are; "Back to the system status" clears it. Above the rounding tolerance the dialog says the status is recorded as the reviewer's decision. The server refuses the save if the client's items changed since the page was loaded. Each decision is kept per client with its period and totals (`client_decisions` in `review_<entity>`) and written to the audit log (`review.client_decision`)
+  - the status is stored on each entry and credit, so it also shows for a shorter period; entries or credits that arrive later keep the system status until reviewed
 - **Transactions:** both source references, dates, base values, TDS amounts, signed difference, method, system and final status, likely reason. A side-by-side drawer shows the comparison.
 - **Zoho corrections:**
   - 26AS credits missing from Zoho, with candidate invoices
@@ -214,14 +220,15 @@ Admins can load **demo data** (Settings & audit) to see every case first. It is 
 
 ## Tests
 
-`npm run test:tds26as` (44 tests):
+`npm run test:tds26as` (48 tests):
 
 - parser: text, Excel, CSV, PDF, protected PDF, protected ZIP
 - clients matched on the TAN (`tests/tanmatch.test.js`, synthetic): one TAN under three Zoho customers with only one mapped, one TAN under two customers with nothing mapped, a mistyped invoice TAN, another client's TAN on an invoice, a ruled-out pair, a name suggestion joining two TANs, order independence
 - the Tax Year 2026-27 statement layout (Excel and PDF, synthetic data), section codes, reversal pairs, Gross Total
 - every acceptance case on the demo scenario
 - sync on a fake Zoho with the live response shapes, the report pacing, the block handling and the stored lock
-- the HTTP routes: rights, entity limits, upload, review, export, audit
+- the same amount several times in one quarter, paired in date order (`tests/equalamounts.test.js`, synthetic)
+- the HTTP routes: rights, entity limits, upload, review, export, audit; Client totals (rows = the Transactions list per client, whole-client status with remarks, stale page refused, carry-forward items kept, clear, export, audit)
 
 ## Tax Year 2026-27 statement (seen 23 Nov 2026)
 

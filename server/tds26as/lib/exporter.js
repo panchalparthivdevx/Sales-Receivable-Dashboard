@@ -1,7 +1,7 @@
 /**
  * Excel export — built from the same objects the screens show (lib/reports.js), so a figure cannot differ between the page and the
- * workbook. Amounts are numbers in rupees (#,##0.00), dates are Excel dates. Sheet sets: followup | transactions | corrections |
- * carryforward | all.
+ * workbook. Amounts are numbers in rupees (#,##0.00), dates are Excel dates. Sheet sets: followup | clients | transactions |
+ * corrections | carryforward | all.
  */
 
 'use strict';
@@ -27,6 +27,18 @@ function sheet(cols, rows) {
   return ws;
 }
 const srcText = s => (s ? [s.file, s.sheet ? `sheet ${s.sheet}` : '', s.page ? `page ${s.page}` : '', s.line ? `line ${s.line}` : '', s.row ? `row ${s.row}` : ''].filter(Boolean).join(', ') : '');
+
+const KIND_TEXT = { client: 'Client', unmapped_customer: 'Customer not mapped', unmapped_tan: 'Deductor not mapped', unallocated: 'Unallocated' };
+function clientsSheet(ct, statusText) {
+  const cols = [
+    ['Client', r => r.client], ['TAN(s)', r => r.tans.join(', ')], ['Items', r => r.items], ['TDS booked in Zoho', r => r.zoho, 'money'], ['Tax deducted per 26AS', r => r.deducted, 'money'],
+    ['Tax deposited per 26AS', r => r.deposited, 'money'], ['Difference (Zoho − deposited)', r => r.diff, 'money'], ['Items Matched / Rounding', r => r.cleared],
+    ['Item statuses', r => Object.entries(r.by_status || {}).map(([k, n]) => `${statusText[k] || k} ${n}`).join(', ')], ['Client status (reviewer)', r => (r.client_status ? statusText[r.client_status] : r.reviewed ? `Reviewed ${r.reviewed} of ${r.items}` : '')],
+    ['Remarks', r => (r.decision ? r.decision.remarks : '')], ['Decided by', r => (r.decision ? r.decision.by : '')], ['Decided on', r => (r.decision ? String(r.decision.at).slice(0, 10) : ''), 'date'],
+    ['Row type', r => KIND_TEXT[r.kind] || r.kind],
+  ];
+  return sheet(cols, [...ct.rows, { client: 'TOTAL', tans: [], ...ct.totals, cleared: '', by_status: {}, kind: '' }]);
+}
 
 function followupSheet(fu) {
   const cols = [
@@ -91,7 +103,7 @@ function cfSheets(cf) {
   return { mov, items };
 }
 
-function build({ kind, scope, dash, fu, units, cr, cf, coverage, generatedBy, today }) {
+function build({ kind, scope, dash, fu, ct, units, cr, cf, coverage, generatedBy, today }) {
   const wb = XLSX.utils.book_new();
   const about = [['26AS Reconciliation'], [], ['Entity', scope.entity], ['PAN', scope.pan], ['Period', scope.period], ['Filters', scope.filters || 'none'], ['Generated', `${today} by ${generatedBy}`],
     ['Zoho Books', 'read-only — nothing was changed in Zoho'], ['TDS difference', 'Zoho TDS receivable − 26AS tax deposited (positive = the books show more TDS than the statement credits)'], []];
@@ -100,6 +112,7 @@ function build({ kind, scope, dash, fu, units, cr, cf, coverage, generatedBy, to
   const ws = XLSX.utils.aoa_to_sheet(about); ws['!cols'] = [{ wch: 30 }, { wch: 90 }];
   XLSX.utils.book_append_sheet(wb, ws, 'About');
   if (fu && (kind === 'followup' || kind === 'all')) { XLSX.utils.book_append_sheet(wb, followupSheet(fu), 'Client follow-up'); }
+  if (ct && (kind === 'clients' || kind === 'all')) { XLSX.utils.book_append_sheet(wb, clientsSheet(ct, STATUS), 'Client totals'); }
   if (units && (kind === 'transactions' || kind === 'all' || kind === 'followup')) { XLSX.utils.book_append_sheet(wb, transactionsSheet(units), kind === 'followup' ? 'Open transactions' : 'Transactions'); XLSX.utils.book_append_sheet(wb, linesSheet(units), 'Source lines'); }
   if (dash && (kind === 'all' || kind === 'transactions')) {
     const b = dash.bridge;

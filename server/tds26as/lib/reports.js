@@ -151,18 +151,24 @@ function bridge(d, res, totals) {
     difference: totals.zoho - effect - totals.deposited, deducted_gap: totals.deducted - totals.deposited };
 }
 
+/** The client row a unit belongs to: its client group, else one row per not-mapped customer / deductor, else "unallocated" */
+function rowOf(d, mp, u) {
+  if (u.group) { const g = d.clients.groups.get(u.group); return { id: u.group, label: g ? g.name : u.client, kind: 'client', tans: g ? g.tans.map(t => t.tan) : u.tans }; }
+  if (u.reason && u.reason.code === 'unallocated') return { id: '__unallocated', label: 'Unallocated Zoho postings (no customer)', kind: 'unallocated', tans: [] };
+  if (u.zoho.length && !u.credits.length) { const z = mp.zBy.get(u.zoho[0]); return { id: `cust:${z.customer_id}`, label: `${z.customer_name || z.customer_id} — customer not mapped`, kind: 'unmapped_customer', tans: z.tan_hints }; }
+  if (u.credits.length) { const c = mp.cBy.get(u.credits[0]); return { id: `tan:${c.tan}`, label: `${c.deductor} (${c.tan}) — deductor ${d.clients.noCustomer.has(c.tan) ? 'with no Zoho customer' : 'not mapped'}`, kind: 'unmapped_tan', tans: [c.tan] }; }
+  return null;
+}
+
 /** Client-wise TDS deposit and follow-up — one row per client group, plus rows for what is not mapped, so the totals tie to both sources */
 function followUp(d, res, period, people = []) {
   const mp = maps(d);
   const rows = new Map();
   const rowFor = (id, label, kind, tans) => rows.get(id) || rows.set(id, { id, client: label, kind, tans: new Set(tans || []), zoho: 0, deducted: 0, deposited: 0, missing: 0, ded_gt_dep: 0, short_credit: 0, non_deposit: 0, subsequent: 0, review_first: 0, excess_credit: 0, follow_up: 0, oldest_open: '', units: [], open_units: [] }).get(id);
   for (const u of res.units) {
-    let r;
-    if (u.group) { const g = d.clients.groups.get(u.group); r = rowFor(u.group, g ? g.name : u.client, 'client', g ? g.tans.map(t => t.tan) : u.tans); }
-    else if (u.reason && u.reason.code === 'unallocated') r = rowFor('__unallocated', 'Unallocated Zoho postings (no customer)', 'unallocated');
-    else if (u.zoho.length && !u.credits.length) { const z = mp.zBy.get(u.zoho[0]); r = rowFor(`cust:${z.customer_id}`, `${z.customer_name || z.customer_id} — customer not mapped`, 'unmapped_customer', z.tan_hints); }
-    else if (u.credits.length) { const c = mp.cBy.get(u.credits[0]); r = rowFor(`tan:${c.tan}`, `${c.deductor} (${c.tan}) — deductor ${d.clients.noCustomer.has(c.tan) ? 'with no Zoho customer' : 'not mapped'}`, 'unmapped_tan', [c.tan]); }
-    else continue;
+    const k = rowOf(d, mp, u);
+    if (!k) continue;
+    const r = rowFor(k.id, k.label, k.kind, k.tans);
     r.zoho += u.method === 'cf_settlement' ? 0 : u.z_amount;
     r.deducted += u.deducted; r.deposited += u.deposited;
     r.units.push(u.id);
@@ -190,6 +196,37 @@ function followUp(d, res, period, people = []) {
   const tot = f => sum(out, r => r[f]);
   return { rows: out, totals: { zoho: tot('zoho'), deducted: tot('deducted'), deposited: tot('deposited'), missing: tot('missing'), ded_gt_dep: tot('ded_gt_dep'), short_credit: tot('short_credit'), non_deposit: tot('non_deposit'),
     subsequent: tot('subsequent'), review_first: tot('review_first'), excess_credit: tot('excess_credit'), follow_up: tot('follow_up') }, definitions: DEFINITIONS };
+}
+
+/**
+ * Client totals (24 Nov 2026): per client row (as in the follow-up report), the period's Zoho TDS, 26AS deducted / deposited and the
+ * difference — each the sum over the client's units, so a row shows the same figures as the Transactions list filtered to that client —
+ * with the items' statuses and the reviewer's whole-client decisions (lib/review.decideClients).
+ */
+function clientTotals(d, res, period) {
+  const mp = maps(d);
+  const rows = new Map();
+  for (const u of res.units) {
+    const k = rowOf(d, mp, u);
+    if (!k) continue;
+    const r = rows.get(k.id) || rows.set(k.id, { id: k.id, client: k.label, kind: k.kind, tans: new Set(k.tans || []), zoho: 0, deducted: 0, deposited: 0, diff: 0, units: [], by_status: {}, reviewed: 0, finals: new Set(), carry_forward: 0 }).get(k.id);
+    r.zoho += u.z_amount; r.deducted += u.deducted; r.deposited += u.deposited; r.diff += u.diff;
+    r.units.push(u.id);
+    r.by_status[u.effective] = (r.by_status[u.effective] || 0) + 1;
+    if (u.final_status) r.reviewed += 1;
+    if (u.final_status === 'carry_forward') r.carry_forward += 1;
+    r.finals.add(u.final_status || '');
+  }
+  const decisions = (d.review && d.review.client_decisions) || {};
+  const same = x => x.period && x.period.from === period.from && x.period.to === period.to;
+  const out = [...rows.values()].map(({ finals, ...r }) => {
+    const hist = decisions[r.id] || [];
+    const here = hist.filter(same);
+    const last = (here.length ? here : hist)[(here.length ? here : hist).length - 1] || null;
+    return { ...r, tans: [...r.tans], items: r.units.length, client_status: finals.size === 1 && !finals.has('') ? [...finals][0] : '', cleared: (r.by_status.matched || 0) + (r.by_status.rounding || 0),
+      decision: last ? { final_status: last.final_status, remarks: last.remarks, refs: last.refs || [], by: last.by, at: last.at, period: last.period, this_period: same(last), items: last.items, diff: last.diff } : null };
+  }).sort((a, b) => a.client.localeCompare(b.client));
+  return { rows: out, totals: { zoho: sum(out, r => r.zoho), deducted: sum(out, r => r.deducted), deposited: sum(out, r => r.deposited), diff: sum(out, r => r.diff), items: sum(out, r => r.items) } };
 }
 
 /** Potential corrections in Zoho Books — never made by this module (read-only), listed with links to the Zoho records */
@@ -253,4 +290,4 @@ function carryForward(d, from, to, by = 'quarter') {
   return { by, rows, items: items.map(x => ({ ...x, origin_label: PER.qLabel(x.origin_quarter), target_label: PER.qLabel(x.target_quarter), settled_label: x.settlement ? PER.qLabel(x.settlement.quarter) : '', closed_label: x.closure ? PER.qLabel(x.closure.quarter) : '' })) };
 }
 
-module.exports = { dashboard, bridge, followUp, corrections, carryForward, unitView, comparison, filterUnits, sortUnits, maps, zBrief, cBrief, DEFINITIONS, zohoUrl };
+module.exports = { dashboard, bridge, followUp, clientTotals, rowOf, corrections, carryForward, unitView, comparison, filterUnits, sortUnits, maps, zBrief, cBrief, DEFINITIONS, zohoUrl };

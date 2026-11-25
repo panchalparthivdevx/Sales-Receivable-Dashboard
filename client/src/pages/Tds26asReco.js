@@ -3,6 +3,7 @@ import { t, errMsg } from './tds26as/api';
 import { S } from './tds26as/ui';
 import DashboardTab from './tds26as/DashboardTab';
 import FollowUpTab from './tds26as/FollowUpTab';
+import ClientTotalsTab from './tds26as/ClientTotalsTab';
 import TransactionsTab from './tds26as/TransactionsTab';
 import CorrectionsTab from './tds26as/CorrectionsTab';
 import CarryForwardTab from './tds26as/CarryForwardTab';
@@ -17,6 +18,7 @@ import SettingsTab from './tds26as/SettingsTab';
 const TABS = [
   { id: 'dashboard', label: 'Dashboard' },
   { id: 'followup', label: 'Client follow-up' },
+  { id: 'clienttotals', label: 'Client totals' },
   { id: 'transactions', label: 'Transactions' },
   { id: 'corrections', label: 'Zoho corrections' },
   { id: 'carry', label: 'Carry forward' },
@@ -24,7 +26,7 @@ const TABS = [
   { id: 'imports', label: 'Statements & Zoho sync' },
   { id: 'settings', label: 'Settings & audit' },
 ];
-const PERIODIC = ['dashboard', 'followup', 'transactions', 'corrections', 'carry'];
+const PERIODIC = ['dashboard', 'followup', 'clienttotals', 'transactions', 'corrections', 'carry'];
 const KEY = 't26_scope';
 const readS = (k, d) => { try { return JSON.parse(sessionStorage.getItem(k)) ?? d; } catch (_) { return d; } };
 const fyList = cur => { const s = +cur.slice(0, 4); return Array.from({ length: 6 }, (_, i) => { const y = s + 1 - i; return `${y}-${String((y + 1) % 100).padStart(2, '0')}`; }); };
@@ -109,6 +111,7 @@ export default function Tds26asReco() {
 
       {current === 'dashboard' && !empty && <DashboardTab meta={meta} params={params} stamp={stamp} onDrill={onDrill} go={go} />}
       {current === 'followup' && !empty && <FollowUpTab meta={meta} params={params} stamp={stamp} onDrill={onDrill} onChanged={changed} />}
+      {current === 'clienttotals' && !empty && <ClientTotalsTab meta={meta} params={params} stamp={stamp} onDrill={onDrill} onChanged={changed} />}
       {current === 'transactions' && !empty && <TransactionsTab meta={meta} params={params} stamp={stamp} drill={drill} clearDrill={() => setDrill(null)} onChanged={changed} />}
       {current === 'corrections' && !empty && <CorrectionsTab meta={meta} params={params} stamp={stamp} />}
       {current === 'carry' && !empty && <CarryForwardTab meta={meta} params={params} stamp={stamp} onChanged={changed} />}

@@ -160,7 +160,7 @@ export default function UnitDrawer({ meta, params, id, onClose, onSaved }) {
         <div style={S.cardBody}>
           {d.history.every(h => !h.history.length) ? <span style={S.muted}>No review yet.</span> : d.history.filter(h => h.history.length).slice(0, 1).flatMap(h => h.history.slice().reverse()).map((h, i) => (
             <div key={i} style={{ fontSize: '0.74rem', padding: '0.25rem 0', borderBottom: '1px solid #F0F2F1' }}>
-              {dtm(h.at)} · <b>{h.by}</b> · system {meta.statuses[h.system_status] || h.system_status} → final {h.final_status ? meta.statuses[h.final_status] : '(system)'}{h.cf ? ` · carry forward ${h.cf}` : ''}{h.non_deposit ? ' · confirmed non-deposit' : ''}{h.remarks ? ` — ${h.remarks}` : ''}
+              {dtm(h.at)} · <b>{h.by}</b> · system {meta.statuses[h.system_status] || h.system_status} → final {h.final_status ? meta.statuses[h.final_status] : '(system)'}{h.cf ? ` · carry forward ${h.cf}` : ''}{h.non_deposit ? ' · confirmed non-deposit' : ''}{h.whole_client ? ' · for the whole client (Client totals)' : ''}{h.remarks ? ` — ${h.remarks}` : ''}
             </div>))}
         </div>
       </div>

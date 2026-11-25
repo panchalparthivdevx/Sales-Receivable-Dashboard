@@ -7,6 +7,8 @@
  * A decision keeps the system status it was taken against, who took it and when, and every change in `history` (never overwritten).
  * "Confirmed non-deposit" can only be recorded with evidence (a description and at least one reference or attachment).
  *
+ * A whole-client decision (Client totals tab) writes the same per-entry decision for every item of the client(s) — see decideClients.
+ *
  * Carry Forward: a reviewer approves an open amount for tracking into a later quarter / financial year (origin entries, balance, target
  * period and reason are captured). When a credit (or a later Books entry) of the same client and amount appears from the target period
  * on, the reconciliation links it to the item and closes the balance — once: a settled item and its credit cannot be used again. A
@@ -89,6 +91,51 @@ async function decide(entity, by, unit, body, period) {
   return { ...out, carry_forward: cfItem };
 }
 
+/**
+ * Whole-client decision (24 Nov 2026, Client totals tab): one final status + remarks for every item of one or more clients in a period.
+ * Each entry / credit gets the same decision record as a single review (history kept, marked whole_client). Items a reviewer carried
+ * forward are left as they are (their carry-forward item stays open); "Confirmed non-deposit" marks are kept. Per client a record of the
+ * decision with the period and its totals is kept in client_decisions (last 50).
+ * clients: [{ id, client, zoho, deposited, diff, units: [unit as computed now] }]   body: { final_status, remarks, refs, attachments }
+ */
+async function decideClients(entity, by, clients, body, period) {
+  const fs = body.final_status === '' || body.final_status === null || body.final_status === undefined ? '' : String(body.final_status);
+  if (fs && !STATUS[fs]) throw bad(`Unknown status "${fs}"`);
+  if (fs === 'carry_forward') throw bad('Carry Forward is set item by item (it needs the open balance and the quarter to carry it to)');
+  const remarks = String(body.remarks ?? '').trim().slice(0, 2000);
+  if (fs && !remarks) throw bad('Write the remarks for this decision — they are kept with every item of the client');
+  const refs = cleanRefs(body.refs);
+  const attachments = (body.attachments || []).filter(a => a && /^[a-f0-9]{64}$/.test(a.sha256)).map(a => ({ sha256: a.sha256, name: String(a.name || '').slice(0, 200), size: Number(a.size) || 0, by: a.by || by, at: a.at || new Date().toISOString() }));
+  if (!clients.length) throw bad('Choose at least one client');
+  const at = new Date().toISOString();
+  const tally = { clients: clients.length, units: 0, keys: 0, skipped_carry_forward: 0 };
+  await store.update(rKey(entity), EMPTY, doc => {
+    const d = { ...EMPTY, ...doc };
+    d.client_decisions = { ...(d.client_decisions || {}) };
+    for (const cl of clients) {
+      let n = 0;
+      for (const u of cl.units) {
+        if (u.final_status === 'carry_forward') { tally.skipped_carry_forward += 1; continue; }
+        const keys = [...u.zoho, ...u.credits];
+        for (const k of keys) {
+          const prev = d.items[k] || { history: [] };
+          const next = { ...prev, final_status: fs, remarks, refs, attachments: [...(prev.attachments || []).filter(a => !attachments.some(b => b.sha256 === a.sha256)), ...attachments],
+            non_deposit: prev.non_deposit || null, system_status: u.status, unit_id: u.id, unit_keys: keys, by, at, cf_id: null, whole_client: cl.id };
+          next.history = [...(prev.history || []), { at, by, system_status: u.status, final_status: fs, remarks, refs, non_deposit: !!next.non_deposit, whole_client: true }].slice(-100);
+          d.items[k] = next;
+          tally.keys += 1;
+        }
+        n += 1;
+      }
+      tally.units += n;
+      const rec = { at, by, final_status: fs, remarks, refs, period: { from: period.from, to: period.to, label: period.label || '' }, items: n, zoho: cl.zoho, deposited: cl.deposited, diff: cl.diff, client: cl.client };
+      d.client_decisions[cl.id] = [...(d.client_decisions[cl.id] || []), rec].slice(-50);
+    }
+    return { out: null, doc: d };
+  });
+  return tally;
+}
+
 async function link(entity, by, zoho, credits, note) {
   if (!zoho.length || !credits.length) throw bad('Choose at least one Zoho entry and one 26AS credit');
   return store.update(rKey(entity), EMPTY, doc => {
@@ -163,4 +210,4 @@ async function reopenMissing(entity, existingKeys) {
   });
 }
 
-module.exports = { load, loadCf, decide, link, unlink, setClient, closeCf, settle, reopenMissing, targetQuarter };
+module.exports = { load, loadCf, decide, decideClients, link, unlink, setClient, closeCf, settle, reopenMissing, targetQuarter };
