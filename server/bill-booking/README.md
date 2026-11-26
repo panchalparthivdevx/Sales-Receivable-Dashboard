@@ -30,6 +30,22 @@ Invoices issued by our own companies to customers (payment reminders from Accoun
 - **Not collected:** an email attachment named like one of our sales invoices in Zoho (central sync `invoices_fy`, e.g. `IN26-27GJ2632.pdf`) is listed under Team & Mailboxes → Skipped attachments with the reason.
 - **Not a Bill:** a collected document is set aside with the reason when its number is one of our Zoho sales invoices (and the date or total does not contradict it), when the seller block before "Bill To / Buyer …" carries only our company's name and GSTIN, or when the reader found our GSTIN as the supplier. "It is a bill" overrules it.
 - An invoice from one of our companies to another (DevX ↔ Neddle) is a purchase bill for the buyer and is collected as usual.
+- Zoho's invoice PDFs put the totals first in the text, so the letterhead check looks for our name just above our GSTIN, wherever it sits.
+- An invoice raised after the last sync (not in `invoices_fy` yet) is recognised by our numbering series (e.g. `IN/26-27/GJ/…`): a prefix with letters and digits, used at least 20 times. Generic numbering such as `INV-…` never counts.
+
+## Read all again with Claude
+
+Report → **Read all again with Claude** (Configure right, only when `ANTHROPIC_API_KEY` is set) reads again, from the stored files, every open bill that the built-in reader read. It first shows how many bills and a rough cost, then asks to confirm. Bills changed by hand, already read by Claude, set aside (Not a Bill, Duplicate), Zoho drafts and our own sales invoices are kept as they are. Online, the bills go back to Received and are read three at a time, by the request and by the 5-minute scheduler. The action is recorded in the module's audit log.
+
+## Logos, badges, banners and marketing material
+
+Email signatures and newsletters carry pictures that are not bills (`lib/pictures.js`). The picture's size and shape are read from the file header, so it is set aside without reading it (no OCR or Claude time):
+
+- **Ignored at the mailbox** (counted in the mailbox log as "logos / pictures ignored"): pictures under 0.4 megapixels or under 300 pixels on the short side, and banners more than three times wider than high. Inline pictures and pictures under 30 KB were already ignored.
+- **Listed under Skipped attachments** ("Read as bill" reads one anyway): pictures inside the email text, which Outlook names `image001.png`, `image002.jpg` … (new Outlook: `Outlook-xxxx.png`), under 1.5 megapixels.
+- **Not a Bill after reading:** the same rules for pictures that were collected anyway, and pictures in which OCR found no words. A reading that found a bill heading, invoice number, total or supplier GSTIN always keeps it as a bill.
+- **Newsletters / marketing emails** (an unsubscribe, preferences or "view in browser" link in the email text): their attachments are read, and set aside as Not a Bill only when they have no bill heading, invoice number or total.
+- "Read again" and "It is a bill" always overrule these rules.
 
 ## Category from the vendor's Zoho bills
 

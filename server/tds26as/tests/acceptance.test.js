@@ -65,14 +65,17 @@ test('several Zoho invoices matching one 26AS credit — client total, no credit
   assert.equal(new Set(all).size, res.zoho_in_period.length + res.credits_in_period.length);
 });
 
-test('two identical TDS amounts for one client, one credit — sent to review as ambiguous', async () => {
+test('two identical TDS amounts for one client, one credit — the credit takes the older invoice (by date, then number); the other stays open', async () => {
+  // (until 26 Nov 2026 this went to review as "ambiguous": which of two equal invoices is open changes no difference)
   const { d, res } = await recon.run(X, Q4);
-  const u = one(unitsOf(res, d, sc.C.E.tan));
-  assert.equal(u.status, 'need_check');
-  assert.equal(u.reason.code, 'ambiguous');
-  assert.equal(u.zoho.length, 2);
-  assert.equal(u.credits.length, 1);
-  assert.equal(u.evidence.filter(e => e.kind === 'candidate').length, 2, 'both candidate invoices are listed');
+  const us = unitsOf(res, d, sc.C.E.tan);
+  assert.equal(us.length, 2);
+  const m = one(us.filter(u => u.credits.length));
+  assert.deepEqual([m.status, m.zoho.length, m.flags.includes('equal_amounts_date_order')], ['matched', 1, true]);
+  assert.equal(d.items.find(i => i.key === m.zoho[0]).number, 'DX/25-26/0107');
+  const o = one(us.filter(u => !u.credits.length));
+  assert.equal(d.items.find(i => i.key === o.zoho[0]).number, 'DX/25-26/0108');
+  assert.ok(!res.units.some(u => u.reason && u.reason.code === 'ambiguous' && u.group === m.group));
 });
 
 test('March Zoho entry, April 26AS credit — March shows Need to Check with the April evidence; April is not in March totals', async () => {

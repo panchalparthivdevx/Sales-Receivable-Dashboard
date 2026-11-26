@@ -14,6 +14,7 @@
 const C = require('./config');
 const SEC = require('./secrets');
 const OS = require('./ownsale');
+const PIC = require('./pictures');
 
 const GRAPH = 'https://graph.microsoft.com/v1.0';
 const GMAIL = 'https://gmail.googleapis.com/gmail/v1/users/me';
@@ -21,6 +22,9 @@ const BILL_WORDS = /\b(invoice|invoices|inv|bill|bills|tax\s*invoice|gst|debit\s
 const MAX_MESSAGES = 200;           // per mailbox per poll
 const MIN_IMAGE_BYTES = 30 * 1024;  // smaller images are logos / signatures
 const MAX_FILE_BYTES = 25 * 1024 * 1024;
+// Newsletters and marketing emails: an unsubscribe / preferences / "view in browser" link
+const MARKETING_RE = /\bunsubscribe\b|\bopt[\s-]?out\b|manage\s+(your\s+)?(e-?mail\s+|mail\s+)?(preferences|subscriptions?)|view\s+(this\s+(e-?mail|mail|message|newsletter)\s+|it\s+)?(in|on)\s+(a|your)\s+(web\s+)?browser|no\s+longer\s+(wish|want)\s+to\s+receive/i;
+const marketingOf = (text, listUnsubscribe = false) => (listUnsubscribe || MARKETING_RE.test(String(text || '')) ? 'a newsletter or marketing email (it has an unsubscribe link)' : '');
 
 // Settings pasted into Vercel / .env often carry a stray space, line break or quotes — the provider then refuses them
 const env = k => String(process.env[k] || '').trim().replace(/^(['"])(.*)\1$/, '$2').trim();
@@ -213,18 +217,21 @@ function create({ store, pipeline, files, http = require('axios'), lookups, log 
   async function graphMessages(member, token, since) {
     const base = member.provider === 'microsoft_app' ? `${GRAPH}/users/${encodeURIComponent(member.email)}` : `${GRAPH}/me`;
     const H = { headers: { Authorization: `Bearer ${token}` }, timeout: 60000 };
+    // the text body is read only to recognise newsletters / marketing emails (their unsubscribe link is at the end); it is not stored
+    const LIST = { ...H, headers: { ...H.headers, Prefer: 'outlook.body-content-type="text"' } };
     let url = `${base}/messages?${form({
       $filter: `receivedDateTime ge ${since} and hasAttachments eq true`, $orderby: 'receivedDateTime asc', $top: '25',
-      $select: 'id,internetMessageId,subject,from,receivedDateTime,bodyPreview,conversationId',
+      $select: 'id,internetMessageId,subject,from,receivedDateTime,bodyPreview,body,conversationId',
     })}`;
     const out = [];
     while (url && out.length < MAX_MESSAGES) {
-      const r = await http.get(url, H);
+      const r = await http.get(url, LIST);
       for (const m of r.data.value || []) {
         out.push({
           id: m.id, internet_id: m.internetMessageId, conversation_id: m.conversationId, subject: m.subject || '',
           from: m.from?.emailAddress?.name ? `${m.from.emailAddress.name} <${m.from.emailAddress.address}>` : (m.from?.emailAddress?.address || ''),
           from_address: String(m.from?.emailAddress?.address || '').toLowerCase(), received_at: m.receivedDateTime, body: m.bodyPreview || '',
+          marketing: marketingOf(`${m.bodyPreview || ''}\n${m.body?.content || ''}`),
           attachments: async () => {
             const a = await http.get(`${base}/messages/${m.id}/attachments`, { ...H, params: { $select: 'id,name,contentType,size,isInline' } });
             return (a.data.value || []).filter(x => x['@odata.type'] === '#microsoft.graph.fileAttachment').map(x => ({
@@ -261,6 +268,7 @@ function create({ store, pipeline, files, http = require('axios'), lookups, log 
         id, internet_id: hdr('message-id'), conversation_id: m.threadId, subject: hdr('subject'), from,
         from_address: ((from.match(/<([^>]+)>/) || [])[1] || from).toLowerCase().trim(),
         received_at: new Date(Number(m.internalDate)).toISOString(), body: m.snippet || '',
+        marketing: marketingOf(m.snippet, !!hdr('list-unsubscribe')),
         attachments: async () => parts.map(p => ({
           id: p.body.attachmentId, name: p.filename, type: p.mimeType, size: p.body.size || 0,
           inline: (p.headers || []).some(h => h.name.toLowerCase() === 'content-disposition' && /inline/i.test(h.value)),
@@ -286,7 +294,7 @@ function create({ store, pipeline, files, http = require('axios'), lookups, log 
     const results = [];
     for (const m of members) {
       if (deadline && Date.now() > deadline) {
-        results.push({ member_id: m.id, member: m.name, at: new Date().toISOString(), messages: 0, attachments: 0, ingested: 0, skipped: 0, existing: 0, error: '', more: true, not_started: true });
+        results.push({ member_id: m.id, member: m.name, at: new Date().toISOString(), messages: 0, attachments: 0, ingested: 0, skipped: 0, pictures: 0, existing: 0, error: '', more: true, not_started: true });
         continue;
       }
       results.push(await pollMember(m, cfg, by, deadline));
@@ -304,7 +312,7 @@ function create({ store, pipeline, files, http = require('axios'), lookups, log 
 
   async function pollMember(member, cfg, by, deadline = 0) {
     const started = new Date().toISOString();
-    const res = { member_id: member.id, member: member.name, at: started, messages: 0, attachments: 0, ingested: 0, skipped: 0, existing: 0, error: '', more: false };
+    const res = { member_id: member.id, member: member.name, at: started, messages: 0, attachments: 0, ingested: 0, skipped: 0, pictures: 0, existing: 0, error: '', more: false };
     const mailDoc = (await store.snapshot()).doc('bb_mail') || {};
     const since = mailDoc.cursors?.[member.id]?.since || new Date(Date.now() - cfg.settings.mail_lookback_days * 86400000).toISOString();
     let latest = since;
@@ -332,7 +340,8 @@ function create({ store, pipeline, files, http = require('axios'), lookups, log 
           res.attachments++;
           const ref = { mailbox: member.email, member_id: member.id, provider: member.provider, message_id: msg.id, internet_message_id: msg.internet_id,
             conversation_id: msg.conversation_id, received_at: msg.received_at, from: msg.from, from_address: msg.from_address, subject: msg.subject,
-            body_preview: String(msg.body).slice(0, 2000), attachment_id: a.id };
+            body_preview: String(msg.body).slice(0, 2000), attachment_id: a.id,
+            ...(msg.marketing ? { marketing: msg.marketing } : {}), ...(a.inline ? { inline: true } : {}) };
           const likely = BILL_WORDS.test(msg.subject) || BILL_WORDS.test(a.name) || BILL_WORDS.test(msg.body) || vendorsMail.has(msg.from_address);
           if (cfg.settings.mail_scope === 'likely_bills' && !likely) {
             skipped.push({ key: `${member.id}:${msg.id}:${a.id}`.slice(0, 400), ...ref, name: a.name, size: a.size, type: mime, at: started, reason: 'No bill words in the subject, file name or text, and the sender is not a Zoho vendor' });
@@ -351,6 +360,16 @@ function create({ store, pipeline, files, http = require('axios'), lookups, log 
             continue;
           }
           const buffer = await a.content();
+          // Logos, badges, banners and other pictures inside the email text are not bills
+          if (mime.startsWith('image/')) {
+            const pic = PIC.verdict({ name: a.name, dims: PIC.imageSize(buffer), inline: a.inline, size: a.size });
+            if (pic?.kind === 'logo') { res.pictures++; continue; }   // like the small signature images: counted, not listed
+            if (pic) {
+              skipped.push({ key: `${member.id}:${msg.id}:${a.id}`.slice(0, 400), ...ref, name: a.name, size: a.size, type: mime, at: started, reason: pic.reason, picture: true });
+              res.skipped++;
+              continue;
+            }
+          }
           const r = await pipeline.ingest({ buffer, name: a.name, mime, source: 'email', source_ref: ref, member_id: member.id, by: 'mailbox' });
           if (r.existed) res.existing++; else res.ingested++;
         }
@@ -397,8 +416,9 @@ function create({ store, pipeline, files, http = require('axios'), lookups, log 
       const base = member.provider === 'microsoft_app' ? `${GRAPH}/users/${encodeURIComponent(member.email)}` : `${GRAPH}/me`;
       buffer = Buffer.from((await http.get(`${base}/messages/${s.message_id}/attachments/${s.attachment_id}/$value`, { headers: { Authorization: `Bearer ${token}` }, responseType: 'arraybuffer', timeout: 60000 })).data);
     }
-    const { key: _k, name, size: _s, type, at: _a, reason: _r, ...ref } = s;
-    const r = await pipeline.ingest({ buffer, name, mime: type, source: 'email', source_ref: ref, member_id: member.id, by: user.name || user.username });
+    const { key: _k, name, size: _s, type, at: _a, reason: _r, picture: _p, own_sale: _o, ...ref } = s;
+    // "Read as bill": the team says it is a bill, so no "not a bill" rule sets it aside again
+    const r = await pipeline.ingest({ buffer, name, mime: type, source: 'email', source_ref: ref, member_id: member.id, by: user.name || user.username, as_bill: true });
     await store.tx(async t => {
       const m = { ...(t.doc('bb_mail') || {}) };
       m.skipped = (m.skipped || []).filter(x => x.key !== key);

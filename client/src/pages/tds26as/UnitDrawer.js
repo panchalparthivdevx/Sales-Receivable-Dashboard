@@ -61,6 +61,37 @@ function JournalDeductor({ z, meta, params, onDone, onError }) {
   );
 }
 
+/** An ambiguous item with several 26AS credits: the reviewer ticks which entries and credits belong together (one link per choice) —
+ *  replacing the one-click "this is the invoice", which linked the one invoice with ALL the item's credits */
+function LinkPicker({ u, params, onDone, onError }) {
+  const [zs, setZs] = useState([]);
+  const [cs, setCs] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const tog = (list, set, k) => set(list.includes(k) ? list.filter(x => x !== k) : [...list, k]);
+  const za = u.zoho_lines.filter(z => zs.includes(z.key)).reduce((a, z) => a + z.amount, 0);
+  const ca = u.credit_lines.filter(c => cs.includes(c.key)).reduce((a, c) => a + c.deposited, 0);
+  const go = async () => {
+    setBusy(true);
+    try { await t.link({ entity: params.entity, zoho: zs, credits: cs, note: 'linked in the item' }); onDone(`Linked ${zs.length} Zoho entr${zs.length === 1 ? 'y' : 'ies'} with ${cs.length} 26AS credit${cs.length === 1 ? '' : 's'}.`); }
+    catch (e) { onError(errMsg(e)); } finally { setBusy(false); }
+  };
+  const box = { display: 'flex', gap: 8, alignItems: 'center', fontSize: '0.76rem', padding: '0.2rem 0', cursor: 'pointer' };
+  return (
+    <div style={S.card}>
+      <div style={S.cardHead}><span style={S.cardTitle}>Link entries and credits that belong together</span></div>
+      <div style={{ ...S.cardBody, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
+        <div><div style={S.small}>Zoho entries</div>{u.zoho_lines.map(z => <label key={z.key} style={box}><input type="checkbox" checked={zs.includes(z.key)} onChange={() => tog(zs, setZs, z.key)} />{z.type_label} {z.number} · {dt(z.date)} · {r(z.amount)}</label>)}</div>
+        <div><div style={S.small}>Form 26AS credits</div>{u.credit_lines.map(c => <label key={c.key} style={box}><input type="checkbox" checked={cs.includes(c.key)} onChange={() => tog(cs, setCs, c.key)} />{dt(c.txn_date)} · section {c.section_raw} · deposited {r(c.deposited)}</label>)}</div>
+        <div style={{ gridColumn: '1 / -1', display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+          <span style={{ fontSize: '0.78rem' }}>Ticked: Zoho {r(za)} · 26AS {r(ca)} · difference <b>{rs(za - ca)}</b></span>
+          <button disabled={busy || !zs.length || !cs.length} style={S.btn} onClick={go}>Link the ticked items</button>
+          <span style={S.small}>Tick one invoice and one credit for a pair, or several invoices and the one credit that covers them.</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function UnitDrawer({ meta, params, id, onClose, onSaved }) {
   const [d, setD] = useState(null);
   const [err, setErr] = useState('');
@@ -168,11 +199,12 @@ export default function UnitDrawer({ meta, params, id, onClose, onSaved }) {
             <div key={i} style={{ fontSize: '0.76rem', padding: '0.3rem 0', borderBottom: '1px solid #F0F2F1' }}>
               {e.credit_line && <>26AS credit in <b>{qLabel(e.quarter)}</b>: {e.credit_line.deductor} · {dt(e.credit_line.txn_date)} · deducted {r(e.credit_line.deducted)} · deposited {r(e.credit_line.deposited)} <span style={S.small}>({e.credit_line.stmt ? e.credit_line.stmt.file : ''}) — not counted in this period's matched totals</span>{e.maybe_matched_there && <div style={{ ...S.small, color: '#B45309' }}>That quarter also has a Zoho booking of this amount for the client — the credit may belong to it.</div>}</>}
               {e.zoho_line && e.kind !== 'candidate' && <>Zoho entry in <b>{qLabel(e.quarter)}</b>: {e.zoho_line.type_label} {e.zoho_line.number} · {dt(e.zoho_line.date)} · {r(e.zoho_line.amount)}</>}
-              {e.kind === 'candidate' && e.zoho_line && <>Candidate: {e.zoho_line.type_label} {e.zoho_line.number} · {dt(e.zoho_line.date)} · {r(e.zoho_line.amount)} {meta.rights.review && u.credits.length > 0 && <button style={{ ...S.btn, marginLeft: 8, padding: '0.1rem 0.5rem' }} onClick={() => linkCandidate(e.zoho)}>This is the invoice the credit belongs to</button>}</>}
+              {e.kind === 'candidate' && e.zoho_line && <>Candidate: {e.zoho_line.type_label} {e.zoho_line.number} · {dt(e.zoho_line.date)} · {r(e.zoho_line.amount)} {meta.rights.review && u.credits.length === 1 && <button style={{ ...S.btn, marginLeft: 8, padding: '0.1rem 0.5rem' }} onClick={() => linkCandidate(e.zoho)}>This is the invoice the credit belongs to</button>}</>}
             </div>))}</div>
         </div>
       )}
-      {d.links.length > 0 && <div style={S.info}>Reviewer link{d.links.length > 1 ? 's' : ''}: {d.links.map(l => <span key={l.id}>by {l.by} on {dt(l.at)} {meta.rights.review && <button style={{ ...S.ghost, padding: '0.05rem 0.45rem' }} onClick={() => unlink(l.id)}>Unlink</button>}</span>)}</div>}
+      {meta.rights.review && u.reason && u.reason.code === 'ambiguous' && u.zoho.length > 0 && u.credits.length > 1 && <LinkPicker u={u} params={params} onDone={msg => { setOk(msg); onSaved(); onClose(); }} onError={setErr} />}
+      {d.links.length > 0 && <div style={S.info}>Reviewer link{d.links.length > 1 ? 's' : ''}: {d.links.map(l => <span key={l.id}>{l.zoho.length} Zoho entr{l.zoho.length === 1 ? 'y' : 'ies'} ↔ {l.credits.length} 26AS credit{l.credits.length === 1 ? '' : 's'}, by {l.by} on {dt(l.at)} {meta.rights.review && <button style={{ ...S.ghost, padding: '0.05rem 0.45rem' }} onClick={() => unlink(l.id)}>Unlink</button>}</span>)}</div>}
 
       {meta.rights.review && form && (
         <div style={S.card}>

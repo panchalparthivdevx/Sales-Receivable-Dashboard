@@ -97,12 +97,13 @@ function hkHistory() {
 }
 
 /** Reader stand-in: returns what a reading of the given file "says" (keyed by file name) */
-function fakeExtract(map) {
+function fakeExtract(map, calls = null) {
   return async (buf, mime, ctx) => {
+    if (calls) calls.push(ctx.fileName);
     const r = map[ctx.fileName] || map['*'];
     if (r instanceof Error) throw r;
     return {
-      engine: 'claude', text: r.text || '', text_method: 'pdf_text', pages: 1, warnings: [],
+      engine: r.engine || 'claude', text: r.text || '', text_method: r.text_method || 'pdf_text', pages: 1, warnings: r.warnings || [],
       doc_type: { value: r.doc_type || 'tax_invoice', basis: 'Heading reads "Tax Invoice"' },
       fields: { vendor_name: 'Clean Co Facility Services', vendor_gstin: V_GSTIN, buyer_name: 'Dev Accelerator Ltd', buyer_gstin: OWN_GSTIN,
         invoice_number: 'CC/120', invoice_date: new Date(Date.now() - 5 * 86400000).toISOString().slice(0, 10), due_date: '', currency: 'INR',
@@ -110,7 +111,7 @@ function fakeExtract(map) {
         description: 'Housekeeping manpower services for October', po_number: '', place_of_supply: 'Gujarat',
         service_period_from: '', service_period_to: '', irn: '', reverse_charge: false, ...(r.fields || {}) },
       lines: r.lines || [{ description: 'Housekeeping manpower services for October', hsn_sac: '998533', quantity: 1, rate: 10000, amount: 10000, tax_rate: 18, tax_amount: 1800 }],
-      confidence: 'high', notes: '', unreadable: false,
+      confidence: 'high', notes: '', unreadable: !!r.unreadable,
     };
   };
 }
@@ -122,8 +123,9 @@ function setup(opts = {}) {
   const synced = { devx: { vendors_all: { data: VENDORS }, bills_fy: opts.billsFy || null } };
   const lookups = LK.create({ store, zc, readSynced: async (co, e) => synced[co]?.[e] || null });
   const logs = [];
-  const pipeline = PL.create({ store, zc, lookups, files, extractFn: fakeExtract(opts.reads || { '*': {} }), log: { error: m => logs.push(m) } });
-  return { ...dirs, zc, lookups, pipeline, store, files, synced, logs, history: h };
+  const readCalls = [];
+  const pipeline = PL.create({ store, zc, lookups, files, extractFn: fakeExtract(opts.reads || { '*': {} }, readCalls), log: { error: m => logs.push(m) } });
+  return { ...dirs, zc, lookups, pipeline, store, files, synced, logs, history: h, readCalls };
 }
 
 async function seedConfig(patch = {}) {
@@ -139,4 +141,14 @@ async function seedConfig(patch = {}) {
 
 const pdf = (s = 'x') => Buffer.from(`%PDF-1.4\n% test ${s}\n`);
 
-module.exports = { setup, seedConfig, pdf, store, files, ORG, OWN_GSTIN, V_GSTIN, VENDORS, fakeZoho, fakeExtract, tempDirs };
+/** Image file headers of a given size in pixels (enough for pictures.imageSize) */
+function png(w, h, salt = '') {
+  const b = Buffer.alloc(40 + salt.length);
+  b.writeUInt32BE(0x89504e47, 0); b.writeUInt32BE(0x0d0a1a0a, 4); b.writeUInt32BE(13, 8); b.write('IHDR', 12, 'latin1');
+  b.writeUInt32BE(w, 16); b.writeUInt32BE(h, 20); b.write(salt, 40, 'latin1');
+  return b;
+}
+const jpg = (w, h, salt = '') => Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]), Buffer.alloc(14),
+  Buffer.from([0xff, 0xc0, 0x00, 0x11, 0x08, h >> 8, h & 255, w >> 8, w & 255, 0x03]), Buffer.alloc(20), Buffer.from(salt)]);
+
+module.exports = { setup, seedConfig, pdf, png, jpg, store, files, ORG, OWN_GSTIN, V_GSTIN, VENDORS, fakeZoho, fakeExtract, tempDirs };

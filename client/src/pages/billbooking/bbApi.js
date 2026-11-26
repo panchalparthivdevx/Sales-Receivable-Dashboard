@@ -21,6 +21,7 @@ export const bb = {
   action:        (id, action, extra = {}) => axios.post(`${B}/bills/${id}/action`, { action, ...extra }, { timeout: 300000 }).then(d),
   draft:         (id)            => axios.post(`${B}/bills/${id}/draft`, {}, { timeout: 180000 }).then(d),
   refreshZoho:   (ids)           => axios.post(`${B}/zoho/refresh`, { ids }, { timeout: 300000 }).then(d),
+  reread:        (dry)           => axios.post(`${B}/bills/reread`, { dry: !!dry }, { timeout: 120000 }).then(d),
   upload:        (form, onProgress) => axios.post(`${B}/upload`, form, { timeout: 600000, onUploadProgress: onProgress }).then(d),
 
   saveCategories: (categories)   => axios.put(`${B}/config/categories`, { categories }).then(d),

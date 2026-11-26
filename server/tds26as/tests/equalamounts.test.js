@@ -93,11 +93,16 @@ test('the same amount twice in a quarter, twice in the 26AS: paired in date orde
   const dash = RP.dashboard(d, res, PER.resolve({ fy: '2026-27', q: 1 }));
   assert.equal(dash.bridge.difference, 0, 'the dashboard still ties to both sources');
 
-  // Q2 is unchanged: one ₹2,977 invoice and two ₹2,977 credits — which credit is its own cannot be told, so it stays with the reviewer
+  // Q2: one ₹2,977 invoice (2 Jul) and two ₹2,977 credits (7 Jul, 4 Aug) — the invoice takes the earliest credit on or after it
+  // (26 Nov 2026; before, this went to review); the 4 Aug credit stays open for steps 3–4
   const q2 = await recon.run(E, PER.resolve({ fy: '2026-27', q: 2 }));
   const u2 = q2.res.units.filter(u => u.group === `tan:${TAN.O}`);
-  assert.equal(u2.length, 1);
-  assert.equal(u2[0].reason.code, 'ambiguous');
+  assert.equal(u2.length, 2);
+  const pair = u2.find(u => u.zoho.length);
+  assert.deepEqual([pair.effective, pair.flags.includes('equal_amounts_date_order'), q2.d.credits.find(c => c.key === pair.credits[0]).txn_date], ['matched', true, '2026-07-07']);
+  const rest = u2.find(u => !u.zoho.length);
+  assert.deepEqual([rest.credits.length, q2.d.credits.find(c => c.key === rest.credits[0]).txn_date], [1, '2026-08-04']);
+  assert.ok(!u2.some(u => u.reason && u.reason.code === 'ambiguous'));
 });
 
 test('pairing in date order does not depend on the order the entries and credits are read in', async () => {

@@ -223,7 +223,7 @@ export default function BillDrawer({ id, meta, onClose, onSaved, onOpen }) {
                   {editable && <button style={S.ghost} onClick={() => { if (window.confirm('Read the bill again from the original file? Changes made by hand on this bill are discarded.')) action('reprocess', {}, 'Read again'); }}><RotateCcw size={12} /> Read again</button>}
                 </div>
                 <div style={{ ...S.cardBody, fontSize: '0.76rem', lineHeight: 1.6 }}>
-                  <div><b>Reader:</b> {bill.extraction.engine === 'claude' ? 'Claude' : bill.extraction.text_method === 'ocr' ? 'Built-in (OCR of a scan)' : 'Built-in (PDF text)'} · confidence {bill.extraction.confidence} · {dtm(bill.extraction.at)}</div>
+                  <div><b>Reader:</b> {bill.extraction.engine === 'none' ? `Not read — ${bill.extraction.skipped || 'not a bill'} (press Read again to read it anyway)` : bill.extraction.engine === 'claude' ? 'Claude' : bill.extraction.text_method === 'ocr' ? 'Built-in (OCR of a scan)' : 'Built-in (PDF text)'} · confidence {bill.extraction.confidence} · {dtm(bill.extraction.at)}</div>
                   <div><b>Document:</b> {meta.doc_types[bill.doc_type?.value] || bill.doc_type?.value} — {bill.doc_type?.basis}</div>
                   {bill.not_bill?.reason && <div style={{ color: '#64748B' }}><b>Not a bill:</b> {bill.not_bill.reason}{bill.not_bill.by ? ` (${bill.not_bill.by})` : ''}</div>}
                   <div style={{ marginTop: 6, display: 'flex', gap: 6 }}>

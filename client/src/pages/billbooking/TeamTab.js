@@ -171,7 +171,7 @@ export default function TeamTab({ meta, reloadMeta }) {
           {!log?.log?.length && <div style={S.muted}>No mailbox checks yet.</div>}
           {(log?.log || []).slice(0, 40).map((l, i) => (
             <div key={i} style={{ fontSize: '0.76rem', padding: '3px 0', borderBottom: '1px solid #F2F2F2', color: l.error ? '#B91C1C' : '#18191B' }}>
-              {dtm(l.at)} · <b>{l.member}</b> · {l.messages} email(s), {l.attachments} attachment(s) → {l.ingested} new, {l.existing} already collected, {l.skipped} skipped{l.more ? ' · more waiting for the next check' : ''}{l.error ? ` · ${l.error}` : ''}
+              {dtm(l.at)} · <b>{l.member}</b> · {l.messages} email(s), {l.attachments} attachment(s) → {l.ingested} new, {l.existing} already collected, {l.skipped} skipped{l.pictures ? `, ${l.pictures} logo(s) / picture(s) ignored` : ''}{l.more ? ' · more waiting for the next check' : ''}{l.error ? ` · ${l.error}` : ''}
             </div>
           ))}
         </div>

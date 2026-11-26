@@ -8,11 +8,17 @@
  *   1  identify the client      the deductor TAN: a Zoho entry belongs to the client of the TAN on its invoice, so several Zoho customers
  *                               with one TAN are one client; reviewer groups cover the rest (lib/clients.index)
  *   2  transaction-wise         same client, TDS equal within ₹2 to the 26AS tax deducted or deposited. Where several entries qualify,
- *                               section, taxable base (26AS amount paid vs the Books base), exact amount and dates decide. As many
- *                               entries as credits all of one amount (a monthly fee) are paired in date order (flag
- *                               equal_amounts_date_order); otherwise, when they cannot, the entries go to review ("Need to Check — ambiguous")
- *   3  client totals            what is still open per client: one 26AS entry = several Books entries (or the reverse) by a unique
- *                               subset, then the remaining totals; method "Client total", invoice attribution left open
+ *                               section, taxable base (26AS amount paid vs the Books base), exact amount and dates decide. Entries and
+ *                               credits all of one amount (a monthly fee) are paired by date (flag equal_amounts_date_order): as many
+ *                               of each → k-th with k-th; fewer credits → each credit, oldest first, takes the oldest entry dated up to
+ *                               date_close_days after it (a client deducts on or after the invoice), else the nearest; fewer entries →
+ *                               each entry takes the earliest credit from date_close_days before it, else the nearest (26 Nov 2026 —
+ *                               before, unequal counts went to review). Only when sections could tell them apart and the date order
+ *                               mixes them do the entries go to review ("Need to Check — ambiguous")
+ *   3  client totals            what is still open per client: one 26AS entry = several Books entries (or the reverse) when ONE
+ *                               combination of amounts fits (each amount used at most as often as it occurs) — e.g. a ₹19,860 credit
+ *                               for three ₹6,620 monthly invoices; which of several equal invoices is decided by date as in step 2
+ *                               (flag equal_amounts_date_order); then the remaining totals; method "Client total"
  *   4  investigate              credits / bookings of the same client OUTSIDE the period (a later or earlier statement, a later Books
  *                               month) → "Need to Check — timing" with both periods shown and the other-period amount kept out of this
  *                               period's totals; leftovers of one client paired on evidence → "Not Matched"; the rest are one-sided —
@@ -76,6 +82,61 @@ function dateOrderPairs(zs, cs) {
   const pairs = Zs.map((z, i) => [z, Cs[i]]);
   const sectionsTell = Zs.some(z => Cs.some(c => secRel(z, c) === 'same'));
   return sectionsTell && pairs.some(([z, c]) => secRel(z, c) === 'differs') ? null : pairs;
+}
+
+const shiftDays = (iso, n) => { const t = new Date(`${iso}T00:00:00Z`); t.setUTCDate(t.getUTCDate() + n); return t.toISOString().slice(0, 10); };
+const cmpS = (a, b) => String(a || '').localeCompare(String(b || ''));
+const byZ = (a, b) => cmpS(a.date, b.date) || cmpS(a.number, b.number) || cmpS(a.key, b.key);
+const byC = (a, b) => cmpS(a.txn_date, b.txn_date) || cmpS(a.key, b.key);
+/** n of `zs` for a credit dated `date`: the oldest dated up to `close` days after it (a client deducts on or after the invoice), then
+ *  the nearest in date */
+function oldestZ(zs, date, n, close) {
+  const lim = shiftDays(date, close);
+  const pool = zs.slice().sort(byZ);
+  const out = pool.filter(z => z.date <= lim).slice(0, n);
+  const rest = pool.filter(z => !out.includes(z)).sort((a, b) => Math.abs(daysBetween(a.date, date)) - Math.abs(daysBetween(b.date, date)) || byZ(a, b));
+  return [...out, ...rest.slice(0, n - out.length)];
+}
+/** n of `cs` for an entry dated `date`: the earliest dated from `close` days before it, then the nearest in date */
+function earliestC(cs, date, n, close) {
+  const lim = shiftDays(date, -close);
+  const pool = cs.slice().sort(byC);
+  const out = pool.filter(c => c.txn_date >= lim).slice(0, n);
+  const rest = pool.filter(c => !out.includes(c)).sort((a, b) => Math.abs(daysBetween(a.txn_date, date)) - Math.abs(daysBetween(b.txn_date, date)) || byC(a, b));
+  return [...out, ...rest.slice(0, n - out.length)];
+}
+
+/** Fewer credits than entries (or the reverse), all of one amount: which entry each credit belongs to cannot change a difference, only
+ *  which entries stay open — oldest first (oldestZ / earliestC). null as in dateOrderPairs. */
+function datePairs(zs, cs, s) {
+  const pairs = [];
+  if (cs.length < zs.length) { let open = zs.slice(); for (const c of cs.slice().sort(byC)) { const [z] = oldestZ(open, c.txn_date, 1, s.date_close_days); pairs.push([z, c]); open = open.filter(x => x !== z); } }
+  else { let open = cs.slice(); for (const z of zs.slice().sort(byZ)) { const [c] = earliestC(open, z.date, 1, s.date_close_days); pairs.push([z, c]); open = open.filter(x => x !== c); } }
+  const sectionsTell = zs.some(z => cs.some(c => secRel(z, c) === 'same'));
+  return sectionsTell && pairs.some(([z, c]) => secRel(z, c) === 'differs') ? null : pairs;
+}
+
+/** The combinations of AMOUNTS from `pool` (each at most as often as it occurs, 2 to maxSize items) whose total is within tol of one of
+ *  `targets`, as [[amount, count] …]; stops after 2. Equal amounts are interchangeable, so ONE combination settles the amounts even when
+ *  several equal entries could fill it (a ₹19,860 credit for three of six ₹6,620 monthly invoices) — which ones is decided by date. */
+function amountCombos(pool, val, targets, tol, maxSize) {
+  const hi = Math.max(...targets) + tol;
+  const n = new Map();
+  for (const x of pool) { const v = val(x); if (v > 0 && v <= hi) n.set(v, (n.get(v) || 0) + 1); }
+  const amts = [...n.keys()].sort((a, b) => b - a).slice(0, 24);
+  const out = [], pick = [];
+  (function dfs(i, total, items) {
+    if (out.length >= 2) return;
+    if (items >= 2 && targets.some(t => Math.abs(total - t) <= tol)) out.push(pick.slice());
+    if (items >= maxSize) return;
+    for (let k = i; k < amts.length; k++) {
+      for (let m = 1; m <= n.get(amts[k]) && items + m <= maxSize && total + amts[k] * m <= hi; m++) {
+        pick.push([amts[k], m]); dfs(k + 1, total + amts[k] * m, items + m); pick.pop();
+        if (out.length >= 2) return;
+      }
+    }
+  })(0, 0, 0);
+  return out;
 }
 
 /** Subsets of `pool` (amount accessor `val`) whose total is within tol of one of `targets`; stops after 2 solutions */
@@ -252,7 +313,8 @@ function reconcile(ctx) {
         const sameAmounts = Math.max(...amts) - Math.min(...amts) <= tol;
         // the same amount several times, as many entries as credits (a monthly fee): the pairing changes no difference, only which
         // invoice faces which credit — paired in date order instead of being left to the client totals or sent to other quarters
-        const pairs = sameAmounts && lz.length === lc.length ? dateOrderPairs(lz, lc) : null;
+        // fewer of one side (26 Nov 2026): the credits / entries of that side are matched oldest first, the rest go on to steps 3–4
+        const pairs = !sameAmounts ? null : lz.length === lc.length ? dateOrderPairs(lz, lc) : datePairs(lz, lc, s);
         if (pairs) for (const [z, c] of pairs) addUnit({ method: 'transaction', step: 2, group: g, zoho: [z.key], credits: [c.key], status: statusOf(z.amount - c.deposited, tol), flags: ['equal_amounts_date_order'] });
         else ambiguous.push({ g, z: lz.map(z => z.key), c: lc.map(c => c.key) });
       }
@@ -261,17 +323,30 @@ function reconcile(ctx) {
     // 3. client totals
     zs = b.z.filter(z => !used.has(z.key)); cs = b.c.filter(c => !used.has(c.key));
     const amb = new Set(ambiguous.filter(a => a.g === g).flatMap(a => [...a.z, ...a.c]));
-    for (const c of cs.slice().sort((a, b2) => b2.deposited - a.deposited)) {
-      if (used.has(c.key) || amb.has(c.key)) continue;
-      const pool = zs.filter(z => !used.has(z.key) && !amb.has(z.key) && z.amount > 0);
-      const sols = subsets(pool, z => z.amount, [c.deposited, c.deducted], tol, s.max_subset);
-      if (sols.length === 1) addUnit({ method: 'client_total', step: 3, group: g, zoho: sols[0].map(z => z.key), credits: [c.key], status: statusOf(sum(sols[0], z => z.amount) - c.deposited, tol), flags: ['one_credit_many_entries'] });
-    }
-    for (const z of zs.slice().sort((a, b2) => b2.amount - a.amount)) {
-      if (used.has(z.key) || amb.has(z.key) || z.amount <= 0) continue;
-      const pool = cs.filter(c => !used.has(c.key) && !amb.has(c.key));
-      const sols = subsets(pool, c => c.deposited || c.deducted, [z.amount], tol, s.max_subset);
-      if (sols.length === 1) addUnit({ method: 'client_total', step: 3, group: g, zoho: [z.key], credits: sols[0].map(c => c.key), status: statusOf(z.amount - sum(sols[0], c => c.deposited), tol), flags: ['one_entry_many_credits'] });
+    // one combination of amounts: first those that leave no choice (largest first), then — oldest first, so earlier credits take the
+    // earlier invoices — those where equal entries are chosen by date
+    const cVal = c => c.deposited || c.deducted;
+    for (const byDate of [false, true]) {
+      for (const c of cs.slice().sort(byDate ? byC : (a, b2) => b2.deposited - a.deposited)) {
+        if (used.has(c.key) || amb.has(c.key)) continue;
+        const pool = zs.filter(z => !used.has(z.key) && !amb.has(z.key) && z.amount > 0);
+        const sols = amountCombos(pool, z => z.amount, [c.deposited, c.deducted], tol, s.max_subset);
+        if (sols.length !== 1) continue;
+        const choice = sols[0].some(([a, m]) => pool.filter(z => z.amount === a).length > m);
+        if (choice !== byDate) continue;
+        const pick = sols[0].flatMap(([a, m]) => oldestZ(pool.filter(z => z.amount === a), c.txn_date, m, s.date_close_days));
+        addUnit({ method: 'client_total', step: 3, group: g, zoho: pick.sort(byZ).map(z => z.key), credits: [c.key], status: statusOf(sum(pick, z => z.amount) - c.deposited, tol), flags: ['one_credit_many_entries', ...(choice ? ['equal_amounts_date_order'] : [])] });
+      }
+      for (const z of zs.slice().sort(byDate ? byZ : (a, b2) => b2.amount - a.amount)) {
+        if (used.has(z.key) || amb.has(z.key) || z.amount <= 0) continue;
+        const pool = cs.filter(c => !used.has(c.key) && !amb.has(c.key));
+        const sols = amountCombos(pool, cVal, [z.amount], tol, s.max_subset);
+        if (sols.length !== 1) continue;
+        const choice = sols[0].some(([a, m]) => pool.filter(c => cVal(c) === a).length > m);
+        if (choice !== byDate) continue;
+        const pick = sols[0].flatMap(([a, m]) => earliestC(pool.filter(c => cVal(c) === a), z.date, m, s.date_close_days));
+        addUnit({ method: 'client_total', step: 3, group: g, zoho: [z.key], credits: pick.sort(byC).map(c => c.key), status: statusOf(z.amount - sum(pick, c => c.deposited), tol), flags: ['one_entry_many_credits', ...(choice ? ['equal_amounts_date_order'] : [])] });
+      }
     }
     zs = b.z.filter(z => !used.has(z.key)); cs = b.c.filter(c => !used.has(c.key));
     if (zs.length && cs.length) {
@@ -406,4 +481,4 @@ function explain(u, zs, cs, s) {
   return { code: 'amount_differs', text: `TDS differs: Zoho ${fmtR(u.z_amount)} on ${fmtR(base)} (${f.rate_zoho}%), 26AS deducted ${fmtR(u.deducted)} on ${fmtR(u.paid)} (${f.rate_26as}%)`, figures: f };
 }
 
-module.exports = { reconcile, explain, subsets, STATUS, METHOD, STATUS_ORDER, statusOf, baseAgrees };
+module.exports = { reconcile, explain, subsets, amountCombos, datePairs, STATUS, METHOD, STATUS_ORDER, statusOf, baseAgrees };

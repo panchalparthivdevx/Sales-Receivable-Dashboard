@@ -276,7 +276,7 @@ const readers = () => (EX.claudeEnabled() ? 3 : 1);   // Claude waits on the net
  * Vercel: read until the answer is due, keep reading in the background → bills still waiting to be read.
  * recheck (the scheduler only): afterwards, check again the bills last checked under older rules.
  */
-async function settleReading(started, { recheck = false } = {}) {
+async function settleReading(started, { recheck = false, wait = true } = {}) {
   if (!IS_VERCEL) return 0;
   const { pipeline } = need();
   const work = (async () => {
@@ -285,6 +285,7 @@ async function settleReading(started, { recheck = false } = {}) {
     if (recheck) await pipeline.recheckOld({ until: started + WORK_MS });
   })().catch(e => console.error('[bill-booking] reading:', e.message));
   background(work);
+  if (!wait) return pipeline.waitingCount();   // answer now; reading carries on in the background
   const left = started + ANSWER_MS - Date.now();
   let timer = null;
   if (left > 0) await Promise.race([work, new Promise(r => { timer = setTimeout(r, left); })]);
@@ -440,6 +441,27 @@ router.put('/bills/:id', gate('review'), wrap(async (req, res) => {
   }
   const r = await need().pipeline.edit(b.id, changes, req.bb.user, look);
   res.json({ bill: r.bill, row: row(r.bill, await cfgNow()) });
+}));
+
+/**
+ * Read again every bill the built-in reader read (Configure right; costs Claude reading). { dry: true } only counts.
+ * Bills changed by hand, already read by Claude, set aside, drafted, or our own sales invoices are kept as they are.
+ */
+router.post('/bills/reread', gate('config'), wrap(async (req, res) => {
+  if (!EX.claudeEnabled()) {
+    return bad(res, 409, 'The Claude reader is not on: ANTHROPIC_API_KEY is not set on this server (online: Vercel → Settings → Environment Variables, then Redeploy)');
+  }
+  const started = Date.now();
+  const dry = !!req.body?.dry;
+  const { pipeline } = need();
+  const r = await pipeline.rereadAll({ by: byName(req), dryRun: dry });
+  let waiting = 0;
+  if (!dry && r.queued) {
+    await store.audit({ by: byName(req), action: 'reread_all', detail: `${r.queued} bill(s) read again; kept: ${JSON.stringify(r.skipped)}` });
+    if (IS_VERCEL) waiting = await settleReading(started, { wait: false });
+    else r.ids.forEach(id => pipeline.enqueue(id));
+  }
+  res.json({ dry, queued: r.queued, skipped: r.skipped, waiting, model: EX.claudeModel() });
 }));
 
 router.post('/bills/:id/action', gate('review'), wrap(async (req, res) => {

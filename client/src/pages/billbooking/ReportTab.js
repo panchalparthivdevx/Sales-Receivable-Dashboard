@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import * as XLSX from 'xlsx';
-import { RefreshCw, Download, Search, Mail, Upload, ExternalLink, Paperclip, AlertTriangle, ChevronDown } from 'lucide-react';
+import { RefreshCw, Download, Search, Mail, Upload, ExternalLink, Paperclip, AlertTriangle, ChevronDown, RotateCcw } from 'lucide-react';
 import { bb, errMsg } from './bbApi';
 import { S, StatusPill, Tag, STATUS_ORDER, STATUS_META, SOURCE_LABEL, money, dt, dtm, ymd, Msg } from './ui';
 import BillDrawer from './BillDrawer';
@@ -74,6 +74,24 @@ export default function ReportTab({ meta, onChanged }) {
     try { const r = await fn(); if (done) setNote(done(r)); await load(); onChanged?.(); } catch (e) { setError(errMsg(e)); } finally { setBusy(''); }
   }
 
+  // Read again, with Claude, every bill the built-in reader read (counted first, then confirmed)
+  async function rereadAll() {
+    setBusy('reread'); setError(''); setNote('');
+    try {
+      const p = await bb.reread(true);
+      const k = p.skipped || {};
+      const kept = [k.by_hand && `${k.by_hand} changed by hand`, k.claude && `${k.claude} already read by Claude`,
+        k.set_aside && `${k.set_aside} set aside (Not a Bill / Duplicate)`, k.own_sale && `${k.own_sale} of our own sales invoices`].filter(Boolean).join(', ');
+      if (!p.queued) { setNote(`Nothing to read again — every open bill is already read by Claude or was changed by hand${kept ? ` (${kept})` : ''}.`); return; }
+      const ok = window.confirm(`${p.queued} bill(s) read by the built-in reader will be read again by Claude from their stored files (Anthropic charges roughly $${Math.max(1, Math.round(p.queued * 0.05))}–$${Math.max(1, Math.round(p.queued * 0.15))} in total).`
+        + `${kept ? `\n\nKept as they are: ${kept}.` : ''}\n\nContinue?`);
+      if (!ok) return;
+      const r = await bb.reread(false);
+      setNote(`${r.queued} bill(s) are being read again by Claude${meta.integrations?.vercel ? ' — three at a time in the background, also by the 5-minute scheduler' : ' in the background'}. Press Refresh to see the details come in.`);
+      await load();
+    } catch (e) { setError(errMsg(e)); } finally { setBusy(''); }
+  }
+
   function exportXlsx() {
     const st = meta.statuses;
     const data = shown.map(r => ({
@@ -115,7 +133,7 @@ export default function ReportTab({ meta, onChanged }) {
             )}
             {rechecking > 0 && (
               <div style={{ ...S.small, marginTop: 3 }}>
-                {rechecking} bill(s) are being checked again with the latest rules (our own sales invoices set aside, category from the vendor's similar Zoho bill){meta.integrations?.vercel ? ' — in the background, every 5 minutes' : ''}. Press Refresh to see the results.
+                {rechecking} bill(s) are being checked again with the latest rules (our own sales invoices, logos and marketing pictures set aside; category from the vendor's similar Zoho bill){meta.integrations?.vercel ? ' — in the background, every 5 minutes' : ''}. Press Refresh to see the results.
               </div>
             )}
           </div>
@@ -125,6 +143,9 @@ export default function ReportTab({ meta, onChanged }) {
               <Mail size={13} /> {busy === 'mail' ? 'Checking…' : 'Check mailboxes now'}</button>}
             {r.review && <button style={S.btn} disabled={!!busy} onClick={() => run('zoho', () => bb.refreshZoho(), x => `Zoho drafts checked: ${x.results.length}`)}>
               <RefreshCw size={13} /> {busy === 'zoho' ? 'Checking…' : 'Refresh Zoho status'}</button>}
+            {r.config && meta.integrations?.claude?.enabled && (rows || []).some(x => x.engine && x.engine !== 'claude' && ['extracted', 'needs_input', 'ready', 'failed'].includes(x.status)) && (
+              <button style={S.btn} disabled={!!busy} onClick={rereadAll} title="Read again, with Claude, the bills the built-in reader read (bills changed by hand are kept)">
+                <RotateCcw size={13} /> {busy === 'reread' ? 'Counting…' : 'Read all again with Claude'}</button>)}
             <button style={{ ...S.btn, background: '#F0FBF4', borderColor: '#BBF7D0', color: '#15803D' }} onClick={exportXlsx} disabled={!shown.length}><Download size={13} /> Excel</button>
           </div>
         </div>

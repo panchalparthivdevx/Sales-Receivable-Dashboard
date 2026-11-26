@@ -19,13 +19,16 @@ const V = require('./validate');
 const DR = require('./draft');
 const EX = require('./extract');
 const OS = require('./ownsale');
+const PIC = require('./pictures');
 
 const AUDIT_MAX = 200;
 const ACTIVE_ZOHO = new Set(['draft', 'pending_approval']);
 // Version of the checks after reading. Bills checked under an older version are checked again in the
 // background (recheckOld), so a new rule also reaches bills collected before it.
 //   2 — own sales invoices set aside; category from the vendor's similar Zoho bill
-const RULES_V = 2;
+//   3 — logos, badges, banners and marketing pictures set aside (pictures.js)
+//   4 — own sales invoices: the letterhead next to our GSTIN (Zoho's PDFs start with the totals) and our numbering series
+const RULES_V = 4;
 
 function create({ store, zc, lookups, files, extractFn = EX.extract, log = console }) {
   const now = () => new Date().toISOString();
@@ -54,7 +57,8 @@ function create({ store, zc, lookups, files, extractFn = EX.extract, log = conso
 
   // ── Ingest ──────────────────────────────────────────────────────────────────
   /**
-   * input: { buffer, name, mime, source: 'email'|'erp_upload', source_ref, member_id, company, by }
+   * input: { buffer, name, mime, source: 'email'|'erp_upload', source_ref, member_id, company, by,
+   *          as_bill (the team asked to read a skipped attachment as a bill: no "not a bill" rule applies) }
    * → { id, existed }
    */
   async function ingest(input) {
@@ -78,10 +82,12 @@ function create({ store, zc, lookups, files, extractFn = EX.extract, log = conso
         member_id: input.member_id || '', company: input.company || '', company_source: input.company ? 'manual' : '',
         file: { name: fileName, size: input.buffer.length, type: mime, sha256: sha },
         fields: {}, lines: [], issues: [], acks: [], cat_fields: {}, audit: [],
+        ...(input.as_bill ? { not_bill: { overridden: true, by: input.by || 'team', at } } : {}),
       };
       audit(b, input.by, 'received', input.source === 'email'
         ? `Email from ${input.source_ref?.from || '?'} to ${input.source_ref?.mailbox || '?'}: "${input.source_ref?.subject || ''}" — ${b.source_ref.attachment_name}`
         : `ERP upload by ${input.by || '?'}: ${b.source_ref.attachment_name}${input.source_ref?.erp_ref ? ` (ERP ref ${input.source_ref.erp_ref})` : ''}`);
+      if (input.as_bill) audit(b, input.by, 'is_bill', 'Read as a bill on request (it had been skipped when the mailbox was checked)');
       t.putBill(b);
       return { id, existed: false };
     });
@@ -98,11 +104,18 @@ function create({ store, zc, lookups, files, extractFn = EX.extract, log = conso
       const companies = await runtimeCompanies(cfg);
       const own = new Set(companies.flatMap(M.companyGstins));
       const ownPans = new Set(companies.flatMap(M.companyPans));
-      let r, error = null;
+      let r, error = null, dims = null;
       try {
         const buf = await files.read(id, b0.file.name);
         if (!buf) throw new Error('The stored file could not be read');
-        r = await extractFn(buf, b0.file.type, {
+        // A logo, badge or banner is set aside without reading it (unless the team asked for it: "Read again", "It is a bill")
+        if (PIC.isImage(b0)) dims = PIC.imageSize(buf);
+        const pic = PIC.isImage(b0) && !force && !b0.not_bill?.overridden
+          ? PIC.verdict({ name: b0.source_ref?.attachment_name || b0.file.name, dims, inline: !!b0.source_ref?.inline, size: b0.file.size }) : null;
+        if (pic) {
+          r = { engine: 'none', text: '', text_method: 'none', pages: 1, doc_type: { value: 'other', basis: pic.reason }, fields: {}, lines: [],
+            confidence: 'none', notes: '', unreadable: false, warnings: [], skipped: pic.reason };
+        } else r = await extractFn(buf, b0.file.type, {
           companies, ownGstins: own, ownPans, fileName: b0.source_ref?.attachment_name,
           email: b0.source === 'email' ? { from: b0.source_ref.from, subject: b0.source_ref.subject, body: b0.source_ref.body_preview } : null,
         });
@@ -110,6 +123,7 @@ function create({ store, zc, lookups, files, extractFn = EX.extract, log = conso
       await store.tx(async t => {
         const b = t.bill(id);
         if (!b) return;
+        if (dims) b.file = { ...b.file, width: dims.width, height: dims.height };
         if (error) {
           b.processing_error = error;
           audit(b, 'system', 'failed', `Reading failed: ${error}`);
@@ -118,7 +132,7 @@ function create({ store, zc, lookups, files, extractFn = EX.extract, log = conso
           b.extraction = {
             engine: r.engine, at: now(), text_method: r.text_method, pages: r.pages, confidence: r.confidence,
             notes: r.notes, unreadable: r.unreadable, warnings: r.warnings, usage: r.usage || null,
-            text_sample: String(r.text || '').slice(0, 6000),
+            text_sample: String(r.text || '').slice(0, 6000), ...(r.skipped ? { skipped: r.skipped } : {}),
           };
           b.doc_type = r.doc_type;
           b.fields = { ...r.fields };
@@ -128,8 +142,9 @@ function create({ store, zc, lookups, files, extractFn = EX.extract, log = conso
             .map((l, i) => ({ id: `l${i + 1}`, ...l, account: null, tax: null }));
           b.company = b.company_source === 'manual' ? b.company : '';
           b.vendor = null; b.category = null; b.cat_fields = {}; b.bill_level = {}; b.duplicate = b.duplicate?.dismissed ? { dismissed: b.duplicate.dismissed } : null;
-          b.not_bill = null; delete b.evaluated_at;
-          audit(b, 'system', 'extracted', `${r.engine === 'claude' ? 'Read by Claude' : r.text_method === 'ocr' ? 'Read by OCR' : 'Read from the PDF text'}: ${EX.DOC_TYPE_LABEL[r.doc_type.value] || r.doc_type.value}, invoice ${r.fields.invoice_number || '?'} dated ${r.fields.invoice_date || '?'}, total ${r.fields.total ?? '?'}, ${r.lines.length} line(s), confidence ${r.confidence}`);
+          b.not_bill = b.not_bill?.overridden ? b.not_bill : null; delete b.evaluated_at;
+          if (r.skipped) audit(b, 'system', 'extracted', `Not read — ${r.skipped}`);
+          else audit(b, 'system', 'extracted', `${r.engine === 'claude' ? 'Read by Claude' : r.text_method === 'ocr' ? 'Read by OCR' : 'Read from the PDF text'}: ${EX.DOC_TYPE_LABEL[r.doc_type.value] || r.doc_type.value}, invoice ${r.fields.invoice_number || '?'} dated ${r.fields.invoice_date || '?'}, total ${r.fields.total ?? '?'}, ${r.lines.length} line(s), confidence ${r.confidence}`);
         }
         b.status = V.status(b);
         b.updated_at = now();
@@ -176,13 +191,20 @@ function create({ store, zc, lookups, files, extractFn = EX.extract, log = conso
     const co = cfg.companies.find(c => c.id === company.id);
     const org = co?.org_id;
 
+    // Only a picture (logo, badge, banner, marketing picture)? Bills collected before this rule have no stored size yet.
+    let dims = b0.file?.width ? { width: b0.file.width, height: b0.file.height } : null, newDims = null;
+    if (PIC.isImage(b0) && !dims) {
+      try { const buf = await files.read(id, b0.file.name); newDims = dims = PIC.imageSize(buf); } catch (_) {}
+    }
+    const picture = PIC.forBill(b0, dims, EX.BILL_TYPES);
+
     // One of our own sales invoices (a customer reminder, a forwarded invoice)? Never a vendor bill.
     let ownSale = null;
     try {
       const sales = lookups.salesInvoices ? await lookups.salesInvoices(cfg.companies.map(c => c.id)) : null;
       ownSale = OS.check({ fields: b0.fields, text: b0.extraction.text_sample, fileName: b0.source_ref?.attachment_name, companies, sales });
     } catch (e) { log.error(`[bill-booking] ${id}: own sales invoice check: ${e.message}`); }
-    const ownAside = !!ownSale && !b0.not_bill?.overridden;
+    const ownAside = (!!ownSale || !!picture) && !b0.not_bill?.overridden;
 
     // Look-ups (outside the lock)
     const notes = [];
@@ -194,7 +216,7 @@ function create({ store, zc, lookups, files, extractFn = EX.extract, log = conso
     let vendor = b0.vendor?.match === 'manual' ? b0.vendor
       : (co && !ownAside ? M.matchVendor({ fields: b0.fields, fromEmail: b0.source_ref?.from_address || '', vendors }) : null);
     // Quotations, statements, our own sales invoices … (unless the team said it is a bill) need no account history: saves Zoho calls
-    const setAside = b0.not_bill?.manual || (!b0.not_bill?.overridden && V.notBill({ ...b0, own_sale: ownSale }));
+    const setAside = b0.not_bill?.manual || (!b0.not_bill?.overridden && V.notBill({ ...b0, own_sale: ownSale, picture }));
     if (co && vendor?.id && !setAside) {
       const snap = await store.snapshot();
       const ours = new Set(snap.bills.filter(x => x.status === 'draft_created' && x.zoho?.bill_id).map(x => x.zoho.bill_id));
@@ -209,6 +231,8 @@ function create({ store, zc, lookups, files, extractFn = EX.extract, log = conso
       if (!b || V.STICKY.has(b.status)) return b;
       const before = summary(b);
       b.own_sale = ownSale || null;
+      b.picture = picture || null;
+      if (newDims) b.file = { ...b.file, width: newDims.width, height: newDims.height };
       b.company = company.id || '';
       b.company_basis = company.basis;
       b.company_sure = company.sure !== false;
@@ -297,7 +321,7 @@ function create({ store, zc, lookups, files, extractFn = EX.extract, log = conso
       const nb = V.notBill(b);
       if (b.not_bill?.overridden) { /* the team said it is a bill */ }
       else if (b.not_bill?.manual) { /* the team said it is not */ }
-      else b.not_bill = nb ? { reason: nb.reason, ...(nb.own_sale ? { own_sale: true } : {}) } : null;
+      else b.not_bill = nb ? { reason: nb.reason, ...(nb.own_sale ? { own_sale: true } : {}), ...(nb.kind ? { kind: nb.kind } : {}) } : null;
 
       b.issues = V.issues(b, { category: catDef, acks: b.acks || [] });
       b.evaluated_at = now();
@@ -843,7 +867,48 @@ function create({ store, zc, lookups, files, extractFn = EX.extract, log = conso
   }
   const oldRulesCount = async () => (await store.snapshot()).bills.filter(checkedUnderOldRules).length;
 
-  return { ingest, processBill, evaluate, edit, action, createDraft, draftTest, refreshZoho, resume, readStale, recheckOld, oldRulesCount, pending, waitingCount, enqueue, idle, config, MAX_READ_TRIES, RULES_V };
+  // ── Read again (all bills read by the built-in reader) ──────────────────────
+  const touchedByHand = b => Object.values(b.field_source || {}).includes('manual') || b.vendor?.match === 'manual'
+    || b.category?.source === 'manual' || (b.lines || []).some(l => l.account?.source === 'manual' || l.tax?.source === 'manual')
+    || Object.values(b.cat_fields || {}).some(v => v?.source === 'manual') || (b.acks || []).length > 0
+    || !!b.not_bill?.overridden || !!b.not_bill?.manual || b.bill_level?.branch?.source === 'manual' || b.bill_level?.tds?.source === 'manual';
+  const REREAD_STATUSES = new Set(['extracted', 'needs_input', 'ready', 'failed']);
+  /**
+   * Bills read by the built-in reader (or whose reading failed) are read again from their stored file — by Claude when
+   * it is on. Kept as they are: bills the team changed by hand, bills Claude already read, bills set aside (Not a Bill,
+   * Duplicate), Zoho drafts, and our own sales invoices (the next re-check sets those aside without any reading).
+   * The bills go back to Received with a lease that lets the next reader take them at once.
+   * → { queued, ids, skipped: { by_hand, claude, set_aside, own_sale } }
+   */
+  async function rereadAll({ by = 'system', dryRun = false } = {}) {
+    const cfg = await config();
+    const companies = await runtimeCompanies(cfg);
+    let sales = null;
+    try { sales = lookups.salesInvoices ? await lookups.salesInvoices(cfg.companies.map(c => c.id)) : null; } catch (_) {}
+    const out = { queued: 0, ids: [], skipped: { by_hand: 0, claude: 0, set_aside: 0, own_sale: 0 } };
+    await store.tx(async t => {
+      for (const b of t.bills()) {
+        if (V.STICKY.has(b.status) || b.status === 'received' || queued.has(b.id)) continue;
+        if (!REREAD_STATUSES.has(b.status)) { out.skipped.set_aside++; continue; }
+        if (b.extraction?.engine === 'claude' && !b.processing_error) { out.skipped.claude++; continue; }
+        if (touchedByHand(b)) { out.skipped.by_hand++; continue; }
+        if (b.extraction && OS.check({ fields: b.fields, text: b.extraction.text_sample, fileName: b.source_ref?.attachment_name, companies, sales })) { out.skipped.own_sale++; continue; }
+        out.queued++; out.ids.push(b.id);
+        if (dryRun) continue;
+        b.status = 'received';
+        delete b.processing_error; delete b.read_attempts;
+        b.read_lease = new Date(0).toISOString();   // the next reader (this server, or the online scheduler) takes it at once
+        b.extraction = null; b.acks = []; b.cat_fields = {}; b.vendor = null; b.category = null; b.not_bill = null; b.zoho_category = null;
+        if (b.zoho && !b.zoho.bill_id) delete b.zoho.error;
+        audit(b, by, 'reprocess', `Read again from the original file (all bills read by the built-in reader, by ${by})`);
+        b.updated_at = now();
+        t.putBill(b);
+      }
+    });
+    return out;
+  }
+
+  return { ingest, processBill, evaluate, edit, action, createDraft, draftTest, refreshZoho, resume, readStale, recheckOld, oldRulesCount, rereadAll, pending, waitingCount, enqueue, idle, config, MAX_READ_TRIES, RULES_V };
 }
 
 module.exports = { create };

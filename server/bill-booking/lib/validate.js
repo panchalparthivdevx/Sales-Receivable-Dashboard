@@ -121,9 +121,19 @@ function status(bill) {
 function notBill(bill) {
   // One of our own sales invoices (see ownsale.js) is never a vendor bill
   if (bill.own_sale && !bill.extraction?.unreadable) return { reason: bill.own_sale.reason, own_sale: true };
+  // Only a picture: a logo, badge, banner or photo (see pictures.js) — decided from the picture, so also when unreadable
+  if (bill.picture) return { reason: bill.picture.reason, kind: 'picture' };
   const t = bill.doc_type?.value;
-  // 'other' (no heading found) and unreadable scans stay with the team — never skipped as "not a bill"
-  if (!t || BILL_TYPES.has(t) || t === 'other' || bill.extraction?.unreadable) return null;
+  const f = bill.fields || {};
+  if (!t || t === 'other' || bill.extraction?.unreadable) {
+    // From a newsletter / marketing email, with no bill heading, invoice number or total: marketing material
+    if (bill.source_ref?.marketing && !f.invoice_number && !(f.total > 0)) {
+      return { reason: `From ${bill.source_ref.marketing}, and the attachment has no bill heading, invoice number or total`, kind: 'marketing' };
+    }
+    // otherwise 'other' (no heading found) and unreadable scans stay with the team — never skipped as "not a bill"
+    return null;
+  }
+  if (BILL_TYPES.has(t)) return null;
   return { reason: `${DOC_TYPE_LABEL[t] || t}: ${bill.doc_type.basis || ''}`.trim() };
 }
 

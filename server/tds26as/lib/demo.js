@@ -2,7 +2,7 @@
  * Synthetic demo data — two DEMO entities (PANs beginning ZZZ, deductor TANs AHM*0000**), clearly labelled on every screen. Nothing here
  * comes from Zoho Books or TRACES. The same scenario drives the automated tests (tests/acceptance.test.js), so the demo shows exactly the
  * cases the module was accepted on:
- *   A exact match · B ₹2.00 rounding · C ₹2.01 mismatch · D three invoices = one 26AS credit · E two equal TDS amounts, one credit (ambiguous)
+ *   A exact match · B ₹2.00 rounding · C ₹2.01 mismatch · D three invoices = one 26AS credit · E two equal TDS amounts, one credit (the older is paired by date; the other stays open)
  *   F March booking / April credit (timing) · G Zoho only · H 26AS only · I tax deducted > deposited · K a customer whose invoice records no TAN (not matched; name suggestion)
  *   L unallocated journal · T transfer between the entity's own TDS ledgers · M the same client in both entities · N partial payment
  *   O a credit that only the revised statement contains · statements: FY 2025-26 v1 and its revision v2, FY 2026-27, entity Y's own
