@@ -49,16 +49,19 @@ function create(deps = {}) {
 
   // ── Look-ups (cached in bb_zoho_<org>) ──────────────────────────────────────
 
+  // Zoho's /chartofaccounts pages are only stable when sorted by name: in its default order the pages overlap
+  // (DevX, 26 Nov 2026: the first 2,000 rows held only 1,600 different accounts). DevX has ~2,560 active
+  // accounts, its expense accounts last in the default order, so the list must not stop at 10 pages.
   async function chartOfAccounts(org) {
-    const all = [];
-    for (let page = 1; page <= 10; page++) {
-      const d = await get(org, '/chartofaccounts', { page, per_page: 200, filter_by: 'AccountType.Active' });
+    const byId = new Map();
+    for (let page = 1; page <= 40; page++) {
+      const d = await get(org, '/chartofaccounts', { page, per_page: 200, filter_by: 'AccountType.Active', sort_column: 'account_name' });
       for (const a of d.chartofaccounts || []) {
-        all.push({ id: a.account_id, name: a.account_name, code: a.account_code || '', type: a.account_type, parent: a.parent_account_name || '' });
+        if (!byId.has(a.account_id)) byId.set(a.account_id, { id: a.account_id, name: a.account_name, code: a.account_code || '', type: a.account_type, parent: a.parent_account_name || '' });
       }
       if (!d.page_context?.has_more_page) break;
     }
-    return all;
+    return [...byId.values()];
   }
 
   async function taxes(org) {

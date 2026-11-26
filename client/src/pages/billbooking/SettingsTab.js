@@ -5,6 +5,8 @@ import { S, Field, Msg, dtm, Tag } from './ui';
 
 // ─── Integrations, Zoho checks, companies and tuning ─────────────────────────
 
+const EXPENSE_TYPES = new Set(['expense', 'other_expense', 'cost_of_goods_sold']);
+
 const Dot = ({ on, warn }) => (on ? <CheckCircle2 size={14} color="#15803D" /> : warn ? <Circle size={14} color="#B45309" /> : <XCircle size={14} color="#B91C1C" />);
 
 export default function SettingsTab({ meta, reloadMeta }) {
@@ -16,14 +18,16 @@ export default function SettingsTab({ meta, reloadMeta }) {
   const [test, setTest] = useState({ company: meta.companies[0]?.id || '', vendor: null, account_id: '' });
   const [vq, setVq] = useState('');
   const [vendors, setVendors] = useState([]);
-  const [accounts, setAccounts] = useState([]);
+  const [accounts, setAccounts] = useState(null);   // null while loading
   const [audit, setAudit] = useState(null);
   const r = meta.rights;
   const integ = meta.integrations;
   useEffect(() => { setS(meta.settings); setCompanies(meta.companies); }, [meta]);
   useEffect(() => {
     if (!r.admin || !test.company) return;
-    bb.lookups(test.company).then(l => setAccounts(l.accounts.filter(a => a.type === 'expense'))).catch(() => setAccounts([]));
+    setAccounts(null);
+    bb.lookups(test.company).then(l => setAccounts(l.accounts.filter(a => EXPENSE_TYPES.has(a.type)).sort((a, b) => a.name.localeCompare(b.name))))
+      .catch(e => { setAccounts([]); setError(`Expense accounts could not be loaded: ${errMsg(e)}`); });
   }, [test.company, r.admin]);
   useEffect(() => {
     if (vq.length < 2 || !test.company) { setVendors([]); return undefined; }
@@ -99,13 +103,15 @@ export default function SettingsTab({ meta, reloadMeta }) {
                   {test.vendor ? <div style={{ fontSize: '0.8rem' }}><b>{test.vendor.name}</b> <button style={{ ...S.ghost, padding: '1px 6px' }} onClick={() => setTest({ ...test, vendor: null })}>change</button></div> : <>
                     <input style={{ ...S.input, width: '100%' }} placeholder="Search vendor" value={vq} onChange={e => setVq(e.target.value)} />
                     {vendors.length > 0 && <div style={{ border: '1px solid #DFE7E3', borderRadius: 6, maxHeight: 140, overflow: 'auto', position: 'absolute', background: '#fff', zIndex: 5, width: 300 }}>
-                      {vendors.map(v => <div key={v.id} style={{ padding: '4px 8px', fontSize: '0.75rem', cursor: 'pointer' }} onClick={() => { setTest({ ...test, vendor: v }); setVq(''); setVendors([]); }}>{v.name}</div>)}
+                      {/* preventDefault: this list sits inside a <label>, which would pass the click on to the
+                          "change" button that replaces it and clear the vendor straight away */}
+                      {vendors.map(v => <div key={v.id} style={{ padding: '4px 8px', fontSize: '0.75rem', cursor: 'pointer' }} onClick={e => { e.preventDefault(); setTest({ ...test, vendor: v }); setVq(''); setVendors([]); }}>{v.name}{v.gstin ? <span style={S.small}> · {v.gstin}</span> : null}{v.status === 'inactive' ? <span style={S.small}> · inactive</span> : null}</div>)}
                     </div>}
                   </>}
                 </Field>
                 <Field label="Expense account for the test bill">
                   <select style={{ ...S.select, width: '100%', maxWidth: 'none' }} value={test.account_id} onChange={e => setTest({ ...test, account_id: e.target.value })}>
-                    <option value="">—</option>{accounts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+                    <option value="">{accounts === null ? '— loading —' : `— choose (${accounts.length} expense accounts) —`}</option>{(accounts || []).map(a => <option key={a.id} value={a.id}>{a.name}{a.code ? ` (${a.code})` : ''}</option>)}
                   </select>
                 </Field>
                 <button style={S.primary} disabled={!!busy || !test.vendor || !test.account_id} onClick={() => {

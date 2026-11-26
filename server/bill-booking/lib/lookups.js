@@ -25,7 +25,13 @@ function create({ store, zc, readSynced }) {
     }
   }
 
-  const accounts = org => cached(org, 'accounts', 12 * H, () => zc.chartOfAccounts(org));
+  // 'coa_full': the complete chart of accounts. The older 'accounts' entry was cut short (first 10 overlapping
+  // pages), so it is dropped instead of being used for another 12 hours.
+  async function accounts(org) {
+    const doc = await store.zohoCache(org);
+    if (doc.accounts) delete doc.accounts;
+    return cached(org, 'coa_full', 12 * H, () => zc.chartOfAccounts(org));
+  }
   const taxes    = org => cached(org, 'taxes', 12 * H, () => zc.taxes(org));
   const branches = org => cached(org, 'branches', 12 * H, () => zc.branches(org));
   const projects = org => cached(org, 'projects', 12 * H, () => zc.projects(org));
