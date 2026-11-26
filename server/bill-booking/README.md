@@ -55,7 +55,7 @@ Zoho bills carry their own "Category" and "Vendor Category" fields. When a bill 
 
 Zoho's published Bills API documents no draft option; a created bill is normally Open. Zoho support advises sending `is_draft: true`, which this module does. Three safeguards make sure only drafts are created:
 
-1. **Draft test.** In Settings, an administrator runs a draft test. It creates a ₹1 bill, reads its status and deletes it. Drafting stays locked for that organisation until the test passes.
+1. **Draft test.** In Settings, an administrator runs a draft test. It creates a ₹1 bill, reads its status and deletes it. Drafting stays locked for that organisation until the test passes. Zoho refuses a GST-registered vendor's line without a tax, a tax exemption or reverse charge (code 110802), so the test bill copies the GST setting, branch and places of supply of the vendor's latest Zoho bill. A registered vendor with no bill in Zoho cannot be used for the test; an unregistered one needs no GST.
 2. **Lock on a non-draft result.** If Zoho ever returns a bill that is not a draft, the bill is flagged "Not a draft in Zoho". Drafting locks again for that organisation and automatic drafts are switched off.
 3. **No status changes.** The module never calls `/status/open`, `/submit` or `/approve`.
 

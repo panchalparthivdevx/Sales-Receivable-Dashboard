@@ -712,6 +712,32 @@ function create({ store, zc, lookups, files, extractFn = EX.extract, log = conso
    * Draft test for one organisation (Settings, by an admin): creates a ₹1 draft bill for the chosen
    * vendor and account, reads its status, deletes it. Verified only if Zoho kept it as a draft.
    */
+  /**
+   * What the draft test bill copies from the vendor's latest bill in Zoho. Zoho refuses a GST-registered vendor's
+   * line without a tax, a tax exemption or reverse charge ("Specify either a Tax or Tax Exemption or Reverse Charge",
+   * code 110802), and the tax has to fit the places of supply — so the line's GST setting, the branch and the places
+   * of supply are all taken from one real bill. → { ref, bill, line, label } | null (no bill in Zoho)
+   */
+  async function testBillBasis(co, vendorId) {
+    const h = await lookups.vendorHistory({ companyId: co.id, org: co.org_id, vendorId, days: 730, maxBills: 1 });
+    let ref = h.bills[0];
+    if (!ref) return null;
+    // details cached before the exemption was kept: read that one bill again
+    if ((ref.lines || []).some(l => !('tax_exemption_id' in l))) { try { ref = (await zc.billDetail(co.org_id, ref.bill_id)) || ref; } catch (_) { /* use the cached copy */ } }
+    const src = (ref.lines || []).find(l => l.tax_id || l.tax_exemption_id || l.reverse_charge_tax_id) || {};
+    const bill = {}, line = {};
+    if (ref.branch_id) bill.branch_id = ref.branch_id;
+    if (ref.source_of_supply) bill.source_of_supply = ref.source_of_supply;
+    if (ref.destination_of_supply) bill.destination_of_supply = ref.destination_of_supply;
+    if (ref.is_reverse_charge_applied) bill.is_reverse_charge_applied = true;
+    if (src.tax_id) line.tax_id = src.tax_id;
+    else if (src.tax_exemption_id) line.tax_exemption_id = src.tax_exemption_id;
+    if (src.reverse_charge_tax_id) line.reverse_charge_tax_id = src.reverse_charge_tax_id;
+    const gst = src.tax_id ? (src.tax_name || 'its GST') : src.tax_exemption_id ? 'its tax exemption' : src.reverse_charge_tax_id ? 'reverse charge' : 'no GST';
+    const places = ref.source_of_supply && ref.destination_of_supply ? `, ${ref.source_of_supply} → ${ref.destination_of_supply}` : '';
+    return { ref, bill, line, label: `${gst}${places}${ref.branch_name ? `, branch ${ref.branch_name}` : ''} as on bill ${ref.bill_number} of ${ref.date}` };
+  }
+
   async function draftTest(companyId, { vendor_id, account_id }, user) {
     const by = user.name || user.username;
     const cfg = await config();
@@ -719,22 +745,33 @@ function create({ store, zc, lookups, files, extractFn = EX.extract, log = conso
     if (!co) throw Object.assign(new Error('Unknown company'), { status: 400 });
     if (!vendor_id || !account_id) throw Object.assign(new Error('Choose a vendor and an expense account for the test bill'), { status: 400 });
     const org = co.org_id;
+    let basis = null;
+    try { basis = await testBillBasis(co, vendor_id); } catch (e) { throw Object.assign(new Error(`The vendor's bills could not be read from Zoho — ${zc.errText(e)}`), { status: 502 }); }
+    if (!basis) {
+      let vendor = null;
+      try { vendor = M.vendorIndex(await lookups.vendors(co.id)).find(v => v.id === vendor_id) || null; } catch (_) { /* treated as registered */ }
+      if (!vendor || !['business_none', 'consumer'].includes(vendor.gst_treatment)) {
+        throw Object.assign(new Error(`${vendor?.name || 'This vendor'} has no bill in Zoho yet. The test bill copies the GST, branch and places of supply of the vendor's latest Zoho bill — choose a vendor that already has bills in Zoho`), { status: 400 });
+      }
+    }
     const number = `BB-DRAFT-TEST-${Date.now().toString(36).toUpperCase()}`;
+    const used = basis ? ` (the test bill used ${basis.label})` : ' (unregistered vendor: no GST on the test bill)';
     let created, deleted = false, detail;
     try {
       created = await zc.createBill(org, {
         vendor_id, bill_number: number, date: new Date().toISOString().slice(0, 10), is_draft: true,
         notes: 'Bill Collection & Booking — draft capability test. Deleted automatically.',
-        line_items: [{ account_id, description: 'Draft capability test (deleted automatically)', rate: 1, quantity: 1 }],
+        ...(basis?.bill || {}),
+        line_items: [{ account_id, description: 'Draft capability test (deleted automatically)', rate: 1, quantity: 1, ...(basis?.line || {}) }],
       });
-    } catch (e) { throw Object.assign(new Error(`Test bill not created — ${zc.errText(e)}`), { status: 502 }); }
+    } catch (e) { throw Object.assign(new Error(`Test bill not created — ${zc.errText(e)}${used}`), { status: 502 }); }
     try { await zc.deleteBill(org, created.bill_id); deleted = true; } catch (e) { detail = `could not delete it (${zc.errText(e)}) — delete bill ${number} in Zoho by hand`; }
     const verified = ACTIVE_ZOHO.has(created.status);
     const result = {
       verified, status: created.status, checked_at: now(), by, bill_number: number, deleted,
       detail: verified
-        ? `Zoho kept the test bill as "${created.status}"${deleted ? ' and it was deleted again' : `; ${detail}`}`
-        : `Zoho created the test bill as "${created.status}" (not a draft)${deleted ? ' — it was deleted again' : `; ${detail}`}. Drafts cannot be created this way: see the note in Settings.`,
+        ? `Zoho kept the test bill as "${created.status}"${deleted ? ' and it was deleted again' : `; ${detail}`}${used}`
+        : `Zoho created the test bill as "${created.status}" (not a draft)${deleted ? ' — it was deleted again' : `; ${detail}`}${used}. Drafts cannot be created this way: see the note in Settings.`,
     };
     await store.tx(async t => {
       const c = C.merge(t.doc('bb_config'));

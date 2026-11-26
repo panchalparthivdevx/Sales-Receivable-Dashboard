@@ -130,7 +130,7 @@ function create(deps = {}) {
         tax_id: l.tax_id || '', tax_name: l.tax_name || '', tax_percentage: l.tax_percentage ?? null,
         hsn_or_sac: l.hsn_or_sac || '', amount: l.item_total ?? l.bcy_rate ?? 0,
         project_id: l.project_id || '', itc_eligibility: l.itc_eligibility || '',
-        reverse_charge_tax_id: l.reverse_charge_tax_id || '',
+        reverse_charge_tax_id: l.reverse_charge_tax_id || '', tax_exemption_id: l.tax_exemption_id || '',
       })),
     };
   }
