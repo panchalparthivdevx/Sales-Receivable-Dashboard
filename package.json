@@ -11,6 +11,7 @@
         "test:fin-reporting": "node --test --no-warnings --test-concurrency=1 --test-reporter=spec \"server/fin-reporting/tests/*.test.js\"",
         "test:compliance2": "node --test --no-warnings --test-concurrency=1 --test-reporter=spec \"server/compliance2/tests/*.test.js\"",
         "test:tds26as": "node --test --no-warnings --test-concurrency=1 --test-reporter=spec \"server/tds26as/tests/*.test.js\"",
+        "test:cashflow": "node --test --no-warnings --test-concurrency=1 --test-reporter=spec \"server/cashflow/tests/*.test.js\"",
         "test:recurring": "node --test --no-warnings --test-reporter=spec \"server/tests/recurring-expense.test.js\" \"server/tests/recurring-comparison.test.js\""
     },
     "devDependencies": {

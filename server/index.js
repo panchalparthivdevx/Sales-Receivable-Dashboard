@@ -125,6 +125,7 @@ const PUBLIC_API = new Set([
   'GET /api/cron/gstr2b',
   'GET /api/cron/gstr2b-recheck',
   'GET /api/cron/bill-booking',
+  'GET /api/cron/cashflow',
   // Mailbox sign-in returns here from Microsoft / Google; it checks its own signed state
   'GET /api/bill-booking/oauth/callback',
 ]);
@@ -16351,6 +16352,21 @@ tds26as.init({
 });
 app.use('/api/tds26as', tds26as);
 
+// ─── Management Cash Flow (Phase 1: Brokerage, Rent, Electricity outflows + monthly overview) ─
+// Self-contained module — see server/cashflow/README.md. It only READS from Zoho Books: bill / payment / vendor lists from each
+// company's central sync data, bill details through its own paced reader. Payment requests raised in the Finance Portal count
+// as payment initiations.
+const cashflow = require('./cashflow');
+cashflow.init({
+  readSynced: async (company, entity) => {
+    if (company === 'devx') return _devxSyncEngine.readSyncedData(entity);
+    return _companyEngines[company] ? _companyEngines[company].readSyncedData(entity) : null;
+  },
+  readPortal: () => readPortal(),
+});
+app.use('/api/cashflow', cashflow);
+app.get('/api/cron/cashflow', cronAuth, cashflow.cron);
+
 // ─── Serve React build (must be after all API routes) ─────────────────────────
 
 const buildPath = path.join(__dirname, '..', 'client', 'build');
@@ -16416,6 +16432,8 @@ db.initDB()
     setTimeout(() => gstr2b.startScheduler(), 170000);
     // 26AS Reconciliation: a daily "changes" sync of the current financial year for entities whose first load was done (Settings → Schedule)
     setTimeout(() => tds26as.startScheduler(), 180000);
+    // Management Cash Flow: reads the bill details its three categories need, every 30 minutes (only bills changed in Zoho)
+    setTimeout(() => cashflow.startScheduler(), 200000);
     // MSME companies: own scheduler (a few minutes after DevX) and own first full sync. A failure
     // there is logged and stays in that company's sync status — DevX is not affected.
     for (const [co, eng] of Object.entries(_companyEngines)) {

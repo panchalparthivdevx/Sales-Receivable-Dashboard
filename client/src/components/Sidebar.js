@@ -4,7 +4,7 @@ import {
   Landmark, Users, ShieldCheck, BarChart3,
   ChevronLeft, ChevronRight, ChevronDown, GitMerge, ClipboardList,
   Settings, LogOut, CreditCard, TrendingDown, Inbox, Activity, BookOpen, Target, BadgeCheck, RefreshCw, Layers, CheckSquare,
-  ScanText, GitCompareArrows, FileCheck2, Building2, Repeat,
+  ScanText, GitCompareArrows, FileCheck2, Building2, Repeat, Wallet,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 
@@ -16,6 +16,8 @@ const NAV = [
   { id: 'fpa-step15h',  label: '📋 Mgmt Inputs',          icon: ClipboardList, live: true,  module: 'fpa',  sub: true },
   null,
   { id: 'finance-overview', label: 'Finance Overview',     icon: BarChart3,    live: true,  module: 'sales'       },
+  // grantOnly: shown only to admins and to users ticked for it in User Settings
+  { id: 'cashflow',     label: 'Management Cash Flow',  icon: Wallet,       live: true,  module: 'cashflow', grantOnly: true },
   { id: 'sales',        label: 'Sales & Receivables',  icon: TrendingUp,   live: true,  module: 'sales'       },
   { id: 'purchase',     label: 'Purchase & Payables',   icon: ShoppingCart, live: true,  module: 'purchase'        },
   // section: shown only to users with that tick under the module (here: Purchase & Payables → Month-wise Rent Report)

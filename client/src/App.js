@@ -32,6 +32,7 @@ import Compliance2 from './pages/Compliance2';
 import BillBooking from './pages/BillBooking';
 import Gstr2bReco from './pages/Gstr2bReco';
 import Tds26asReco from './pages/Tds26asReco';
+import CashFlow from './pages/CashFlow';
 
 class ErrorBoundary extends React.Component {
   constructor(props) { super(props); this.state = { error: null }; }
@@ -89,6 +90,8 @@ function AppInner() {
           {page === 'fpa-step15g'  && hasModule('fpa')           && <Step15GWorkspace />}
           {page === 'fpa-step15h'  && hasModule('fpa')           && <Step15HWorkspace />}
           {page === 'finance-overview' && (hasModule('sales') || hasModule('purchase')) && <FinanceOverview />}
+          {/* Granted explicitly (the server checks the same) */}
+          {page === 'cashflow' && (user.role === 'admin' || user.permissions?.cashflow?.enabled === true) && <CashFlow />}
           {page === 'sales'        && hasModule('sales')        && <Dashboard />}
           {page === 'purchase'     && hasModule('purchase')     && <PurchaseDashboard />}
           {/* Same tick as before the report moved out of Purchase & Payables: Month-wise Rent Report */}

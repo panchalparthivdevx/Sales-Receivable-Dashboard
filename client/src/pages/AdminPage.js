@@ -89,6 +89,14 @@ const MODULES = {
       t26_config:  'Configure (entities, PAN, Zoho organisation, TDS Receivable ledgers, settings)',
     },
   },
+  cashflow: {
+    label: 'Management Cash Flow',
+    sections: {
+      cf_plan:     'Plan (budgets and commitments, Pay On date and amount, instalments, links to bills, client names)',
+      cf_payments: 'Payments (record payment initiation and its status, payment advice slips)',
+      cf_config:   'Configure (category accounts and rules, refresh from Zoho)',
+    },
+  },
   budget:       { label: 'Budget vs. Actual',          sections: {} },
   portal:       { label: 'Finance Portal',             sections: {} },
   activity:     { label: 'Activity Tracker',           sections: {} },
@@ -104,7 +112,7 @@ function emptyPerms() {
 }
 
 // Edit rights (not just viewing): ticked one by one — never by "All" or a new user's default access
-const GRANT_ONLY = new Set(['vpr_purchase_team', 'vpr_accounts_team', 'bb_review', 'bb_create_draft', 'bb_config', 'g2b_prepare', 'g2b_review', 'g2b_approve', 'g2b_config', 'fs_import', 'fs_adjust', 'fs_inputs', 't26_prepare', 't26_review', 't26_config']);
+const GRANT_ONLY = new Set(['vpr_purchase_team', 'vpr_accounts_team', 'bb_review', 'bb_create_draft', 'bb_config', 'g2b_prepare', 'g2b_review', 'g2b_approve', 'g2b_config', 'fs_import', 'fs_adjust', 'fs_inputs', 't26_prepare', 't26_review', 't26_config', 'cf_plan', 'cf_payments', 'cf_config']);
 
 function fullPerms() {
   const p = {};

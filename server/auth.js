@@ -106,6 +106,15 @@ const MODULES = {
       t26_config:  'Configure (entities, PAN, Zoho organisation, TDS Receivable ledgers, settings)',
     },
   },
+  // Management Cash Flow: seen only when ticked; each right ticked one by one (see server/cashflow/index.js `rights`)
+  cashflow:    {
+    label: 'Management Cash Flow',
+    sections: {
+      cf_plan:     'Plan (budgets and commitments, Pay On date and amount, instalments, links to bills, client names)',
+      cf_payments: 'Payments (record payment initiation and its status, payment advice slips)',
+      cf_config:   'Configure (category accounts and rules, refresh from Zoho)',
+    },
+  },
   budget:      { label: 'Budget vs. Actual', sections: {} },
   portal:      { label: 'Finance Portal', sections: {} },
   activity:    { label: 'Activity Tracker', sections: {} },
