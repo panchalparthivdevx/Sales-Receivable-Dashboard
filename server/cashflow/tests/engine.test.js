@@ -210,6 +210,15 @@ test('an advance linked to a budget counts against it until it is applied to a b
   assert.equal(v2.rows.parts[0].at.adv, 25000); assert.equal(v2.rows.parts[0].at.final_out, 75000);
 });
 
+test('a rounding leftover (₹10 or less) counts as paid: not carried into the next month, nothing to initiate — still in the outstanding total', () => {
+  const b = bill({ id: 'rd', date: '2026-10-01', due: '2026-10-10', vid: 'v', lines: [['a_rent', 59335]], pays: [{ date: '2026-10-08', amt: 59333 }] });
+  const m = model({ bills: [b] });
+  const oct = view(m, { month: '2026-10', categories: ['rent'] }).rows.parts[0];
+  assert.equal(oct.at.final_out, 2); assert.equal(oct.at.state, 'paid'); assert.equal(oct.at.to_initiate, 0); assert.equal(oct.at.overdue, null);
+  assert.equal(view(m, { month: '2026-11', categories: ['rent'] }).rows.parts.length, 0, 'not an opening due of November');
+  assert.equal(view(m, { month: '2026-10', categories: ['rent'] }).summary.rent.final_out, 2);
+});
+
 test('rent period: from the bill wording, but old template text far from the bill month gives way to the bill month', () => {
   const a = bill({ id: 'p1', date: '2026-11-01', vid: 'x', lines: [['a_rent', 1000]], desc: 'Noida rent for the month of Nov-26' });
   const b = bill({ id: 'p2', date: '2026-11-01', vid: 'y', lines: [['a_rent', 1000]], desc: 'House Rent Baroda - 1003 Rate: 31.70 Period: Aug-22' });

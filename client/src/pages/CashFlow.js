@@ -129,8 +129,8 @@ export default function CashFlow() {
       </div>
 
       <Msg error={error} ok={ok} onClose={() => { setError(''); setOk(''); }} />
-      {view && !view.coa_ready && <div style={S.notice}>Zoho has not been read yet for {(view.coa_missing || []).join(', ') || 'a company'}{rights.config ? ' — press Refresh from Zoho.' : ' — ask an administrator to refresh from Zoho.'} Until then its bills are not in these figures.</div>}
-      {view && waiting > 0 && <div style={S.notice}>{waiting} bill(s) are still being read from Zoho; the figures fill in as they arrive{meta.vercel ? ' (every 15 minutes, or press Refresh from Zoho)' : ''}.</div>}
+      {view && !view.coa_ready && <div style={S.notice}>Zoho has not been read yet for {(view.coa_missing || []).join(', ') || 'a company'}, so its bills are not in these figures yet. {meta.vercel ? 'Reading starts by itself every 15 minutes; the first full read of the year takes a few hours.' : 'Reading starts by itself every 30 minutes.'}{rights.config ? ' Press Refresh from Zoho to start now.' : ''}</div>}
+      {view && view.coa_ready && waiting > 0 && <div style={S.notice}>{waiting} bill(s) are still being read from Zoho; the figures fill in as they arrive{meta.vercel ? ' (every 15 minutes, or press Refresh from Zoho)' : ''}.</div>}
 
       <div style={S.tabs}>{TABS.map(([k, l]) => <button key={k} type="button" style={S.tab(tab === k)} onClick={() => { setTab(k); if (k === 'activity') cf.audit(filters.month).then(setAudit).catch(e => setError(errMsg(e))); }}>{l}</button>)}</div>
 

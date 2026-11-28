@@ -93,4 +93,7 @@ test('electricity connection: consumer number in the text, else the part of the 
   assert.equal(CL.connectionOf('Madhya Gujarat Vij Company Limited - Baroda 3-5216 (6th floor)', '').connection, 'Baroda 3-5216 (6th floor)');
   assert.equal(CL.connectionOf('Torrent Power', 'Electricity bill Service No: 300012345678 for Oct').meter, '300012345678');
   assert.equal(CL.connectionOf('Binori Torrent power -109', '').connection, '109');
+  // real case (28 Nov 2026): the "ca" in "Capital one" is not a consumer-account number
+  assert.equal(CL.connectionOf('Torrent Power_ Capital one', 'Electricity charges Capital one Nov-26').meter, '');
+  assert.equal(CL.connectionOf('Torrent Power', 'CA No: 60012345 electricity').meter, '60012345');
 });

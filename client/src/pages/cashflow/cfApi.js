@@ -57,7 +57,7 @@ export const STATE = {
   initiated:    { label: 'Initiated — pending',   tone: 'blue' },
   part_paid:    { label: 'Part paid',             tone: 'amber' },
   to_initiate:  { label: 'To initiate',           tone: 'grey' },
-  unconfirmed:  { label: 'Initiation unconfirmed', tone: 'red' },
+  unconfirmed:  { label: 'Initiation unconfirmed', tone: 'amber' },
   not_received: { label: 'Not received',          tone: 'grey' },
 };
 export const LINK_LABEL = { team: 'linked by team', auto: 'linked automatically', none: 'no budget', missing: 'budget removed' };

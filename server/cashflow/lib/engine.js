@@ -28,6 +28,7 @@ const C = require('./classify');
 
 const r2 = C.r2;
 const EPS = 0.5;                                  // ₹ — amounts below this are treated as nil
+const ROUNDING = 10;                              // ₹ — a bill with at most this left (Zoho rounding) counts as paid: not carried, nothing to initiate
 const DEAD = new Set(['failed', 'cancelled']);
 const sum = (a, f) => a.reduce((s, x) => s + (f ? f(x) : x), 0);
 const normName = s => String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
@@ -217,12 +218,12 @@ function partAt(p, asOf, refDay) {
   const scheduled = r2(sum(sched, s => s.amount));
   const covered = r2(paid + credits);
   const schedUnpaid = r2(Math.max(0, scheduled - covered));
-  const toInitiate = r2(Math.max(0, Math.min(schedUnpaid, Math.max(0, finalOut)) - pending));
+  const toInitiate = finalOut <= ROUNDING ? 0 : r2(Math.max(0, Math.min(schedUnpaid, Math.max(0, finalOut)) - pending));
   // the first instalment not covered by what is paid or initiated; overdue when its Pay On date has passed
   let cum = 0, next = null, overdue = null;
   for (const s of sched) {
     cum = r2(cum + s.amount);
-    if (cum > covered + pending + EPS) {
+    if (finalOut > ROUNDING && cum > covered + pending + EPS) {
       if (!next) next = s;
       if (s.pay_on && s.pay_on < refDay && !overdue) overdue = { ...s, days: M.daysBetween(s.pay_on, refDay), short: r2(Math.min(s.amount, cum - covered - pending)) };
     }
@@ -230,7 +231,7 @@ function partAt(p, asOf, refDay) {
   const hasInitData = p.initiations.length > 0;
   let state;
   if (!received) state = 'not_received';
-  else if (finalOut <= EPS) state = 'paid';
+  else if (finalOut <= ROUNDING) state = 'paid';
   else if (pending > EPS) state = 'initiated';
   else if (overdue && !hasInitData) state = 'unconfirmed';
   else if (paid > EPS) state = 'part_paid';
@@ -287,7 +288,7 @@ function monthView(models, { month, mode = 'current', today = M.todayIST(), cate
       if (!plannedHere) {
         if (!(p.planned_month < month && p.bill_date < start)) continue;
         const open = partAt(p, dayBefore, dayBefore);
-        if (open.final_out <= EPS) continue;
+        if (open.final_out <= ROUNDING) continue;
         carried = true;
       }
       const paidThisMonth = r2(sum(p.pays.filter(x => x.date >= start && x.date <= end && x.eff <= asOf), x => x.amt));

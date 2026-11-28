@@ -164,7 +164,8 @@ function periodOf(text) {
   return null;
 }
 
-const NUM_RE = /\b(?:consumer|service|meter|account|ca|connection|k\s*no)\.?\s*(?:no\.?|number|#|id)?\s*[:\-–]?\s*([A-Z0-9][A-Z0-9/-]{3,})/i;
+// the keyword is a whole word ("CA No 123", not the "ca" in "Capital One") and a number follows (letters alone are not a meter)
+const NUM_RE = /\b(?:consumer|service|meter|account|ca|connection|k\s*no)\b\.?\s*(?:no\.?|number|#|id)?\s*[:\-–]?\s*([A-Z0-9/-]*\d[A-Z0-9/-]{2,})/i;
 /** Electricity connection: the consumer / meter number in the text, else the part of the vendor name after the provider */
 function connectionOf(vendorName, text) {
   const n = String(text || '').match(NUM_RE);
